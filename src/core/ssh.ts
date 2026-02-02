@@ -55,11 +55,36 @@ export async function pushArchive(
     log.info("Syncing files...");
     await Bun.$`ssh ${host} "mkdir -p ${remoteClaudeDir}"`;
 
-    // Handle MCP config separately - it goes to ~/.claude.json, not inside ~/.claude/
+    // Handle MCP config separately - merge mcpServers into ~/.claude.json
     const hasMcpConfig = await Bun.$`ssh ${host} "test -f ${remoteTempDir}/.mcp-config.json && echo yes || echo no"`.quiet();
     if (hasMcpConfig.stdout.toString().trim() === "yes") {
-      await Bun.$`ssh ${host} "mv ${remoteTempDir}/.mcp-config.json ${remoteMcpPath}"`;
-      log.dim(`  Copied MCP config to ${remoteMcpPath}`);
+      // Read new mcpServers from extracted archive
+      const newMcpJson = await Bun.$`ssh ${host} "cat ${remoteTempDir}/.mcp-config.json"`.quiet();
+      const newMcp = JSON.parse(newMcpJson.stdout.toString());
+
+      // Read existing remote config (if any)
+      const existingJson = await Bun.$`ssh ${host} "cat ${remoteMcpPath} 2>/dev/null || echo '{}'"`.quiet();
+      const existing = JSON.parse(existingJson.stdout.toString());
+
+      // Merge mcpServers (local wins on conflicts)
+      const merged = {
+        ...existing,
+        mcpServers: {
+          ...(existing.mcpServers ?? {}),
+          ...newMcp.mcpServers,
+        },
+      };
+
+      // Write back via base64 (safe for any content)
+      const mergedJson = JSON.stringify(merged, null, 2);
+      const b64 = Buffer.from(mergedJson).toString("base64");
+      await Bun.$`ssh ${host} "echo ${b64} | base64 -d > ${remoteMcpPath}"`;
+
+      const serverCount = Object.keys(newMcp.mcpServers ?? {}).length;
+      log.dim(`  Merged ${serverCount} MCP server(s) into ${remoteMcpPath}`);
+
+      // Remove from temp so it doesn't get bulk-copied
+      await Bun.$`ssh ${host} "rm -f ${remoteTempDir}/.mcp-config.json"`;
     }
 
     // Remove manifest before bulk copy

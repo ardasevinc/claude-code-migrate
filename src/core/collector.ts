@@ -9,6 +9,7 @@ import {
 } from "../config/schema.ts";
 import type { FileEntry, CollectorOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { extractMcpServers } from "./mcp.ts";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -178,11 +179,21 @@ export async function collectFiles(options: CollectorOptions): Promise<FileEntry
   }
 
   if (options.includeMcpConfig && (await exists(MCP_CONFIG_PATH))) {
-    entries.push({
-      sourcePath: MCP_CONFIG_PATH,
-      relativePath: ".mcp-config.json",
-      isSymlink: false,
-    });
+    const { mcpServers, warnings } = await extractMcpServers(MCP_CONFIG_PATH);
+
+    if (warnings.length > 0) {
+      log.warn("MCP servers with paths that may not work on remote:");
+      for (const w of warnings) log.dim(`  ${w}`);
+    }
+
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      entries.push({
+        sourcePath: MCP_CONFIG_PATH,
+        relativePath: ".mcp-config.json",
+        isSymlink: false,
+        mcpServersOnly: JSON.stringify({ mcpServers }, null, 2),
+      });
+    }
   }
 
   const filtered = entries.filter((entry) => {

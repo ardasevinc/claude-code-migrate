@@ -25,7 +25,13 @@ export async function createArchive(
       const destDir = dirname(destPath);
 
       await mkdir(destDir, { recursive: true });
-      await copyFile(file.sourcePath, destPath);
+
+      if (file.mcpServersOnly) {
+        // Write the extracted mcpServers JSON instead of copying source
+        await Bun.write(destPath, file.mcpServersOnly);
+      } else {
+        await copyFile(file.sourcePath, destPath);
+      }
     }
 
     const manifest: Manifest = {

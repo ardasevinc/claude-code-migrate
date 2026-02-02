@@ -18,6 +18,7 @@ export interface FileEntry {
   relativePath: string;
   isSymlink: boolean;
   originalSymlinkTarget?: string;
+  mcpServersOnly?: string; // JSON string of { mcpServers: ... } - written instead of sourcePath
 }
 
 export interface Manifest {
