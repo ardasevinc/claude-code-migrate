@@ -50,7 +50,8 @@ export async function createArchive(
 
     await Bun.$`mkdir -p ${archiveDir}`;
 
-    await Bun.$`tar -czf ${outputPath} -C ${tempDir} .`;
+    // COPYFILE_DISABLE=1 prevents macOS extended attributes from being included
+    await Bun.$`COPYFILE_DISABLE=1 tar -czf ${outputPath} -C ${tempDir} .`;
 
     log.success(`Created archive: ${outputPath}`);
     return outputPath;

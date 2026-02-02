@@ -48,7 +48,7 @@ ccm push --skip-version-check
 
 **Optional (via config):**
 - `~/.claude/settings.local.json`
-- `~/.claude.json` (MCP config)
+- `~/.claude.json` (MCP servers only - merged into remote's existing config)
 
 **Never migrated:**
 - `plugins/`, `projects/`, `history.jsonl`, `cache/`, `todos/`, etc.
@@ -76,7 +76,13 @@ path = "~/backups/claude"
 1. Collects files from `~/.claude/` (resolves symlinks, follows symlink-to-directory)
 2. Creates tar.gz archive with manifest
 3. For push: uploads via scp, extracts, bulk-copies to destination
-4. MCP config (`~/.claude.json`) goes to home dir, not inside `.claude/`
+4. MCP servers from `~/.claude.json` are **merged** into remote's existing config (local wins on conflicts, other keys preserved)
+
+### MCP server migration
+
+Only the `mcpServers` object is extracted from your local `~/.claude.json` - not the entire file. On the remote, these servers are merged into the existing config rather than overwriting it.
+
+Servers with paths (absolute, relative, or `~/`) will trigger a warning since they may not exist on the target machine.
 
 ## License
 
