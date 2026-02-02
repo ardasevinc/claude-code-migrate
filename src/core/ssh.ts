@@ -1,11 +1,12 @@
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { log } from "../utils/logger.ts";
 import type { FileEntry } from "../types/index.ts";
 
-function expandPath(path: string, remoteHome?: string): string {
+function expandPath(path: string, remoteHome: string): string {
   if (path.startsWith("~/")) {
-    return path.replace("~", remoteHome ?? homedir());
+    // If remoteHome is "~", keep path as-is (shell will expand it)
+    if (remoteHome === "~") return path;
+    return path.replace("~", remoteHome);
   }
   return path;
 }
@@ -21,8 +22,10 @@ export async function testConnection(host: string): Promise<boolean> {
 
 export async function getRemoteHome(host: string): Promise<string> {
   try {
-    const result = await Bun.$`ssh ${host} "echo $HOME"`.quiet();
-    return result.stdout.toString().trim();
+    // Single quotes prevent local $HOME expansion
+    const result = await Bun.$`ssh ${host} 'echo $HOME'`.quiet();
+    const home = result.stdout.toString().trim();
+    return home || "~";
   } catch {
     return "~";
   }
