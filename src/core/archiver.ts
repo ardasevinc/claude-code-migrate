@@ -56,7 +56,7 @@ export async function createArchive(
     log.success(`Created archive: ${outputPath}`);
     return outputPath;
   } finally {
-    await Bun.$`rm -rf ${tempDir}`.quiet();
+    await Bun.$`rm -rf ${tempDir}`.quiet().nothrow();
   }
 }
 

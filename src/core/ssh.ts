@@ -96,14 +96,13 @@ export async function pushArchive(
     // Bulk copy everything else - this replaces N SSH calls with 1
     await Bun.$`ssh ${host} "cp -r ${remoteTempDir}/. ${remoteClaudeDir}/"`;
 
-    log.info("Cleaning up...");
-    await Bun.$`ssh ${host} "rm -rf ${remoteTempArchive} ${remoteTempDir}"`.quiet();
-
     log.success(`Successfully pushed config to ${host}:${remotePath}`);
     return true;
   } catch (error) {
     log.error(`Push failed: ${error}`);
     return false;
+  } finally {
+    await Bun.$`ssh ${host} "rm -rf ${remoteTempArchive} ${remoteTempDir}"`.quiet().nothrow();
   }
 }
 
