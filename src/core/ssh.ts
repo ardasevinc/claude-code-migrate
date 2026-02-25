@@ -17,6 +17,37 @@ function runRemote(host: string, command: string, quiet = false) {
   return proc;
 }
 
+export function parseRemoteHome(rawStdout: string): string {
+  const home = rawStdout.trim();
+  if (!home || home === "~") {
+    throw new Error("Could not resolve remote $HOME");
+  }
+
+  if (!home.startsWith("/")) {
+    throw new Error(`Unexpected remote $HOME value: ${home}`);
+  }
+
+  return home;
+}
+
+export function buildClaudeSharedSkillSymlinkCommand(
+  claudeSkillsDir: string,
+  agentsSkillsDir: string,
+): string {
+  return [
+    `mkdir -p ${shellQuote(claudeSkillsDir)}`,
+    `if [ -d ${shellQuote(agentsSkillsDir)} ]; then`,
+    `for skill in ${shellQuote(agentsSkillsDir)}/*; do`,
+    `[ -d "$skill" ] || continue`,
+    'name=$(basename "$skill")',
+    `target=${shellQuote(claudeSkillsDir)}/"$name"`,
+    'rm -rf "$target"',
+    `ln -s ${shellQuote(agentsSkillsDir)}/"$name" "$target"`,
+    "done",
+    "fi",
+  ].join("; ");
+}
+
 async function remotePathExists(host: string, path: string): Promise<boolean> {
   const result = await runRemote(host, `test -e ${shellQuote(path)} && echo yes || echo no`, true);
 
@@ -76,17 +107,7 @@ async function recreateClaudeSharedSkillSymlinks(
 ): Promise<void> {
   const claudeSkillsDir = join(remoteClaudeDir, "skills");
   const agentsSkillsDir = join(remoteAgentsDir, "skills");
-
-  const command = [
-    `mkdir -p ${shellQuote(claudeSkillsDir)}`,
-    `if [ -d ${shellQuote(agentsSkillsDir)} ]; then`,
-    `for skill in ${shellQuote(agentsSkillsDir)}/*; do`,
-    `[ -d "$skill" ] || continue`,
-    'name=$(basename "$skill")',
-    `ln -sfn ${shellQuote(agentsSkillsDir)}/"$name" ${shellQuote(claudeSkillsDir)}/"$name"`,
-    "done",
-    "fi",
-  ].join("; ");
+  const command = buildClaudeSharedSkillSymlinkCommand(claudeSkillsDir, agentsSkillsDir);
 
   await runRemote(host, command);
 }
@@ -101,27 +122,21 @@ export async function testConnection(host: string): Promise<boolean> {
 }
 
 export async function getRemoteHome(host: string): Promise<string> {
-  try {
-    const result = await Bun.$`ssh ${host} 'echo $HOME'`.quiet();
-    const home = result.stdout.toString().trim();
-    return home || "~";
-  } catch {
-    return "~";
-  }
+  const result = await Bun.$`ssh ${host} 'echo $HOME'`.quiet();
+  return parseRemoteHome(result.stdout.toString());
 }
 
 export async function pushArchive(archivePath: string, host: string): Promise<boolean> {
-  const remoteHome = await getRemoteHome(host);
-
-  const remoteClaudeDir = join(remoteHome, ".claude");
-  const remoteCodexDir = join(remoteHome, ".codex");
-  const remoteAgentsDir = join(remoteHome, ".agents");
-  const remoteMcpPath = join(remoteHome, ".claude.json");
-
   const remoteTempArchive = `/tmp/ccm-archive-${Date.now()}.tar.gz`;
   const remoteTempDir = `/tmp/ccm-extract-${Date.now()}`;
 
   try {
+    const remoteHome = await getRemoteHome(host);
+    const remoteClaudeDir = join(remoteHome, ".claude");
+    const remoteCodexDir = join(remoteHome, ".codex");
+    const remoteAgentsDir = join(remoteHome, ".agents");
+    const remoteMcpPath = join(remoteHome, ".claude.json");
+
     log.info(`Uploading archive to ${host}...`);
     await Bun.$`scp ${archivePath} ${host}:${remoteTempArchive}`;
 
@@ -159,6 +174,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
 
     if (hasShared) {
       log.info("Syncing shared skills...");
+      await backupDirectoryIfExists(host, remoteAgentsDir);
       await syncDirectory(host, remoteSharedExtract, remoteAgentsDir);
     }
 

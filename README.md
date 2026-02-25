@@ -49,6 +49,7 @@ ccm push --dry-run
 ```bash
 ccm restore ./ccm-backup.tar.gz        # restore all providers in archive
 ccm restore ./ccm-backup.tar.gz codex  # restore only codex
+ccm restore ./ccm-backup.tar.gz --dry-run
 ```
 
 ## Config file

@@ -74,6 +74,7 @@ async function recreateClaudeSharedSkillSymlinks(): Promise<void> {
 export async function restoreArchive(
   archivePath: string,
   provider: ProviderName | undefined,
+  options: { dryRun?: boolean } = {},
 ): Promise<boolean> {
   const tempDir = join(tmpdir(), `ccm-restore-${Date.now()}`);
 
@@ -86,11 +87,7 @@ export async function restoreArchive(
 
     const availableProviders = manifest.providers.filter((p) => isProviderName(p));
 
-    const providersToRestore = provider
-      ? availableProviders.includes(provider)
-        ? [provider]
-        : []
-      : availableProviders;
+    const providersToRestore = resolveProvidersToRestore(availableProviders, provider);
 
     if (providersToRestore.length === 0) {
       const expected = provider
@@ -103,6 +100,28 @@ export async function restoreArchive(
     const needsShared = providersToRestore.some((name) => PROVIDERS[name].usesSharedSkills);
     const sharedExtractPath = join(tempDir, "shared", "agents");
     const hasShared = await exists(sharedExtractPath);
+
+    if (options.dryRun) {
+      log.info(`Would restore providers: ${providersToRestore.join(", ")}`);
+      if (providersToRestore.includes("claude")) {
+        log.dim(`  claude -> ${DEFAULT_COLLECTION_PATHS.claudeDir}`);
+        log.dim(`  claude MCP merge -> ${DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath}`);
+      }
+
+      if (providersToRestore.includes("codex")) {
+        log.dim(`  codex -> ${DEFAULT_COLLECTION_PATHS.codexDir}`);
+      }
+
+      if (needsShared && hasShared) {
+        log.dim(`  shared skills -> ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
+      }
+
+      if (providersToRestore.includes("claude") && needsShared && hasShared) {
+        log.dim("  recreate claude shared-skill symlinks");
+      }
+
+      return true;
+    }
 
     if (providersToRestore.includes("claude")) {
       await mergeLocalClaudeMcp(tempDir);
@@ -132,4 +151,11 @@ export async function restoreArchive(
   } finally {
     await Bun.$`rm -rf ${tempDir}`.quiet().nothrow();
   }
+}
+
+export function resolveProvidersToRestore(
+  availableProviders: ProviderName[],
+  provider: ProviderName | undefined,
+): ProviderName[] {
+  return provider ? (availableProviders.includes(provider) ? [provider] : []) : availableProviders;
 }

@@ -41,6 +41,7 @@ export function createCli(): Command {
     .description("Restore from a backup archive")
     .argument("<archive>", "Path to archive")
     .argument("[provider]", "Optional provider (claude|codex)")
+    .option("--dry-run", "Preview restore actions without writing files", false)
     .action(restoreCommand);
 
   return program;
