@@ -1,9 +1,10 @@
-import { lstat, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_COLLECTION_PATHS, isProviderName, PROVIDERS } from "../config/providers.ts";
 import type { ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
@@ -17,8 +18,8 @@ async function exists(path: string): Promise<boolean> {
 }
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
-  await Bun.$`mkdir -p ${targetDir}`;
-  await Bun.$`cp -r ${sourceDir}/. ${targetDir}/`;
+  await runCommand(`mkdir -p ${shellQuote(targetDir)}`);
+  await runCommand(`cp -r ${shellQuote(sourceDir)}/. ${shellQuote(targetDir)}/`);
 }
 
 async function mergeLocalClaudeMcp(extractRoot: string): Promise<void> {
@@ -28,14 +29,14 @@ async function mergeLocalClaudeMcp(extractRoot: string): Promise<void> {
     return;
   }
 
-  const incomingRaw = await Bun.file(incomingPath).text();
+  const incomingRaw = await readFile(incomingPath, "utf8");
   const existingRaw = (await exists(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath))
-    ? await Bun.file(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath).text()
+    ? await readFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, "utf8")
     : "{}";
 
   const merged = mergeMcpServers(existingRaw, incomingRaw);
-  await Bun.write(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, merged);
-  await Bun.$`rm -f ${incomingPath}`;
+  await writeFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, merged, "utf8");
+  await rm(incomingPath, { force: true });
 
   const incoming = JSON.parse(incomingRaw) as { mcpServers?: Record<string, unknown> };
   const serverCount = Object.keys(incoming.mcpServers ?? {}).length;
@@ -149,7 +150,7 @@ export async function restoreArchive(
     log.error(`Restore failed: ${error}`);
     return false;
   } finally {
-    await Bun.$`rm -rf ${tempDir}`.quiet().nothrow();
+    await rm(tempDir, { recursive: true, force: true });
   }
 }
 

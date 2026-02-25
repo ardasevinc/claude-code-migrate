@@ -1,9 +1,10 @@
-import { copyFile, mkdir } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { isProviderName } from "../config/providers.ts";
 import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { runCommand, shellQuote } from "../utils/shell.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
@@ -26,7 +27,7 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
   const tempDir = join(dirname(outputPath), `.ccm-temp-${Date.now()}`);
 
   try {
-    await Bun.$`mkdir -p ${tempDir}`;
+    await mkdir(tempDir, { recursive: true });
 
     for (const file of files) {
       const destPath = join(tempDir, file.relativePath);
@@ -35,7 +36,7 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
       await mkdir(destDir, { recursive: true });
 
       if (file.mcpServersOnly) {
-        await Bun.write(destPath, file.mcpServersOnly);
+        await writeFile(destPath, file.mcpServersOnly, "utf8");
       } else {
         await copyFile(file.sourcePath, destPath);
       }
@@ -51,17 +52,19 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
     };
 
     const manifestPath = join(tempDir, MANIFEST_FILENAME);
-    await Bun.write(manifestPath, JSON.stringify(manifest, null, 2));
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
 
     const archiveDir = dirname(outputPath);
 
-    await Bun.$`mkdir -p ${archiveDir}`;
-    await Bun.$`COPYFILE_DISABLE=1 tar -czf ${outputPath} -C ${tempDir} .`;
+    await mkdir(archiveDir, { recursive: true });
+    await runCommand(`tar -czf ${shellQuote(outputPath)} -C ${shellQuote(tempDir)} .`, {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    });
 
     log.success(`Created archive: ${outputPath}`);
     return outputPath;
   } finally {
-    await Bun.$`rm -rf ${tempDir}`.quiet().nothrow();
+    await rm(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -70,14 +73,14 @@ export async function extractArchive(
   destDir: string,
 ): Promise<Manifest | null> {
   try {
-    await Bun.$`mkdir -p ${destDir}`;
-    await Bun.$`tar -xzf ${archivePath} -C ${destDir}`;
+    await mkdir(destDir, { recursive: true });
+    await runCommand(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`);
 
     const manifestPath = join(destDir, MANIFEST_FILENAME);
-    const manifestFile = Bun.file(manifestPath);
 
-    if (await manifestFile.exists()) {
-      const manifest = (await manifestFile.json()) as Manifest;
+    if (await exists(manifestPath)) {
+      const raw = await readFile(manifestPath, "utf8");
+      const manifest = JSON.parse(raw) as Manifest;
       return manifest;
     }
 
@@ -85,5 +88,14 @@ export async function extractArchive(
   } catch (error) {
     log.error(`Failed to extract archive: ${error}`);
     return null;
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
   }
 }

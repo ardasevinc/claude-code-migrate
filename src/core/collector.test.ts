@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile as writeFileFs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectFiles } from "./collector.ts";
 
 let rootDir = "";
 
-async function writeFile(path: string, content: string): Promise<void> {
-  await Bun.write(path, content);
+async function writeFixtureFile(path: string, content: string): Promise<void> {
+  await writeFileFs(path, content, "utf8");
 }
 
 beforeEach(async () => {
@@ -24,16 +24,16 @@ beforeEach(async () => {
   await mkdir(join(codexDir, "skills"), { recursive: true });
   await mkdir(join(sharedSkillsDir, "shared-skill"), { recursive: true });
 
-  await writeFile(join(claudeDir, "CLAUDE.md"), "claude");
-  await writeFile(join(claudeDir, "settings.json"), "{}");
-  await writeFile(join(claudeDir, "agents", "planner.md"), "planner");
-  await writeFile(join(claudeDir, "skills", "native", "SKILL.md"), "native");
-  await writeFile(join(claudeDir, "statusline.sh"), "#!/bin/sh\necho ok\n");
-  await writeFile(join(claudeDir, "settings.local.json"), "{}");
+  await writeFixtureFile(join(claudeDir, "CLAUDE.md"), "claude");
+  await writeFixtureFile(join(claudeDir, "settings.json"), "{}");
+  await writeFixtureFile(join(claudeDir, "agents", "planner.md"), "planner");
+  await writeFixtureFile(join(claudeDir, "skills", "native", "SKILL.md"), "native");
+  await writeFixtureFile(join(claudeDir, "statusline.sh"), "#!/bin/sh\necho ok\n");
+  await writeFixtureFile(join(claudeDir, "settings.local.json"), "{}");
 
   await symlink(join(sharedSkillsDir, "shared-skill"), join(claudeDir, "skills", "shared-skill"));
 
-  await writeFile(
+  await writeFixtureFile(
     join(rootDir, ".claude.json"),
     JSON.stringify({
       mcpServers: {
@@ -44,20 +44,20 @@ beforeEach(async () => {
     }),
   );
 
-  await writeFile(
+  await writeFixtureFile(
     join(codexDir, "config.toml"),
     `
 [mcp_servers.local]
 command = "./scripts/run-mcp"
 `,
   );
-  await writeFile(join(codexDir, "AGENTS.md"), "codex");
-  await writeFile(join(codexDir, "agents", "reviewer.md"), "reviewer");
-  await writeFile(join(codexDir, "rules", "general.md"), "rules");
-  await writeFile(join(codexDir, "skills", "codex-skill.md"), "skill");
+  await writeFixtureFile(join(codexDir, "AGENTS.md"), "codex");
+  await writeFixtureFile(join(codexDir, "agents", "reviewer.md"), "reviewer");
+  await writeFixtureFile(join(codexDir, "rules", "general.md"), "rules");
+  await writeFixtureFile(join(codexDir, "skills", "codex-skill.md"), "skill");
 
-  await writeFile(join(sharedSkillsDir, "shared-skill", "SKILL.md"), "shared");
-  await writeFile(join(rootDir, ".agents", ".skill-lock.json"), "{}\n");
+  await writeFixtureFile(join(sharedSkillsDir, "shared-skill", "SKILL.md"), "shared");
+  await writeFixtureFile(join(rootDir, ".agents", ".skill-lock.json"), "{}\n");
 });
 
 afterEach(async () => {
