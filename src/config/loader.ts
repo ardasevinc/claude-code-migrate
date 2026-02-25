@@ -1,8 +1,8 @@
 import { parse } from "smol-toml";
-import { CONFIG_PATH, CONFIG_DIR, DEFAULT_CONFIG_TOML } from "./schema.ts";
-import { DEFAULT_CONFIG } from "./defaults.ts";
 import type { Config } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { DEFAULT_CONFIG } from "./defaults.ts";
+import { CONFIG_DIR, CONFIG_PATH, DEFAULT_CONFIG_TOML } from "./schema.ts";
 
 export async function loadConfig(): Promise<Config> {
   const file = Bun.file(CONFIG_PATH);
@@ -22,16 +22,14 @@ export async function loadConfig(): Promise<Config> {
         path: parsed.target?.path ?? DEFAULT_CONFIG.target.path,
       },
       include: {
-        settings_local:
-          parsed.include?.settings_local ?? DEFAULT_CONFIG.include.settings_local,
-        mcp_config:
-          parsed.include?.mcp_config ?? DEFAULT_CONFIG.include.mcp_config,
+        settings_local: parsed.include?.settings_local ?? DEFAULT_CONFIG.include.settings_local,
+        mcp_config: parsed.include?.mcp_config ?? DEFAULT_CONFIG.include.mcp_config,
       },
       backup: {
         path: parsed.backup?.path ?? DEFAULT_CONFIG.backup.path,
       },
     };
-  } catch (error) {
+  } catch {
     log.warn(`Failed to parse config at ${CONFIG_PATH}, using defaults`);
     return DEFAULT_CONFIG;
   }

@@ -5,7 +5,7 @@ export async function getClaudeVersion(): Promise<string | null> {
     const result = await Bun.$`claude --version`.quiet();
     const output = result.stdout.toString().trim();
     const match = output.match(/(\d+\.\d+\.\d+)/);
-    return match ? match[1] : null;
+    return match?.[1] ?? null;
   } catch {
     return null;
   }
@@ -16,7 +16,7 @@ export async function getRemoteClaudeVersion(host: string): Promise<string | nul
     const result = await Bun.$`ssh ${host} "claude --version"`.quiet();
     const output = result.stdout.toString().trim();
     const match = output.match(/(\d+\.\d+\.\d+)/);
-    return match ? match[1] : null;
+    return match?.[1] ?? null;
   } catch {
     return null;
   }
@@ -25,15 +25,17 @@ export async function getRemoteClaudeVersion(host: string): Promise<string | nul
 function parseSemver(version: string): { major: number; minor: number; patch: number } | null {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
+  const [, major, minor, patch] = match;
+  if (!major || !minor || !patch) return null;
   return {
-    major: parseInt(match[1]!, 10),
-    minor: parseInt(match[2]!, 10),
-    patch: parseInt(match[3]!, 10),
+    major: parseInt(major, 10),
+    minor: parseInt(minor, 10),
+    patch: parseInt(patch, 10),
   };
 }
 
 export async function checkVersionCompatibility(
-  host: string
+  host: string,
 ): Promise<{ compatible: boolean; warning?: string }> {
   const localVersion = await getClaudeVersion();
   const remoteVersion = await getRemoteClaudeVersion(host);

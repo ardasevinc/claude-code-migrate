@@ -1,13 +1,13 @@
+import { lstat, readdir, readlink, realpath } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { readlink, lstat, realpath, readdir } from "node:fs/promises";
 import {
-  CLAUDE_DIR,
-  MCP_CONFIG_PATH,
   ALWAYS_INCLUDE,
+  CLAUDE_DIR,
   INCLUDE_IF_EXISTS,
+  MCP_CONFIG_PATH,
   NEVER_MIGRATE,
 } from "../config/schema.ts";
-import type { FileEntry, CollectorOptions } from "../types/index.ts";
+import type { CollectorOptions, FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { extractMcpServers } from "./mcp.ts";
 
@@ -42,7 +42,7 @@ async function collectDirectory(
   dirPath: string,
   basePath: string,
   entries: FileEntry[],
-  virtualPrefix?: string
+  virtualPrefix?: string,
 ): Promise<void> {
   const dirEntries = await readdir(dirPath, { withFileTypes: true });
 
@@ -85,7 +85,7 @@ async function collectDirectory(
 async function collectFile(
   filePath: string,
   basePath: string,
-  entries: FileEntry[]
+  entries: FileEntry[],
 ): Promise<void> {
   if (!(await exists(filePath))) return;
 
@@ -198,7 +198,7 @@ export async function collectFiles(options: CollectorOptions): Promise<FileEntry
 
   const filtered = entries.filter((entry) => {
     const firstSegment = entry.relativePath.split("/")[0];
-    return !NEVER_MIGRATE.includes(firstSegment as typeof NEVER_MIGRATE[number]);
+    return !NEVER_MIGRATE.includes(firstSegment as (typeof NEVER_MIGRATE)[number]);
   });
 
   return filtered;

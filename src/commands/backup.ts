@@ -1,10 +1,10 @@
-import { join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { loadConfig } from "../config/loader.ts";
-import { collectFiles } from "../core/collector.ts";
 import { createArchive } from "../core/archiver.ts";
-import { log } from "../utils/logger.ts";
+import { collectFiles } from "../core/collector.ts";
 import type { BackupOptions } from "../types/index.ts";
+import { log } from "../utils/logger.ts";
 
 function expandPath(path: string): string {
   if (path.startsWith("~/")) {
@@ -15,7 +15,7 @@ function expandPath(path: string): string {
 
 export async function backupCommand(
   outputArg: string | undefined,
-  options: BackupOptions
+  options: BackupOptions,
 ): Promise<void> {
   const config = await loadConfig();
 
@@ -50,9 +50,7 @@ export async function backupCommand(
     log.info(`Files to include (${files.length}):`);
 
     for (const file of files) {
-      const symlinkNote = file.isSymlink
-        ? ` (symlink -> ${file.originalSymlinkTarget})`
-        : "";
+      const symlinkNote = file.isSymlink ? ` (symlink -> ${file.originalSymlinkTarget})` : "";
       const displayPath =
         file.relativePath === ".mcp-config.json" ? "~/.claude.json (MCP)" : file.relativePath;
       log.file(displayPath, symlinkNote);

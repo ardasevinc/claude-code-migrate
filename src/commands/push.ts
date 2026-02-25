@@ -1,16 +1,16 @@
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "../config/loader.ts";
-import { collectFiles } from "../core/collector.ts";
 import { createArchive } from "../core/archiver.ts";
-import { testConnection, pushArchive, previewPush } from "../core/ssh.ts";
+import { collectFiles } from "../core/collector.ts";
+import { previewPush, pushArchive, testConnection } from "../core/ssh.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
-import { log } from "../utils/logger.ts";
 import type { PushOptions } from "../types/index.ts";
+import { log } from "../utils/logger.ts";
 
 export async function pushCommand(
   targetArg: string | undefined,
-  options: PushOptions
+  options: PushOptions,
 ): Promise<void> {
   const config = await loadConfig();
 
@@ -18,7 +18,9 @@ export async function pushCommand(
   const remotePath = config.target.path;
 
   if (host === "user@example.com") {
-    log.error("No target configured. Run 'ccm config --init' and edit the config, or specify a target: ccm push user@host");
+    log.error(
+      "No target configured. Run 'ccm config --init' and edit the config, or specify a target: ccm push user@host",
+    );
     return;
   }
 

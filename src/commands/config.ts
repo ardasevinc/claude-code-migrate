@@ -1,10 +1,7 @@
-import { loadConfig, initConfig, getConfigPath } from "../config/loader.ts";
+import { getConfigPath, initConfig, loadConfig } from "../config/loader.ts";
 import { log } from "../utils/logger.ts";
 
-export async function configCommand(options: {
-  init?: boolean;
-  path?: boolean;
-}): Promise<void> {
+export async function configCommand(options: { init?: boolean; path?: boolean }): Promise<void> {
   if (options.path) {
     console.log(getConfigPath());
     return;

@@ -1,21 +1,15 @@
-import { join, dirname, basename } from "node:path";
-import { mkdir, copyFile } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
+import { dirname, join } from "node:path";
 import type { FileEntry, Manifest } from "../types/index.ts";
-import { getClaudeVersion } from "./version-checker.ts";
 import { log } from "../utils/logger.ts";
+import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
 const PACKAGE_VERSION = "1.0.0";
 
-export async function createArchive(
-  files: FileEntry[],
-  outputPath: string
-): Promise<string> {
-  const tempDir = join(
-    dirname(outputPath),
-    `.ccm-temp-${Date.now()}`
-  );
+export async function createArchive(files: FileEntry[], outputPath: string): Promise<string> {
+  const tempDir = join(dirname(outputPath), `.ccm-temp-${Date.now()}`);
 
   try {
     await Bun.$`mkdir -p ${tempDir}`;
@@ -45,7 +39,6 @@ export async function createArchive(
     const manifestPath = join(tempDir, MANIFEST_FILENAME);
     await Bun.write(manifestPath, JSON.stringify(manifest, null, 2));
 
-    const archiveName = basename(outputPath);
     const archiveDir = dirname(outputPath);
 
     await Bun.$`mkdir -p ${archiveDir}`;
@@ -62,7 +55,7 @@ export async function createArchive(
 
 export async function extractArchive(
   archivePath: string,
-  destDir: string
+  destDir: string,
 ): Promise<Manifest | null> {
   try {
     await Bun.$`mkdir -p ${destDir}`;
@@ -72,7 +65,7 @@ export async function extractArchive(
     const manifestFile = Bun.file(manifestPath);
 
     if (await manifestFile.exists()) {
-      const manifest = await manifestFile.json() as Manifest;
+      const manifest = (await manifestFile.json()) as Manifest;
       return manifest;
     }
 

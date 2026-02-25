@@ -1,6 +1,6 @@
 import { Command } from "commander";
-import { configCommand } from "./commands/config.ts";
 import { backupCommand } from "./commands/backup.ts";
+import { configCommand } from "./commands/config.ts";
 import { pushCommand } from "./commands/push.ts";
 
 export function createCli(): Command {

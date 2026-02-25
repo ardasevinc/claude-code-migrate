@@ -8,12 +8,7 @@ export const MCP_CONFIG_PATH = join(home, ".claude.json");
 export const CONFIG_DIR = join(home, ".config", "claude-code-migrate");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
 
-export const ALWAYS_INCLUDE = [
-  "CLAUDE.md",
-  "settings.json",
-  "agents",
-  "skills",
-] as const;
+export const ALWAYS_INCLUDE = ["CLAUDE.md", "settings.json", "agents", "skills"] as const;
 
 export const INCLUDE_IF_EXISTS = [
   "statusline.ts",

@@ -1,6 +1,6 @@
-import { join, dirname } from "node:path";
-import { log } from "../utils/logger.ts";
+import { dirname, join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
+import { log } from "../utils/logger.ts";
 
 function expandPath(path: string, remoteHome: string): string {
   if (path.startsWith("~/")) {
@@ -34,7 +34,7 @@ export async function getRemoteHome(host: string): Promise<string> {
 export async function pushArchive(
   archivePath: string,
   host: string,
-  remotePath: string
+  remotePath: string,
 ): Promise<boolean> {
   const remoteHome = await getRemoteHome(host);
   const expandedPath = expandPath(remotePath, remoteHome);
@@ -53,20 +53,24 @@ export async function pushArchive(
 
     log.info("Creating backup of existing config...");
     const backupDir = `${remoteClaudeDir}.backup-${Date.now()}`;
-    await Bun.$`ssh ${host} "if [ -d ${remoteClaudeDir} ]; then cp -r ${remoteClaudeDir} ${backupDir}; fi"`.quiet().nothrow();
+    await Bun.$`ssh ${host} "if [ -d ${remoteClaudeDir} ]; then cp -r ${remoteClaudeDir} ${backupDir}; fi"`
+      .quiet()
+      .nothrow();
 
     log.info("Syncing files...");
     await Bun.$`ssh ${host} "mkdir -p ${remoteClaudeDir}"`;
 
     // Handle MCP config separately - merge mcpServers into ~/.claude.json
-    const hasMcpConfig = await Bun.$`ssh ${host} "test -f ${remoteTempDir}/.mcp-config.json && echo yes || echo no"`.quiet();
+    const hasMcpConfig =
+      await Bun.$`ssh ${host} "test -f ${remoteTempDir}/.mcp-config.json && echo yes || echo no"`.quiet();
     if (hasMcpConfig.stdout.toString().trim() === "yes") {
       // Read new mcpServers from extracted archive
       const newMcpJson = await Bun.$`ssh ${host} "cat ${remoteTempDir}/.mcp-config.json"`.quiet();
       const newMcp = JSON.parse(newMcpJson.stdout.toString());
 
       // Read existing remote config (if any)
-      const existingJson = await Bun.$`ssh ${host} "cat ${remoteMcpPath} 2>/dev/null || echo '{}'"`.quiet();
+      const existingJson =
+        await Bun.$`ssh ${host} "cat ${remoteMcpPath} 2>/dev/null || echo '{}'"`.quiet();
       const existing = JSON.parse(existingJson.stdout.toString());
 
       // Merge mcpServers (local wins on conflicts)
@@ -109,15 +113,13 @@ export async function pushArchive(
 export async function previewPush(
   files: FileEntry[],
   host: string,
-  remotePath: string
+  remotePath: string,
 ): Promise<void> {
   log.info(`Would push to ${host}:${remotePath}`);
   log.info(`Files to transfer (${files.length}):`);
 
   for (const file of files) {
-    const symlinkNote = file.isSymlink
-      ? ` (symlink -> ${file.originalSymlinkTarget})`
-      : "";
+    const symlinkNote = file.isSymlink ? ` (symlink -> ${file.originalSymlinkTarget})` : "";
     const displayPath =
       file.relativePath === ".mcp-config.json" ? "~/.claude.json (MCP)" : file.relativePath;
     log.file(displayPath, symlinkNote);
