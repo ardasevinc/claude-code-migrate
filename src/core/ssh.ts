@@ -32,15 +32,15 @@ export function buildClaudeSharedSkillSymlinkCommand(
   return [
     `mkdir -p ${shellQuote(claudeSkillsDir)}`,
     `if [ -d ${shellQuote(agentsSkillsDir)} ]; then`,
-    `for skill in ${shellQuote(agentsSkillsDir)}/*; do`,
-    `[ -d "$skill" ] || continue`,
-    'name=$(basename "$skill")',
-    `target=${shellQuote(claudeSkillsDir)}/"$name"`,
-    'rm -rf "$target"',
-    `ln -s ${shellQuote(agentsSkillsDir)}/"$name" "$target"`,
-    "done",
-    "fi",
-  ].join("; ");
+    ` for skill in ${shellQuote(agentsSkillsDir)}/*; do`,
+    `  [ -d "$skill" ] || continue;`,
+    `  name=$(basename "$skill");`,
+    `  target=${shellQuote(claudeSkillsDir)}/"$name";`,
+    `  rm -rf "$target";`,
+    `  ln -s ${shellQuote(agentsSkillsDir)}/"$name" "$target";`,
+    ` done;`,
+    `fi`,
+  ].join(" ");
 }
 
 async function remotePathExists(host: string, path: string): Promise<boolean> {
@@ -143,7 +143,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
     log.info("Extracting on remote...");
     await runRemote(
       host,
-      `mkdir -p ${shellQuote(remoteTempDir)} && tar -xzf ${shellQuote(remoteTempArchive)} -C ${shellQuote(remoteTempDir)}`,
+      `mkdir -p ${shellQuote(remoteTempDir)} && tar -xzf ${shellQuote(remoteTempArchive)} -C ${shellQuote(remoteTempDir)} 2>/dev/null`,
     );
 
     const remoteClaudeExtract = join(remoteTempDir, "claude");
