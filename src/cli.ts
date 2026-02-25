@@ -10,7 +10,7 @@ export function createCli(): Command {
   program
     .name("ccm")
     .description("Migrate Claude Code and Codex configurations between machines")
-    .version("1.2.0");
+    .version("1.3.0");
 
   program
     .command("config")
