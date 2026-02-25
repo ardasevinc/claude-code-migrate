@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectCodexMcpPathWarnings, mergeMcpServers } from "./mcp.ts";
@@ -47,13 +47,14 @@ describe("mcp helpers", () => {
   it("detects codex path-based mcp entries", async () => {
     const configPath = join(rootDir, "config.toml");
 
-    await Bun.write(
+    await writeFile(
       configPath,
       `
 [mcp_servers.local]
 command = "../scripts/local-server"
 args = ["/usr/local/bin/tool"]
 `,
+      "utf8",
     );
 
     const warnings = await detectCodexMcpPathWarnings(configPath);

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { parse } from "smol-toml";
 
 export interface McpServer {
@@ -24,7 +25,8 @@ const PATH_PATTERN = /^(\/|\.\/|\.\.\/|~\/)/;
 
 export async function extractMcpServers(configPath: string): Promise<McpExtractResult> {
   try {
-    const content = (await Bun.file(configPath).json()) as McpServersConfig;
+    const raw = await readFile(configPath, "utf8");
+    const content = JSON.parse(raw) as McpServersConfig;
     const mcpServers = content.mcpServers ?? null;
     const warnings = mcpServers ? detectProblematicPaths(mcpServers) : [];
     return { mcpServers, warnings };
@@ -35,7 +37,7 @@ export async function extractMcpServers(configPath: string): Promise<McpExtractR
 
 export async function detectCodexMcpPathWarnings(configPath: string): Promise<string[]> {
   try {
-    const raw = await Bun.file(configPath).text();
+    const raw = await readFile(configPath, "utf8");
     const parsed = parse(raw) as unknown as CodexConfig;
     const mcpServers = parsed.mcp_servers ?? parsed.mcpServers ?? null;
 

@@ -1,3 +1,4 @@
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { parse } from "smol-toml";
 import type { Config } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
@@ -60,14 +61,12 @@ function normalizeConfig(raw: RawConfig): Config {
 }
 
 export async function loadConfig(): Promise<Config> {
-  const file = Bun.file(CONFIG_PATH);
-
-  if (!(await file.exists())) {
+  if (!(await exists(CONFIG_PATH))) {
     return DEFAULT_CONFIG;
   }
 
   try {
-    const content = await file.text();
+    const content = await readFile(CONFIG_PATH, "utf8");
     const parsed = parse(content) as unknown as RawConfig;
     return normalizeConfig(parsed);
   } catch {
@@ -77,19 +76,26 @@ export async function loadConfig(): Promise<Config> {
 }
 
 export async function initConfig(): Promise<boolean> {
-  const file = Bun.file(CONFIG_PATH);
-
-  if (await file.exists()) {
+  if (await exists(CONFIG_PATH)) {
     log.warn(`Config already exists at ${CONFIG_PATH}`);
     return false;
   }
 
-  await Bun.$`mkdir -p ${CONFIG_DIR}`;
-  await Bun.write(CONFIG_PATH, DEFAULT_CONFIG_TOML);
+  await mkdir(CONFIG_DIR, { recursive: true });
+  await writeFile(CONFIG_PATH, DEFAULT_CONFIG_TOML, "utf8");
   log.success(`Created config at ${CONFIG_PATH}`);
   return true;
 }
 
 export function getConfigPath(): string {
   return CONFIG_PATH;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }

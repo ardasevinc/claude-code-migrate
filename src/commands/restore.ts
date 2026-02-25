@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { resolveRestoreProvider } from "../core/arg-parser.ts";
 import { restoreArchive } from "../core/restore.ts";
@@ -10,9 +11,8 @@ export async function restoreCommand(
   options: RestoreOptions,
 ): Promise<void> {
   const archivePath = resolve(archiveArg);
-  const archiveFile = Bun.file(archivePath);
 
-  if (!(await archiveFile.exists())) {
+  if (!(await exists(archivePath))) {
     log.error(`Archive not found: ${archivePath}`);
     return;
   }
@@ -29,5 +29,14 @@ export async function restoreCommand(
   const success = await restoreArchive(archivePath, provider, { dryRun: options.dryRun });
   if (!success) {
     process.exit(1);
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
   }
 }
