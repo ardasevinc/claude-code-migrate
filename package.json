@@ -1,8 +1,29 @@
 {
   "name": "claude-code-migrate",
   "version": "1.2.0",
-  "description": "Migrate Claude Code configurations between machines via SSH/SCP or local backup archives",
+  "description": "Migrate AI CLI configs (Claude Code, Codex) between machines via SSH or local backup",
   "type": "module",
+  "license": "MIT",
+  "author": "Arda Sevinc <arda@ardasevinc.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ardasevinc/claude-code-migrate.git"
+  },
+  "homepage": "https://github.com/ardasevinc/claude-code-migrate",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "migrate",
+    "ssh",
+    "cli",
+    "config",
+    "backup",
+    "ai"
+  ],
+  "files": [
+    "src/",
+    "LICENSE"
+  ],
   "bin": {
     "ccm": "./src/index.ts"
   },
@@ -24,9 +45,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.4",
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
+    "@types/bun": "latest",
     "typescript": "^5"
   }
 }
