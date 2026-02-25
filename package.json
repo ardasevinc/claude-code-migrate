@@ -1,6 +1,6 @@
 {
   "name": "claude-code-migrate",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Migrate Claude Code configurations between machines via SSH/SCP or local backup archives",
   "type": "module",
   "bin": {
