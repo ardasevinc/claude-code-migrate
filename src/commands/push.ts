@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../config/loader.ts";
 import { createArchive } from "../core/archiver.ts";
+import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
 import { previewPush, pushArchive, testConnection } from "../core/ssh.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
@@ -9,13 +10,26 @@ import type { PushOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 
 export async function pushCommand(
-  targetArg: string | undefined,
+  arg1: string | undefined,
+  arg2: string | undefined,
   options: PushOptions,
 ): Promise<void> {
   const config = await loadConfig();
+  const enabledProviders = getEnabledProviders(config);
+
+  let providers = enabledProviders;
+  let targetArg: string | undefined;
+
+  try {
+    const resolved = resolvePushArguments(arg1, arg2, enabledProviders);
+    providers = resolved.providers;
+    targetArg = resolved.target;
+  } catch (error) {
+    log.error(error instanceof Error ? error.message : "Invalid arguments");
+    return;
+  }
 
   const host = targetArg ?? config.target.host;
-  const remotePath = config.target.path;
 
   if (host === "user@example.com") {
     log.error(
@@ -25,8 +39,9 @@ export async function pushCommand(
   }
 
   const files = await collectFiles({
-    includeSettingsLocal: config.include.settings_local,
-    includeMcpConfig: config.include.mcp_config,
+    providers,
+    includeClaudeSettingsLocal: config.providers.claude.settings_local,
+    includeClaudeMcpConfig: config.providers.claude.mcp_config,
     dryRun: options.dryRun,
   });
 
@@ -36,7 +51,7 @@ export async function pushCommand(
   }
 
   if (options.dryRun) {
-    await previewPush(files, host, remotePath);
+    await previewPush(files, host);
     return;
   }
 
@@ -50,7 +65,7 @@ export async function pushCommand(
 
   log.success("Connection established");
 
-  if (!options.skipVersionCheck) {
+  if (providers.includes("claude") && !options.skipVersionCheck) {
     const versionCheck = await checkVersionCompatibility(host);
     if (versionCheck.warning) {
       log.warn(versionCheck.warning);
@@ -61,7 +76,8 @@ export async function pushCommand(
 
   try {
     await createArchive(files, tempArchive);
-    const success = await pushArchive(tempArchive, host, remotePath);
+    const success = await pushArchive(tempArchive, host);
+
     if (!success) {
       process.exit(1);
     }

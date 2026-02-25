@@ -16,12 +16,14 @@ export async function configCommand(options: { init?: boolean; path?: boolean })
 
   log.info("Current configuration:");
   console.log();
-  console.log(`  Target: ${config.target.type}://${config.target.host}${config.target.path}`);
+  console.log(`  Target: ${config.target.type}://${config.target.host}`);
   console.log(`  Backup path: ${config.backup.path}`);
   console.log();
-  console.log("  Include options:");
-  console.log(`    settings.local.json: ${config.include.settings_local}`);
-  console.log(`    ~/.claude.json (MCP): ${config.include.mcp_config}`);
+  console.log("  Providers:");
+  console.log(`    claude.enabled: ${config.providers.claude.enabled}`);
+  console.log(`    claude.settings_local: ${config.providers.claude.settings_local}`);
+  console.log(`    claude.mcp_config: ${config.providers.claude.mcp_config}`);
+  console.log(`    codex.enabled: ${config.providers.codex.enabled}`);
   console.log();
   log.dim(`Config file: ${getConfigPath()}`);
 }

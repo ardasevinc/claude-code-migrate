@@ -1,88 +1,84 @@
 # ccm - Claude Code Migrate
 
-CLI tool for migrating Claude Code configurations between machines via SSH/SCP or local backup archives.
+CLI tool for migrating AI CLI configurations between machines via SSH/SCP or local backup archives.
+
+Launch providers:
+- `claude` (`~/.claude`)
+- `codex` (`~/.codex`)
+
+Shared skills are migrated from `~/.agents/skills` when any provider is active.
 
 ## Installation
 
 ```bash
 bun install
-bun link  # makes `ccm` available globally
+bun link
 ```
 
 ## Usage
 
 ### Initialize config
+
 ```bash
 ccm config --init
 # Edit ~/.config/claude-code-migrate/config.toml
 ```
 
-### Backup locally
+### Backup
+
 ```bash
-ccm backup                    # Creates timestamped archive
-ccm backup ./my-backup.tar.gz # Custom path
-ccm backup --dry-run          # Preview files
+ccm backup                      # all enabled providers + shared
+ccm backup codex                # codex + shared
+ccm backup codex ./out.tar.gz   # codex + shared to custom path
+ccm backup ./out.tar.gz         # all enabled providers + shared
+ccm backup --dry-run
 ```
 
-### Push to remote machine
+### Push
+
 ```bash
-ccm push user@host           # Push to specific host
-ccm push                     # Use host from config
-ccm push --dry-run           # Preview without transferring
-ccm push --skip-version-check
+ccm push                        # all enabled providers + shared (host from config)
+ccm push codex                  # codex + shared
+ccm push user@host              # all enabled providers + shared
+ccm push claude user@host       # claude + shared
+ccm push --dry-run
 ```
 
-## What gets migrated
+### Restore
 
-**Always included:**
-- `~/.claude/CLAUDE.md`
-- `~/.claude/settings.json`
-- `~/.claude/agents/`
-- `~/.claude/skills/`
-
-**Included if they exist:**
-- `~/.claude/statusline.ts`
-- `~/.claude/statusline.sh`
-- `~/.claude/keybindings.json`
-- `~/.claude/hooks/`
-
-**Optional (via config):**
-- `~/.claude/settings.local.json`
-- `~/.claude.json` (MCP servers only - merged into remote's existing config)
-
-**Never migrated:**
-- `plugins/`, `projects/`, `history.jsonl`, `cache/`, `todos/`, etc.
+```bash
+ccm restore ./ccm-backup.tar.gz        # restore all providers in archive
+ccm restore ./ccm-backup.tar.gz codex  # restore only codex
+```
 
 ## Config file
 
-Located at `~/.config/claude-code-migrate/config.toml`:
+Location: `~/.config/claude-code-migrate/config.toml`
 
 ```toml
 [target]
 type = "ssh"
 host = "user@example.com"
-path = "~/.claude"
 
-[include]
+[providers.claude]
+enabled = true
 settings_local = false
 mcp_config = true
 
+[providers.codex]
+enabled = true
+
 [backup]
-path = "~/backups/claude"
+path = "~/backups/ccm"
 ```
 
-## How it works
+## Full Gate
 
-1. Collects files from `~/.claude/` (resolves symlinks, follows symlink-to-directory)
-2. Creates tar.gz archive with manifest
-3. For push: uploads via scp, extracts, bulk-copies to destination
-4. MCP servers from `~/.claude.json` are **merged** into remote's existing config (local wins on conflicts, other keys preserved)
+```bash
+bun run check
+```
 
-### MCP server migration
-
-Only the `mcpServers` object is extracted from your local `~/.claude.json` - not the entire file. On the remote, these servers are merged into the existing config rather than overwriting it.
-
-Servers with paths (absolute, relative, or `~/`) will trigger a warning since they may not exist on the target machine.
+`check` runs Biome, typecheck, and tests.
 
 ## License
 

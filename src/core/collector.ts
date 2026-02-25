@@ -1,15 +1,17 @@
 import { lstat, readdir, readlink, realpath } from "node:fs/promises";
-import { join, relative } from "node:path";
-import {
-  ALWAYS_INCLUDE,
-  CLAUDE_DIR,
-  INCLUDE_IF_EXISTS,
-  MCP_CONFIG_PATH,
-  NEVER_MIGRATE,
-} from "../config/schema.ts";
-import type { CollectorOptions, FileEntry } from "../types/index.ts";
+import { isAbsolute, join, relative } from "node:path";
+import { DEFAULT_COLLECTION_PATHS, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../config/providers.ts";
+import type { CollectionPaths, CollectorOptions, FileEntry, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
-import { extractMcpServers } from "./mcp.ts";
+import { detectCodexMcpPathWarnings, extractMcpServers } from "./mcp.ts";
+
+interface CollectContext {
+  archivePrefix: string;
+  basePath: string;
+  providerName?: ProviderName;
+  neverMigrate?: Set<string>;
+  paths: CollectionPaths;
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -31,17 +33,78 @@ async function isDirectory(path: string): Promise<boolean> {
 
 async function isSymlink(path: string): Promise<boolean> {
   try {
-    const stat = await lstat(path);
-    return stat.isSymbolicLink();
+    await readlink(path);
+    return true;
   } catch {
     return false;
   }
 }
 
+function isInsidePath(targetPath: string, parentPath: string): boolean {
+  if (isPathInside(targetPath, parentPath)) {
+    return true;
+  }
+
+  const normalizedTarget = normalizePrivatePrefix(targetPath);
+  const normalizedParent = normalizePrivatePrefix(parentPath);
+  return isPathInside(normalizedTarget, normalizedParent);
+}
+
+function isPathInside(targetPath: string, parentPath: string): boolean {
+  const rel = relative(parentPath, targetPath);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function normalizePrivatePrefix(path: string): string {
+  return path.startsWith("/private/") ? path.slice("/private".length) : path;
+}
+
+function shouldSkipRelativePath(relativePath: string, neverMigrate?: Set<string>): boolean {
+  if (!neverMigrate) {
+    return false;
+  }
+
+  const firstSegment = relativePath.split("/")[0];
+  return firstSegment ? neverMigrate.has(firstSegment) : false;
+}
+
+function shouldSkipSymlink(
+  providerName: ProviderName | undefined,
+  relativePath: string,
+  resolvedTargetPath: string,
+  paths: CollectionPaths,
+): boolean {
+  if (providerName !== "claude") {
+    return false;
+  }
+
+  if (!(relativePath === "skills" || relativePath.startsWith("skills/"))) {
+    return false;
+  }
+
+  return isInsidePath(resolvedTargetPath, paths.sharedSkillsDir);
+}
+
+function pushEntry(
+  entries: FileEntry[],
+  context: CollectContext,
+  sourcePath: string,
+  relativePath: string,
+  isLink: boolean,
+  linkTarget?: string,
+): void {
+  entries.push({
+    sourcePath,
+    relativePath: join(context.archivePrefix, relativePath),
+    isSymlink: isLink,
+    originalSymlinkTarget: linkTarget,
+  });
+}
+
 async function collectDirectory(
   dirPath: string,
-  basePath: string,
   entries: FileEntry[],
+  context: CollectContext,
   virtualPrefix?: string,
 ): Promise<void> {
   const dirEntries = await readdir(dirPath, { withFileTypes: true });
@@ -50,156 +113,229 @@ async function collectDirectory(
     const fullPath = join(dirPath, entry.name);
     const relativePath = virtualPrefix
       ? join(virtualPrefix, entry.name)
-      : relative(basePath, fullPath);
+      : relative(context.basePath, fullPath);
 
-    if (entry.isSymbolicLink()) {
-      const target = await readlink(fullPath);
-      const realPath = await realpath(fullPath).catch(() => null);
+    if (shouldSkipRelativePath(relativePath, context.neverMigrate)) {
+      continue;
+    }
 
-      if (!realPath || !(await exists(realPath))) continue;
+    const target = await readlink(fullPath).catch(() => null);
 
-      const realStat = await lstat(realPath);
+    if (target !== null) {
+      const resolvedPath = await realpath(fullPath).catch(() => null);
 
-      if (realStat.isDirectory()) {
-        await collectDirectory(realPath, realPath, entries, relativePath);
-      } else {
-        entries.push({
-          sourcePath: realPath,
-          relativePath,
-          isSymlink: true,
-          originalSymlinkTarget: target,
-        });
+      if (!resolvedPath || !(await exists(resolvedPath))) {
+        continue;
       }
-    } else if (entry.isDirectory()) {
-      await collectDirectory(fullPath, basePath, entries, virtualPrefix ? relativePath : undefined);
-    } else {
-      entries.push({
-        sourcePath: fullPath,
-        relativePath,
-        isSymlink: false,
-      });
+
+      if (shouldSkipSymlink(context.providerName, relativePath, resolvedPath, context.paths)) {
+        continue;
+      }
+
+      const resolvedStat = await lstat(resolvedPath);
+
+      if (resolvedStat.isDirectory()) {
+        await collectDirectory(resolvedPath, entries, context, relativePath);
+      } else {
+        pushEntry(entries, context, resolvedPath, relativePath, true, target);
+      }
+
+      continue;
     }
+
+    const stat = await lstat(fullPath);
+
+    if (stat.isDirectory()) {
+      await collectDirectory(fullPath, entries, context, relativePath);
+      continue;
+    }
+
+    pushEntry(entries, context, fullPath, relativePath, false);
   }
 }
 
-async function collectFile(
-  filePath: string,
-  basePath: string,
+async function collectPath(
+  fullPath: string,
   entries: FileEntry[],
+  context: CollectContext,
 ): Promise<void> {
-  if (!(await exists(filePath))) return;
-
-  const relativePath = relative(basePath, filePath);
-
-  if (await isSymlink(filePath)) {
-    const target = await readlink(filePath);
-    const realPath = await realpath(filePath).catch(() => null);
-
-    if (realPath && (await exists(realPath))) {
-      entries.push({
-        sourcePath: realPath,
-        relativePath,
-        isSymlink: true,
-        originalSymlinkTarget: target,
-      });
-    }
-  } else {
-    entries.push({
-      sourcePath: filePath,
-      relativePath,
-      isSymlink: false,
-    });
+  if (!(await exists(fullPath))) {
+    return;
   }
+
+  const relativePath = relative(context.basePath, fullPath);
+
+  if (shouldSkipRelativePath(relativePath, context.neverMigrate)) {
+    return;
+  }
+
+  if (await isSymlink(fullPath)) {
+    const linkTarget = await readlink(fullPath);
+    const resolvedPath = await realpath(fullPath).catch(() => null);
+
+    if (!resolvedPath || !(await exists(resolvedPath))) {
+      return;
+    }
+
+    if (shouldSkipSymlink(context.providerName, relativePath, resolvedPath, context.paths)) {
+      return;
+    }
+
+    const resolvedStat = await lstat(resolvedPath);
+
+    if (resolvedStat.isDirectory()) {
+      await collectDirectory(resolvedPath, entries, context, relativePath);
+      return;
+    }
+
+    pushEntry(entries, context, resolvedPath, relativePath, true, linkTarget);
+    return;
+  }
+
+  if (await isDirectory(fullPath)) {
+    await collectDirectory(fullPath, entries, context, relativePath);
+    return;
+  }
+
+  pushEntry(entries, context, fullPath, relativePath, false);
 }
 
-export async function collectFiles(options: CollectorOptions): Promise<FileEntry[]> {
+function getProviderBasePath(providerName: ProviderName, paths: CollectionPaths): string {
+  if (providerName === "claude") {
+    return paths.claudeDir;
+  }
+
+  return paths.codexDir;
+}
+
+async function collectProviderFiles(
+  providerName: ProviderName,
+  options: CollectorOptions,
+  paths: CollectionPaths,
+): Promise<FileEntry[]> {
+  const provider = PROVIDERS[providerName];
+  const basePath = getProviderBasePath(providerName, paths);
   const entries: FileEntry[] = [];
 
-  if (!(await exists(CLAUDE_DIR))) {
-    log.error(`Claude directory not found: ${CLAUDE_DIR}`);
+  if (!(await exists(basePath))) {
+    log.warn(`[${providerName}] Provider directory not found: ${basePath}`);
     return entries;
   }
 
-  for (const item of ALWAYS_INCLUDE) {
-    const fullPath = join(CLAUDE_DIR, item);
+  const context: CollectContext = {
+    archivePrefix: providerName,
+    basePath,
+    providerName,
+    neverMigrate: new Set(provider.neverMigrate),
+    paths,
+  };
+
+  for (const item of provider.alwaysInclude) {
+    const fullPath = join(basePath, item);
 
     if (!(await exists(fullPath))) {
       if (!options.dryRun) {
-        log.warn(`Missing required: ${item}`);
+        log.warn(`[${providerName}] Missing required: ${item}`);
       }
       continue;
     }
 
-    // Check if it's a symlink pointing to a directory
-    const isSymlinkToDir =
-      (await isSymlink(fullPath)) &&
-      (await realpath(fullPath)
-        .then(async (p) => {
-          const stat = await lstat(p);
-          return stat.isDirectory();
-        })
-        .catch(() => false));
+    await collectPath(fullPath, entries, context);
+  }
 
-    if ((await isDirectory(fullPath)) || isSymlinkToDir) {
-      const actualPath = isSymlinkToDir ? await realpath(fullPath) : fullPath;
-      await collectDirectory(actualPath, CLAUDE_DIR, entries, item);
-    } else {
-      await collectFile(fullPath, CLAUDE_DIR, entries);
+  for (const item of provider.includeIfExists) {
+    const fullPath = join(basePath, item);
+    if (await exists(fullPath)) {
+      await collectPath(fullPath, entries, context);
     }
   }
 
-  for (const item of INCLUDE_IF_EXISTS) {
-    const fullPath = join(CLAUDE_DIR, item);
+  if (providerName === "claude") {
+    if (options.includeClaudeSettingsLocal) {
+      const settingsLocalPath = join(basePath, "settings.local.json");
+      await collectPath(settingsLocalPath, entries, context);
+    }
 
-    if (!(await exists(fullPath))) continue;
+    if (options.includeClaudeMcpConfig && (await exists(paths.claudeMcpConfigPath))) {
+      const { mcpServers, warnings } = await extractMcpServers(paths.claudeMcpConfigPath);
 
-    // Check if it's a symlink pointing to a directory
-    const isSymlinkToDir =
-      (await isSymlink(fullPath)) &&
-      (await realpath(fullPath)
-        .then(async (p) => {
-          const stat = await lstat(p);
-          return stat.isDirectory();
-        })
-        .catch(() => false));
+      if (warnings.length > 0) {
+        log.warn("[claude] MCP servers with paths that may not work on remote:");
+        for (const warning of warnings) {
+          log.dim(`  ${warning}`);
+        }
+      }
 
-    if ((await isDirectory(fullPath)) || isSymlinkToDir) {
-      const actualPath = isSymlinkToDir ? await realpath(fullPath) : fullPath;
-      await collectDirectory(actualPath, CLAUDE_DIR, entries, item);
-    } else {
-      await collectFile(fullPath, CLAUDE_DIR, entries);
+      if (mcpServers && Object.keys(mcpServers).length > 0) {
+        entries.push({
+          sourcePath: paths.claudeMcpConfigPath,
+          relativePath: join(providerName, ".mcp-config.json"),
+          isSymlink: false,
+          mcpServersOnly: JSON.stringify({ mcpServers }, null, 2),
+        });
+      }
     }
   }
 
-  if (options.includeSettingsLocal) {
-    const settingsLocal = join(CLAUDE_DIR, "settings.local.json");
-    if (await exists(settingsLocal)) {
-      await collectFile(settingsLocal, CLAUDE_DIR, entries);
-    }
-  }
-
-  if (options.includeMcpConfig && (await exists(MCP_CONFIG_PATH))) {
-    const { mcpServers, warnings } = await extractMcpServers(MCP_CONFIG_PATH);
+  if (providerName === "codex") {
+    const codexConfigPath = join(basePath, "config.toml");
+    const warnings = await detectCodexMcpPathWarnings(codexConfigPath);
 
     if (warnings.length > 0) {
-      log.warn("MCP servers with paths that may not work on remote:");
-      for (const w of warnings) log.dim(`  ${w}`);
-    }
-
-    if (mcpServers && Object.keys(mcpServers).length > 0) {
-      entries.push({
-        sourcePath: MCP_CONFIG_PATH,
-        relativePath: ".mcp-config.json",
-        isSymlink: false,
-        mcpServersOnly: JSON.stringify({ mcpServers }, null, 2),
-      });
+      log.warn("[codex] MCP servers with paths that may not work on remote:");
+      for (const warning of warnings) {
+        log.dim(`  ${warning}`);
+      }
     }
   }
 
-  const filtered = entries.filter((entry) => {
-    const firstSegment = entry.relativePath.split("/")[0];
-    return !NEVER_MIGRATE.includes(firstSegment as (typeof NEVER_MIGRATE)[number]);
-  });
+  return entries;
+}
 
-  return filtered;
+async function collectSharedSkills(paths: CollectionPaths): Promise<FileEntry[]> {
+  const entries: FileEntry[] = [];
+
+  if (await exists(paths.sharedSkillsDir)) {
+    const context: CollectContext = {
+      archivePrefix: join(SHARED_ARCHIVE_PREFIX, "skills"),
+      basePath: paths.sharedSkillsDir,
+      paths,
+    };
+
+    await collectDirectory(paths.sharedSkillsDir, entries, context);
+  }
+
+  if (await exists(paths.sharedSkillLockPath)) {
+    entries.push({
+      sourcePath: paths.sharedSkillLockPath,
+      relativePath: join(SHARED_ARCHIVE_PREFIX, ".skill-lock.json"),
+      isSymlink: false,
+    });
+  }
+
+  return entries;
+}
+
+export async function collectFiles(options: CollectorOptions): Promise<FileEntry[]> {
+  const paths: CollectionPaths = {
+    ...DEFAULT_COLLECTION_PATHS,
+    ...options.paths,
+  };
+
+  const entries: FileEntry[] = [];
+
+  for (const providerName of options.providers) {
+    const providerEntries = await collectProviderFiles(providerName, options, paths);
+    entries.push(...providerEntries);
+  }
+
+  const needsSharedSkills = options.providers.some(
+    (providerName) => PROVIDERS[providerName].usesSharedSkills,
+  );
+  if (needsSharedSkills) {
+    const sharedEntries = await collectSharedSkills(paths);
+    entries.push(...sharedEntries);
+  }
+
+  return entries;
 }

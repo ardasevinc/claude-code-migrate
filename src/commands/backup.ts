@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "../config/loader.ts";
 import { createArchive } from "../core/archiver.ts";
+import { getEnabledProviders, resolveBackupArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
 import type { BackupOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
@@ -10,17 +11,32 @@ function expandPath(path: string): string {
   if (path.startsWith("~/")) {
     return path.replace("~", homedir());
   }
+
   return resolve(path);
 }
 
 export async function backupCommand(
-  outputArg: string | undefined,
+  arg1: string | undefined,
+  arg2: string | undefined,
   options: BackupOptions,
 ): Promise<void> {
   const config = await loadConfig();
+  const enabledProviders = getEnabledProviders(config);
+
+  let providers = enabledProviders;
+  let outputArg: string | undefined;
+
+  try {
+    const resolved = resolveBackupArguments(arg1, arg2, enabledProviders);
+    providers = resolved.providers;
+    outputArg = resolved.output;
+  } catch (error) {
+    log.error(error instanceof Error ? error.message : "Invalid arguments");
+    return;
+  }
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const defaultFilename = `claude-config-${timestamp}.tar.gz`;
+  const defaultFilename = `ccm-backup-${timestamp}.tar.gz`;
 
   let outputPath: string;
 
@@ -35,8 +51,9 @@ export async function backupCommand(
   }
 
   const files = await collectFiles({
-    includeSettingsLocal: config.include.settings_local,
-    includeMcpConfig: config.include.mcp_config,
+    providers,
+    includeClaudeSettingsLocal: config.providers.claude.settings_local,
+    includeClaudeMcpConfig: config.providers.claude.mcp_config,
     dryRun: options.dryRun,
   });
 
@@ -52,9 +69,12 @@ export async function backupCommand(
     for (const file of files) {
       const symlinkNote = file.isSymlink ? ` (symlink -> ${file.originalSymlinkTarget})` : "";
       const displayPath =
-        file.relativePath === ".mcp-config.json" ? "~/.claude.json (MCP)" : file.relativePath;
+        file.relativePath === "claude/.mcp-config.json"
+          ? "~/.claude.json (MCP)"
+          : file.relativePath;
       log.file(displayPath, symlinkNote);
     }
+
     return;
   }
 

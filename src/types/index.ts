@@ -1,12 +1,19 @@
+export type ProviderName = "claude" | "codex";
+
 export interface Config {
   target: {
     type: "ssh";
     host: string;
-    path: string;
   };
-  include: {
-    settings_local: boolean;
-    mcp_config: boolean;
+  providers: {
+    claude: {
+      enabled: boolean;
+      settings_local: boolean;
+      mcp_config: boolean;
+    };
+    codex: {
+      enabled: boolean;
+    };
   };
   backup: {
     path: string;
@@ -18,7 +25,7 @@ export interface FileEntry {
   relativePath: string;
   isSymlink: boolean;
   originalSymlinkTarget?: string;
-  mcpServersOnly?: string; // JSON string of { mcpServers: ... } - written instead of sourcePath
+  mcpServersOnly?: string;
 }
 
 export interface Manifest {
@@ -26,22 +33,32 @@ export interface Manifest {
   timestamp: string;
   sourceHost: string;
   claudeVersion: string | null;
+  providers: ProviderName[];
   files: FileEntry[];
 }
 
+export interface CollectionPaths {
+  claudeDir: string;
+  codexDir: string;
+  claudeMcpConfigPath: string;
+  sharedAgentsDir: string;
+  sharedSkillsDir: string;
+  sharedSkillLockPath: string;
+}
+
 export interface CollectorOptions {
-  includeSettingsLocal: boolean;
-  includeMcpConfig: boolean;
+  providers: ProviderName[];
+  includeClaudeSettingsLocal: boolean;
+  includeClaudeMcpConfig: boolean;
   dryRun?: boolean;
+  paths?: Partial<CollectionPaths>;
 }
 
 export interface PushOptions {
   dryRun: boolean;
   skipVersionCheck: boolean;
-  target?: string;
 }
 
 export interface BackupOptions {
   dryRun: boolean;
-  output?: string;
 }

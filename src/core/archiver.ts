@@ -1,12 +1,26 @@
 import { copyFile, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import type { FileEntry, Manifest } from "../types/index.ts";
+import { isProviderName } from "../config/providers.ts";
+import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
-const PACKAGE_VERSION = "1.0.0";
+const PACKAGE_VERSION = "1.1.0";
+
+function getManifestProviders(files: FileEntry[]): ProviderName[] {
+  const providers = new Set<ProviderName>();
+
+  for (const file of files) {
+    const firstSegment = file.relativePath.split("/")[0];
+    if (isProviderName(firstSegment)) {
+      providers.add(firstSegment);
+    }
+  }
+
+  return Array.from(providers);
+}
 
 export async function createArchive(files: FileEntry[], outputPath: string): Promise<string> {
   const tempDir = join(dirname(outputPath), `.ccm-temp-${Date.now()}`);
@@ -21,7 +35,6 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
       await mkdir(destDir, { recursive: true });
 
       if (file.mcpServersOnly) {
-        // Write the extracted mcpServers JSON instead of copying source
         await Bun.write(destPath, file.mcpServersOnly);
       } else {
         await copyFile(file.sourcePath, destPath);
@@ -33,6 +46,7 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
       timestamp: new Date().toISOString(),
       sourceHost: hostname(),
       claudeVersion: await getClaudeVersion(),
+      providers: getManifestProviders(files),
       files,
     };
 
@@ -42,8 +56,6 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
     const archiveDir = dirname(outputPath);
 
     await Bun.$`mkdir -p ${archiveDir}`;
-
-    // COPYFILE_DISABLE=1 prevents macOS extended attributes from being included
     await Bun.$`COPYFILE_DISABLE=1 tar -czf ${outputPath} -C ${tempDir} .`;
 
     log.success(`Created archive: ${outputPath}`);

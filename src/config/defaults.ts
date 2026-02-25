@@ -4,13 +4,18 @@ export const DEFAULT_CONFIG: Config = {
   target: {
     type: "ssh",
     host: "user@example.com",
-    path: "~/.claude",
   },
-  include: {
-    settings_local: false,
-    mcp_config: true,
+  providers: {
+    claude: {
+      enabled: true,
+      settings_local: false,
+      mcp_config: true,
+    },
+    codex: {
+      enabled: true,
+    },
   },
   backup: {
-    path: "~/backups/claude",
+    path: "~/backups/ccm",
   },
 };
