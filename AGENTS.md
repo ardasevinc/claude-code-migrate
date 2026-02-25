@@ -1,57 +1,73 @@
 # CCM Agent Guide
 
-CLI tool: `ccm` - migrates Claude Code configs between machines.
+CLI tool: `ccm` - migrates AI CLI configs between machines.
+
+Current release line: `1.x` (semver tags use `vX.Y.Z`).
 
 ## Stack
 - **Runtime**: Bun (not Node)
 - **CLI**: Commander
 - **Config**: TOML via smol-toml
 
+## Scope
+- Providers at launch: `claude`, `codex`
+- Shared skills source: `~/.agents/skills`
+- Shared skill lock file: `~/.agents/.skill-lock.json`
+
 ## Structure
 
-```
+```text
 src/
-├── index.ts          # Entry point
-├── cli.ts            # Commander setup
-├── commands/         # CLI commands
-│   ├── backup.ts     # Local archive creation
-│   ├── push.ts       # SSH push to remote
-│   └── config.ts     # Config management
+├── index.ts
+├── cli.ts
+├── commands/
+│   ├── backup.ts
+│   ├── push.ts
+│   ├── restore.ts
+│   └── config.ts
 ├── core/
-│   ├── collector.ts  # File discovery & symlink handling
-│   ├── archiver.ts   # Tar.gz creation
-│   ├── ssh.ts        # SSH/SCP operations
+│   ├── arg-parser.ts
+│   ├── collector.ts
+│   ├── archiver.ts
+│   ├── restore.ts
+│   ├── ssh.ts
+│   ├── mcp.ts
 │   └── version-checker.ts
 ├── config/
-│   ├── schema.ts     # CLAUDE_DIR, paths, include/exclude lists
-│   ├── loader.ts     # TOML config loading
+│   ├── providers.ts
+│   ├── schema.ts
+│   ├── loader.ts
 │   └── defaults.ts
-├── types/index.ts    # TypeScript interfaces
-└── utils/logger.ts   # Chalk-based logging
+├── types/index.ts
+└── utils/logger.ts
 ```
 
 ## Key files
-
-- `config/schema.ts`: defines `ALWAYS_INCLUDE`, `INCLUDE_IF_EXISTS`, `NEVER_MIGRATE` lists
-- `core/collector.ts`: handles symlink-to-directory resolution via `realpath()` + stat
-- `core/ssh.ts`: bulk copy via single `cp -r` (not per-file)
+- `config/providers.ts`: provider definitions, include/exclude rules, shared paths
+- `core/collector.ts`: provider-aware collection, shared skill dedup for Claude symlinks
+- `core/ssh.ts`: remote deploy, Claude MCP merge, shared skill symlink recreation
+- `core/restore.ts`: local restore flow with provider filtering and dry-run support
 
 ## Commands
 
 ```bash
 bun src/index.ts backup --dry-run
-bun src/index.ts push user@host --dry-run
+bun src/index.ts backup codex --dry-run
+bun src/index.ts push claude user@host --dry-run
+bun src/index.ts restore ./ccm-backup.tar.gz codex --dry-run
 bun src/index.ts config --init
 ```
 
 ## Testing
 
 ```bash
-bun test  # No tests yet
+bun run check
 ```
 
-## Notes
+`check` = Biome + typecheck + tests.
 
-- MCP config (`.mcp-config.json` in archive) → `~/.claude.json` on remote (not inside `~/.claude/`)
-- Symlinks are resolved and contents copied (not preserved as symlinks)
-- `lstat()` used throughout - remember it returns symlink stats, not target stats
+## Notes
+- Archive layout is provider-scoped: `claude/`, `codex/`, `shared/agents/`
+- Claude MCP data is extracted to `claude/.mcp-config.json` in archive and merged into remote `~/.claude.json`
+- Shared skills are synced to `~/.agents/skills`; Claude shared-skill symlinks are recreated in `~/.claude/skills`
+- Remote paths are convention-based (`~/.claude`, `~/.codex`, `~/.agents`) and not configurable

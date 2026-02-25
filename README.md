@@ -2,6 +2,10 @@
 
 CLI tool for migrating AI CLI configurations between machines via SSH/SCP or local backup archives.
 
+Versioning:
+- Package uses semver (`1.2.0`, etc.)
+- Git release tags use `vX.Y.Z` (example: `v1.2.0`)
+
 Launch providers:
 - `claude` (`~/.claude`)
 - `codex` (`~/.codex`)

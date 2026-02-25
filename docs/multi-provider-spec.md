@@ -165,6 +165,7 @@ ccm-backup-2026-02-25.tar.gz
 - `ccm backup codex` — archives only codex + shared skills
 - `ccm restore archive.tar.gz` — restores everything
 - `ccm restore archive.tar.gz codex` — restores only codex from archive
+- `ccm restore archive.tar.gz --dry-run` — previews restore actions
 
 ---
 
