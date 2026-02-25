@@ -25,4 +25,22 @@ describe("ssh helpers", () => {
     expect(command).toContain("ln -s ");
     expect(command).not.toContain("ln -sfn");
   });
+
+  it("generates valid shell syntax (shellcheck)", () => {
+    const command = buildClaudeSharedSkillSymlinkCommand(
+      "/home/arda/.claude/skills",
+      "/home/arda/.agents/skills",
+    );
+
+    const result = Bun.spawnSync(["shellcheck", "-s", "sh", "-"], {
+      stdin: Buffer.from(command),
+    });
+
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.toString();
+      throw new Error(`shellcheck failed:\n${stderr}`);
+    }
+
+    expect(result.exitCode).toBe(0);
+  });
 });
