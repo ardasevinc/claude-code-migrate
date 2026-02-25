@@ -1,9 +1,10 @@
 import { log } from "../utils/logger.ts";
+import { runCommand, shellQuote } from "../utils/shell.ts";
 
 export async function getClaudeVersion(): Promise<string | null> {
   try {
-    const result = await Bun.$`claude --version`.quiet();
-    const output = result.stdout.toString().trim();
+    const result = await runCommand("claude --version", { quiet: true });
+    const output = result.stdout.trim();
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match?.[1] ?? null;
   } catch {
@@ -13,8 +14,10 @@ export async function getClaudeVersion(): Promise<string | null> {
 
 export async function getRemoteClaudeVersion(host: string): Promise<string | null> {
   try {
-    const result = await Bun.$`ssh ${host} "claude --version"`.quiet();
-    const output = result.stdout.toString().trim();
+    const result = await runCommand(`ssh ${shellQuote(host)} "claude --version"`, {
+      quiet: true,
+    });
+    const output = result.stdout.trim();
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match?.[1] ?? null;
   } catch {

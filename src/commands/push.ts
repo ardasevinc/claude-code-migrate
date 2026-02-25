@@ -8,6 +8,7 @@ import { previewPush, pushArchive, testConnection } from "../core/ssh.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
 import type { PushOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { runCommand, shellQuote } from "../utils/shell.ts";
 
 export async function pushCommand(
   arg1: string | undefined,
@@ -82,6 +83,6 @@ export async function pushCommand(
       process.exit(1);
     }
   } finally {
-    await Bun.$`rm -f ${tempArchive}`.quiet().nothrow();
+    await runCommand(`rm -f ${shellQuote(tempArchive)}`, { quiet: true, nothrow: true });
   }
 }

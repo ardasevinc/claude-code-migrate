@@ -1,20 +1,15 @@
 import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { runCommand, shellQuote } from "../utils/shell.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function runRemote(host: string, command: string, quiet = false) {
-  let proc = Bun.$`ssh ${host} ${command}`;
-
-  if (quiet) {
-    proc = proc.quiet();
-  }
-
-  return proc;
+async function runRemote(
+  host: string,
+  command: string,
+  options: { quiet?: boolean; nothrow?: boolean } = {},
+) {
+  return runCommand(`ssh ${shellQuote(host)} ${shellQuote(command)}`, options);
 }
 
 export function parseRemoteHome(rawStdout: string): string {
@@ -49,15 +44,19 @@ export function buildClaudeSharedSkillSymlinkCommand(
 }
 
 async function remotePathExists(host: string, path: string): Promise<boolean> {
-  const result = await runRemote(host, `test -e ${shellQuote(path)} && echo yes || echo no`, true);
+  const result = await runRemote(host, `test -e ${shellQuote(path)} && echo yes || echo no`, {
+    quiet: true,
+  });
 
-  return result.stdout.toString().trim() === "yes";
+  return result.stdout.trim() === "yes";
 }
 
 async function remoteDirectoryExists(host: string, path: string): Promise<boolean> {
-  const result = await runRemote(host, `test -d ${shellQuote(path)} && echo yes || echo no`, true);
+  const result = await runRemote(host, `test -d ${shellQuote(path)} && echo yes || echo no`, {
+    quiet: true,
+  });
 
-  return result.stdout.toString().trim() === "yes";
+  return result.stdout.trim() === "yes";
 }
 
 async function syncDirectory(host: string, sourceDir: string, targetDir: string): Promise<void> {
@@ -68,7 +67,7 @@ async function syncDirectory(host: string, sourceDir: string, targetDir: string)
 async function backupDirectoryIfExists(host: string, dirPath: string): Promise<void> {
   const backupDir = `${dirPath}.backup-${Date.now()}`;
   const command = `if [ -d ${shellQuote(dirPath)} ]; then cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}; fi`;
-  await runRemote(host, command, true).nothrow();
+  await runRemote(host, command, { quiet: true, nothrow: true });
 }
 
 async function mergeClaudeMcpConfig(
@@ -76,22 +75,19 @@ async function mergeClaudeMcpConfig(
   incomingPath: string,
   remoteMcpPath: string,
 ): Promise<void> {
-  const incomingResult = await runRemote(host, `cat ${shellQuote(incomingPath)}`, true);
+  const incomingResult = await runRemote(host, `cat ${shellQuote(incomingPath)}`, { quiet: true });
   const existingResult = await runRemote(
     host,
     `if [ -f ${shellQuote(remoteMcpPath)} ]; then cat ${shellQuote(remoteMcpPath)}; else echo '{}'; fi`,
-    true,
+    { quiet: true },
   );
 
-  const mergedJson = mergeMcpServers(
-    existingResult.stdout.toString(),
-    incomingResult.stdout.toString(),
-  );
+  const mergedJson = mergeMcpServers(existingResult.stdout, incomingResult.stdout);
 
   const b64 = Buffer.from(mergedJson).toString("base64");
   await runRemote(host, `echo ${shellQuote(b64)} | base64 -d > ${shellQuote(remoteMcpPath)}`);
 
-  const incoming = JSON.parse(incomingResult.stdout.toString()) as {
+  const incoming = JSON.parse(incomingResult.stdout) as {
     mcpServers?: Record<string, unknown>;
   };
   const serverCount = Object.keys(incoming.mcpServers ?? {}).length;
@@ -113,17 +109,20 @@ async function recreateClaudeSharedSkillSymlinks(
 }
 
 export async function testConnection(host: string): Promise<boolean> {
-  try {
-    const result = await Bun.$`ssh -o BatchMode=yes -o ConnectTimeout=5 ${host} "echo ok"`.quiet();
-    return result.stdout.toString().trim() === "ok";
-  } catch {
-    return false;
-  }
+  const result = await runCommand(
+    `ssh -o BatchMode=yes -o ConnectTimeout=5 ${shellQuote(host)} "echo ok"`,
+    {
+      quiet: true,
+      nothrow: true,
+    },
+  );
+
+  return result.exitCode === 0 && result.stdout.trim() === "ok";
 }
 
 export async function getRemoteHome(host: string): Promise<string> {
-  const result = await Bun.$`ssh ${host} 'echo $HOME'`.quiet();
-  return parseRemoteHome(result.stdout.toString());
+  const result = await runCommand(`ssh ${shellQuote(host)} 'echo $HOME'`, { quiet: true });
+  return parseRemoteHome(result.stdout);
 }
 
 export async function pushArchive(archivePath: string, host: string): Promise<boolean> {
@@ -138,7 +137,8 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
     const remoteMcpPath = join(remoteHome, ".claude.json");
 
     log.info(`Uploading archive to ${host}...`);
-    await Bun.$`scp ${archivePath} ${host}:${remoteTempArchive}`;
+    const remoteSpec = `${host}:${remoteTempArchive}`;
+    await runCommand(`scp ${shellQuote(archivePath)} ${shellQuote(remoteSpec)}`);
 
     log.info("Extracting on remote...");
     await runRemote(
@@ -189,11 +189,10 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
     log.error(`Push failed: ${error}`);
     return false;
   } finally {
-    await runRemote(
-      host,
-      `rm -rf ${shellQuote(remoteTempArchive)} ${shellQuote(remoteTempDir)}`,
-      true,
-    ).nothrow();
+    await runRemote(host, `rm -rf ${shellQuote(remoteTempArchive)} ${shellQuote(remoteTempDir)}`, {
+      quiet: true,
+      nothrow: true,
+    });
   }
 }
 
