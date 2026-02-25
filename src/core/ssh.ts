@@ -29,18 +29,9 @@ export function buildClaudeSharedSkillSymlinkCommand(
   claudeSkillsDir: string,
   agentsSkillsDir: string,
 ): string {
-  return [
-    `mkdir -p ${shellQuote(claudeSkillsDir)}`,
-    `if [ -d ${shellQuote(agentsSkillsDir)} ]; then`,
-    ` for skill in ${shellQuote(agentsSkillsDir)}/*; do`,
-    `  [ -d "$skill" ] || continue;`,
-    `  name=$(basename "$skill");`,
-    `  target=${shellQuote(claudeSkillsDir)}/"$name";`,
-    `  rm -rf "$target";`,
-    `  ln -s ${shellQuote(agentsSkillsDir)}/"$name" "$target";`,
-    ` done;`,
-    `fi`,
-  ].join(" ");
+  const cs = shellQuote(claudeSkillsDir);
+  const as_ = shellQuote(agentsSkillsDir);
+  return `mkdir -p ${cs}; if [ -d ${as_} ]; then for skill in ${as_}/*; do [ -d "$skill" ] || continue; name=$(basename "$skill"); target=${cs}/"$name"; rm -rf "$target"; ln -s ${as_}/"$name" "$target"; done; fi`;
 }
 
 async function remotePathExists(host: string, path: string): Promise<boolean> {
