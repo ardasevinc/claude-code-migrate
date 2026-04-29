@@ -30,14 +30,17 @@
   },
   "scripts": {
     "start": "bun run src/index.ts",
-    "test": "bun test",
-    "lint": "biome lint src/",
-    "format": "biome format src/",
-    "format:fix": "biome format --write src/",
-    "lint:fix": "biome lint --fix src/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "format": "biome format .",
+    "format:fix": "biome format --write .",
     "typecheck": "tsc --noEmit",
-    "check": "biome check src/ && tsc --noEmit && bun test",
-    "check:fix": "biome check --write src/ && tsc --noEmit && bun test"
+    "gate": "bun run lint && bun run format && bun run typecheck && bun run test",
+    "full-gate": "bun run gate",
+    "check": "bun run gate",
+    "check:fix": "biome check --write . && bun run typecheck && bun run test"
   },
   "dependencies": {
     "chalk": "^5.6.2",
@@ -47,6 +50,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.4",
     "@types/bun": "latest",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.5"
   }
 }

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { resolveProvidersToRestore } from "./restore.ts";
+import { describe, expect, it } from "vitest";
+import { resolveProvidersToRestore } from "../../src/core/restore.ts";
 
 describe("restore helpers", () => {
   it("returns all available providers when none is requested", () => {

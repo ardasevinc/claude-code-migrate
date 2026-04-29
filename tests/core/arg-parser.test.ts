@@ -1,11 +1,11 @@
-import { describe, expect, it } from "bun:test";
-import type { Config, ProviderName } from "../types/index.ts";
+import { describe, expect, it } from "vitest";
+import type { Config, ProviderName } from "../../src/types/index.ts";
 import {
   getEnabledProviders,
   resolveBackupArguments,
   resolvePushArguments,
   resolveRestoreProvider,
-} from "./arg-parser.ts";
+} from "../../src/core/arg-parser.ts";
 
 function makeConfig(enabled: ProviderName[]): Config {
   return {

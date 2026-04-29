@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, symlink, writeFile as writeFileFs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectFiles } from "./collector.ts";
+import { collectFiles } from "../../src/core/collector.ts";
 
 let rootDir = "";
 

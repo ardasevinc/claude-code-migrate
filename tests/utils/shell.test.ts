@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { runCommand, shellQuote } from "./shell.ts";
+import { describe, expect, it } from "vitest";
+import { runCommand, shellQuote } from "../../src/utils/shell.ts";
 
 describe("shell wrapper", () => {
   it("returns stdout for successful commands", async () => {

@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectCodexMcpPathWarnings, mergeMcpServers } from "./mcp.ts";
+import { detectCodexMcpPathWarnings, mergeMcpServers } from "../../src/core/mcp.ts";
 
 let rootDir = "";
 

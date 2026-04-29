@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
-import { buildClaudeSharedSkillSymlinkCommand, parseRemoteHome } from "./ssh.ts";
+import { spawnSync } from "node:child_process";
+import { describe, expect, it } from "vitest";
+import { buildClaudeSharedSkillSymlinkCommand, parseRemoteHome } from "../../src/core/ssh.ts";
 
 describe("ssh helpers", () => {
   it("parses remote home when absolute", () => {
@@ -32,15 +33,15 @@ describe("ssh helpers", () => {
       "/home/arda/.agents/skills",
     );
 
-    const result = Bun.spawnSync(["shellcheck", "-s", "sh", "-"], {
-      stdin: Buffer.from(command),
+    const result = spawnSync("shellcheck", ["-s", "sh", "-"], {
+      input: command,
     });
 
-    if (result.exitCode !== 0) {
+    if (result.status !== 0) {
       const stderr = result.stderr.toString();
       throw new Error(`shellcheck failed:\n${stderr}`);
     }
 
-    expect(result.exitCode).toBe(0);
+    expect(result.status).toBe(0);
   });
 });

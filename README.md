@@ -80,10 +80,18 @@ path = "~/backups/ccm"
 ## Full Gate
 
 ```bash
-bun run check
+bun run full-gate
 ```
 
-`check` runs Biome, typecheck, and tests.
+`full-gate` runs Biome lint, Biome format check, TypeScript typecheck, and Vitest.
+
+Useful scripts:
+
+```bash
+bun run test        # Vitest once
+bun run test:watch  # Vitest watch mode
+bun run check       # alias for gate
+```
 
 ## License
 
