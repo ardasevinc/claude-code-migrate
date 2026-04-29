@@ -22,6 +22,17 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
   await runCommand(`cp -r ${shellQuote(sourceDir)}/. ${shellQuote(targetDir)}/`);
 }
 
+export async function backupLocalDirectoryIfExists(dirPath: string): Promise<string | null> {
+  if (!(await exists(dirPath))) {
+    return null;
+  }
+
+  const backupDir = `${dirPath}.backup-${Date.now()}`;
+  await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
+  log.dim(`  Backed up ${dirPath} -> ${backupDir}`);
+  return backupDir;
+}
+
 async function mergeLocalClaudeMcp(extractRoot: string): Promise<void> {
   const incomingPath = join(extractRoot, "claude", ".mcp-config.json");
 
@@ -125,17 +136,20 @@ export async function restoreArchive(
     }
 
     if (providersToRestore.includes("claude")) {
+      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.claudeDir);
       await mergeLocalClaudeMcp(tempDir);
       await copyDirectoryContents(join(tempDir, "claude"), DEFAULT_COLLECTION_PATHS.claudeDir);
       log.success(`Restored Claude provider to ${DEFAULT_COLLECTION_PATHS.claudeDir}`);
     }
 
     if (providersToRestore.includes("codex")) {
+      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.codexDir);
       await copyDirectoryContents(join(tempDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
       log.success(`Restored Codex provider to ${DEFAULT_COLLECTION_PATHS.codexDir}`);
     }
 
     if (needsShared && hasShared) {
+      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.sharedAgentsDir);
       await copyDirectoryContents(sharedExtractPath, DEFAULT_COLLECTION_PATHS.sharedAgentsDir);
       log.success(`Restored shared skills to ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
     }

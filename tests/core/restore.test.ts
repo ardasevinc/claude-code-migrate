@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveProvidersToRestore } from "../../src/core/restore.ts";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { backupLocalDirectoryIfExists, resolveProvidersToRestore } from "../../src/core/restore.ts";
 
 describe("restore helpers", () => {
   it("returns all available providers when none is requested", () => {
@@ -12,5 +15,32 @@ describe("restore helpers", () => {
 
   it("returns empty when requested provider is missing", () => {
     expect(resolveProvidersToRestore(["codex"], "claude")).toEqual([]);
+  });
+
+  it("backs up existing local directories before restore", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-restore-backup-test-"));
+
+    try {
+      const targetDir = join(rootDir, ".codex");
+      await mkdir(targetDir);
+      await writeFile(join(targetDir, "config.toml"), 'model = "test"\n', "utf8");
+
+      const backupDir = await backupLocalDirectoryIfExists(targetDir);
+
+      expect(backupDir).toMatch(/\.codex\.backup-\d+$/);
+      expect(await readFile(join(backupDir ?? "", "config.toml"), "utf8")).toBe('model = "test"\n');
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not create a backup for missing local directories", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-restore-backup-test-"));
+
+    try {
+      await expect(backupLocalDirectoryIfExists(join(rootDir, ".codex"))).resolves.toBeNull();
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 });
