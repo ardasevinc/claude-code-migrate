@@ -49,6 +49,8 @@ ccm push                        # all enabled providers + shared (host from conf
 ccm push codex                  # codex + shared
 ccm push user@host              # all enabled providers + shared
 ccm push claude user@host       # claude + shared
+ccm push --all user@host        # all providers + shared, regardless of config enablement
+ccm push --providers claude,codex user@host
 ccm push --dry-run
 ```
 

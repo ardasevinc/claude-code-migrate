@@ -42,8 +42,59 @@ describe("arg-parser", () => {
     expect(resolved.target).toBe("user@host");
   });
 
+  it("resolves explicit push provider lists", () => {
+    const resolved = resolvePushArguments("user@host", undefined, ["claude"], {
+      providers: "claude,codex",
+    });
+
+    expect(resolved.providers).toEqual(["claude", "codex"]);
+    expect(resolved.target).toBe("user@host");
+  });
+
+  it("deduplicates explicit push provider lists", () => {
+    const resolved = resolvePushArguments("user@host", undefined, ["claude"], {
+      providers: "claude,codex,claude",
+    });
+
+    expect(resolved.providers).toEqual(["claude", "codex"]);
+  });
+
+  it("resolves all push providers", () => {
+    const resolved = resolvePushArguments("user@host", undefined, ["claude"], { all: true });
+
+    expect(resolved.providers).toEqual(["claude", "codex"]);
+    expect(resolved.target).toBe("user@host");
+  });
+
   it("rejects ambiguous push args", () => {
     expect(() => resolvePushArguments("user@host", "other", ["claude"])).toThrow();
+  });
+
+  it("rejects invalid explicit push provider lists", () => {
+    expect(() =>
+      resolvePushArguments("user@host", undefined, ["claude"], { providers: "claude,nope" }),
+    ).toThrow("Unknown provider 'nope'");
+  });
+
+  it("rejects conflicting explicit push provider options", () => {
+    expect(() =>
+      resolvePushArguments("user@host", undefined, ["claude"], {
+        all: true,
+        providers: "claude,codex",
+      }),
+    ).toThrow("Use either --all or --providers");
+  });
+
+  it("rejects positional providers with explicit push provider options", () => {
+    expect(() =>
+      resolvePushArguments("claude", "user@host", ["claude"], {
+        providers: "claude,codex",
+      }),
+    ).toThrow("Do not combine --providers");
+
+    expect(() => resolvePushArguments("claude", "user@host", ["claude"], { all: true })).toThrow(
+      "Do not combine --all",
+    );
   });
 
   it("resolves backup arguments", () => {

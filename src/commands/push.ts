@@ -22,7 +22,10 @@ export async function pushCommand(
   let targetArg: string | undefined;
 
   try {
-    const resolved = resolvePushArguments(arg1, arg2, enabledProviders);
+    const resolved = resolvePushArguments(arg1, arg2, enabledProviders, {
+      all: options.all,
+      providers: options.providers,
+    });
     providers = resolved.providers;
     targetArg = resolved.target;
   } catch (error) {

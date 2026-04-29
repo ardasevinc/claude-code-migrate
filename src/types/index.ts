@@ -57,6 +57,8 @@ export interface CollectorOptions {
 export interface PushOptions {
   dryRun: boolean;
   skipVersionCheck: boolean;
+  providers?: string;
+  all?: boolean;
 }
 
 export interface BackupOptions {

@@ -5,6 +5,8 @@ import { runCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
+export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
+
 async function runRemote(
   host: string,
   command: string,
@@ -105,6 +107,32 @@ async function recreateClaudeSharedSkillSymlinks(
   await runRemote(host, command);
 }
 
+export function resolvePushActions(input: {
+  hasClaude: boolean;
+  hasCodex: boolean;
+  hasShared: boolean;
+}): PushAction[] {
+  const actions: PushAction[] = [];
+
+  if (input.hasClaude) {
+    actions.push("claude");
+  }
+
+  if (input.hasCodex) {
+    actions.push("codex");
+  }
+
+  if (input.hasShared) {
+    actions.push("shared");
+  }
+
+  if (input.hasClaude && input.hasShared) {
+    actions.push("claude-shared-symlinks");
+  }
+
+  return actions;
+}
+
 export async function testConnection(host: string): Promise<boolean> {
   const result = await runCommand(
     `ssh -o BatchMode=yes -o ConnectTimeout=5 ${shellQuote(host)} "echo ok"`,
@@ -151,33 +179,35 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
     const hasCodex = await remoteDirectoryExists(host, remoteCodexExtract);
     const hasShared = await remoteDirectoryExists(host, remoteSharedExtract);
 
-    if (hasClaude) {
-      log.info("Syncing Claude provider...");
-      await backupDirectoryIfExists(host, remoteClaudeDir);
+    for (const action of resolvePushActions({ hasClaude, hasCodex, hasShared })) {
+      if (action === "claude") {
+        log.info("Syncing Claude provider...");
+        await backupDirectoryIfExists(host, remoteClaudeDir);
 
-      const incomingMcpPath = join(remoteClaudeExtract, ".mcp-config.json");
-      if (await remotePathExists(host, incomingMcpPath)) {
-        await mergeClaudeMcpConfig(host, incomingMcpPath, remoteMcpPath);
+        const incomingMcpPath = join(remoteClaudeExtract, ".mcp-config.json");
+        if (await remotePathExists(host, incomingMcpPath)) {
+          await mergeClaudeMcpConfig(host, incomingMcpPath, remoteMcpPath);
+        }
+
+        await syncDirectory(host, remoteClaudeExtract, remoteClaudeDir);
       }
 
-      await syncDirectory(host, remoteClaudeExtract, remoteClaudeDir);
-    }
+      if (action === "codex") {
+        log.info("Syncing Codex provider...");
+        await backupDirectoryIfExists(host, remoteCodexDir);
+        await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
+      }
 
-    if (hasCodex) {
-      log.info("Syncing Codex provider...");
-      await backupDirectoryIfExists(host, remoteCodexDir);
-      await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
-    }
+      if (action === "shared") {
+        log.info("Syncing shared skills...");
+        await backupDirectoryIfExists(host, remoteAgentsDir);
+        await syncDirectory(host, remoteSharedExtract, remoteAgentsDir);
+      }
 
-    if (hasShared) {
-      log.info("Syncing shared skills...");
-      await backupDirectoryIfExists(host, remoteAgentsDir);
-      await syncDirectory(host, remoteSharedExtract, remoteAgentsDir);
-    }
-
-    if (hasClaude && hasShared) {
-      log.info("Recreating Claude shared skill symlinks...");
-      await recreateClaudeSharedSkillSymlinks(host, remoteClaudeDir, remoteAgentsDir);
+      if (action === "claude-shared-symlinks") {
+        log.info("Recreating Claude shared skill symlinks...");
+        await recreateClaudeSharedSkillSymlinks(host, remoteClaudeDir, remoteAgentsDir);
+      }
     }
 
     log.success(`Successfully pushed config to ${host}`);

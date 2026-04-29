@@ -1,4 +1,4 @@
-import { isProviderName } from "../config/providers.ts";
+import { isProviderName, PROVIDER_NAMES } from "../config/providers.ts";
 import type { Config, ProviderName } from "../types/index.ts";
 
 interface PushResolution {
@@ -9,6 +9,11 @@ interface PushResolution {
 interface BackupResolution {
   providers: ProviderName[];
   output?: string;
+}
+
+interface PushArgumentOptions {
+  all?: boolean;
+  providers?: string;
 }
 
 export function getEnabledProviders(config: Config): ProviderName[] {
@@ -33,12 +38,65 @@ function requireEnabledProviders(enabledProviders: ProviderName[]): ProviderName
   return enabledProviders;
 }
 
+function parseProviderList(rawProviders: string): ProviderName[] {
+  const providers = rawProviders
+    .split(",")
+    .map((provider) => provider.trim())
+    .filter(Boolean);
+
+  if (providers.length === 0) {
+    throw new Error("--providers requires at least one provider");
+  }
+
+  const uniqueProviders: ProviderName[] = [];
+  for (const provider of providers) {
+    if (!isProviderName(provider)) {
+      throw new Error(`Unknown provider '${provider}'. Valid providers: claude, codex`);
+    }
+
+    if (!uniqueProviders.includes(provider)) {
+      uniqueProviders.push(provider);
+    }
+  }
+
+  return uniqueProviders;
+}
+
 export function resolvePushArguments(
   arg1: string | undefined,
   arg2: string | undefined,
   enabledProviders: ProviderName[],
+  options: PushArgumentOptions = {},
 ): PushResolution {
   const defaults = requireEnabledProviders(enabledProviders);
+
+  if (options.all && options.providers) {
+    throw new Error("Use either --all or --providers, not both");
+  }
+
+  if (options.all) {
+    if (arg1 && isProviderName(arg1)) {
+      throw new Error("Do not combine --all with a positional provider");
+    }
+
+    if (arg2) {
+      throw new Error("Unexpected second argument with --all");
+    }
+
+    return { providers: PROVIDER_NAMES, target: arg1 };
+  }
+
+  if (options.providers) {
+    if (arg1 && isProviderName(arg1)) {
+      throw new Error("Do not combine --providers with a positional provider");
+    }
+
+    if (arg2) {
+      throw new Error("Unexpected second argument with --providers");
+    }
+
+    return { providers: parseProviderList(options.providers), target: arg1 };
+  }
 
   if (!arg1) {
     if (arg2) {

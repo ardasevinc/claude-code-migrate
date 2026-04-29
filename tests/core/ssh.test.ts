@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { buildClaudeSharedSkillSymlinkCommand, parseRemoteHome } from "../../src/core/ssh.ts";
+import {
+  buildClaudeSharedSkillSymlinkCommand,
+  parseRemoteHome,
+  resolvePushActions,
+} from "../../src/core/ssh.ts";
 
 describe("ssh helpers", () => {
   it("parses remote home when absolute", () => {
@@ -43,5 +47,33 @@ describe("ssh helpers", () => {
     }
 
     expect(result.status).toBe(0);
+  });
+
+  it("plans multi-provider pushes sequentially with shared symlinks last", () => {
+    expect(
+      resolvePushActions({
+        hasClaude: true,
+        hasCodex: true,
+        hasShared: true,
+      }),
+    ).toEqual(["claude", "codex", "shared", "claude-shared-symlinks"]);
+  });
+
+  it("only recreates claude shared skill symlinks when claude and shared are present", () => {
+    expect(
+      resolvePushActions({
+        hasClaude: false,
+        hasCodex: true,
+        hasShared: true,
+      }),
+    ).toEqual(["codex", "shared"]);
+
+    expect(
+      resolvePushActions({
+        hasClaude: true,
+        hasCodex: false,
+        hasShared: false,
+      }),
+    ).toEqual(["claude"]);
   });
 });
