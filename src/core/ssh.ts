@@ -3,7 +3,7 @@ import type { FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
-import { mergeMcpServers } from "./mcp.ts";
+import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
 
@@ -95,6 +95,52 @@ async function mergeClaudeMcpConfig(
   await runRemote(host, `rm -f ${shellQuote(incomingPath)}`);
 }
 
+async function normalizeRemoteCodexMcpCommands(
+  host: string,
+  remoteCodexConfigPath: string,
+): Promise<void> {
+  const existingResult = await runRemote(
+    host,
+    `if [ -f ${shellQuote(remoteCodexConfigPath)} ]; then cat ${shellQuote(remoteCodexConfigPath)}; fi`,
+    { quiet: true },
+  );
+
+  if (!existingResult.stdout.trim()) {
+    return;
+  }
+
+  const normalized = await normalizeCodexMcpCommandPaths(
+    existingResult.stdout,
+    async (binaryName) => {
+      const result = await runRemote(host, `command -v ${shellQuote(binaryName)}`, {
+        quiet: true,
+        nothrow: true,
+      });
+
+      return result.exitCode === 0 ? result.stdout.trim() || null : null;
+    },
+  );
+
+  for (const warning of normalized.warnings) {
+    log.warn(`[codex] MCP command normalization skipped: ${warning}`);
+  }
+
+  if (normalized.changes.length === 0) {
+    return;
+  }
+
+  const b64 = Buffer.from(normalized.content).toString("base64");
+  await runRemote(
+    host,
+    `echo ${shellQuote(b64)} | base64 -d > ${shellQuote(remoteCodexConfigPath)}`,
+  );
+
+  log.dim(`  Normalized ${normalized.changes.length} Codex MCP command path(s):`);
+  for (const change of normalized.changes) {
+    log.dim(`    ${change}`);
+  }
+}
+
 async function recreateClaudeSharedSkillSymlinks(
   host: string,
   remoteClaudeDir: string,
@@ -158,6 +204,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
     const remoteHome = await getRemoteHome(host);
     const remoteClaudeDir = join(remoteHome, ".claude");
     const remoteCodexDir = join(remoteHome, ".codex");
+    const remoteCodexConfigPath = join(remoteCodexDir, "config.toml");
     const remoteAgentsDir = join(remoteHome, ".agents");
     const remoteMcpPath = join(remoteHome, ".claude.json");
 
@@ -196,6 +243,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
         log.info("Syncing Codex provider...");
         await backupDirectoryIfExists(host, remoteCodexDir);
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
+        await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath);
       }
 
       if (action === "shared") {

@@ -16,6 +16,9 @@ Shared skills are migrated from `~/.agents/skills` when any provider is active.
 target host, but does not delete remote-only runtime state such as sessions, auth, logs, history,
 or cache.
 
+After pushing Codex, ccm normalizes path-based Codex MCP `command` values when the same binary is
+available on the remote `PATH`.
+
 ## Installation
 
 ```bash
