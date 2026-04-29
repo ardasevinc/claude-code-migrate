@@ -37,6 +37,24 @@ export function buildClaudeSharedSkillSymlinkCommand(
   return `mkdir -p ${cs}; if [ -d ${as_} ]; then for skill in ${as_}/*; do [ -d "$skill" ] || continue; name=$(basename "$skill"); target=${cs}/"$name"; rm -rf "$target"; ln -s ${as_}/"$name" "$target"; done; fi`;
 }
 
+export function buildRemoteCommandPathResolutionCommand(
+  binaryName: string,
+  remoteHome: string,
+): string {
+  const binary = shellQuote(binaryName);
+  const candidatePaths = [
+    join(remoteHome, ".bun", "bin", binaryName),
+    join(remoteHome, ".local", "bin", binaryName),
+    join(remoteHome, "bin", binaryName),
+    join("/usr/local/bin", binaryName),
+    join("/usr/bin", binaryName),
+  ]
+    .map(shellQuote)
+    .join(" ");
+
+  return `resolved=$(command -v ${binary} 2>/dev/null) && { printf '%s\\n' "$resolved"; exit 0; }; for candidate in ${candidatePaths}; do if [ -x "$candidate" ]; then printf '%s\\n' "$candidate"; exit 0; fi; done; exit 1`;
+}
+
 async function remotePathExists(host: string, path: string): Promise<boolean> {
   const result = await runRemote(host, `test -e ${shellQuote(path)} && echo yes || echo no`, {
     quiet: true,
@@ -98,6 +116,7 @@ async function mergeClaudeMcpConfig(
 async function normalizeRemoteCodexMcpCommands(
   host: string,
   remoteCodexConfigPath: string,
+  remoteHome: string,
 ): Promise<void> {
   const existingResult = await runRemote(
     host,
@@ -112,10 +131,14 @@ async function normalizeRemoteCodexMcpCommands(
   const normalized = await normalizeCodexMcpCommandPaths(
     existingResult.stdout,
     async (binaryName) => {
-      const result = await runRemote(host, `command -v ${shellQuote(binaryName)}`, {
-        quiet: true,
-        nothrow: true,
-      });
+      const result = await runRemote(
+        host,
+        buildRemoteCommandPathResolutionCommand(binaryName, remoteHome),
+        {
+          quiet: true,
+          nothrow: true,
+        },
+      );
 
       return result.exitCode === 0 ? result.stdout.trim() || null : null;
     },
@@ -243,7 +266,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
         log.info("Syncing Codex provider...");
         await backupDirectoryIfExists(host, remoteCodexDir);
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
-        await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath);
+        await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath, remoteHome);
       }
 
       if (action === "shared") {

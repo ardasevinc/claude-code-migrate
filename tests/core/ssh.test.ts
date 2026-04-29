@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   buildClaudeSharedSkillSymlinkCommand,
+  buildRemoteCommandPathResolutionCommand,
   parseRemoteHome,
   resolvePushActions,
 } from "../../src/core/ssh.ts";
@@ -36,6 +37,30 @@ describe("ssh helpers", () => {
       "/home/arda/.claude/skills",
       "/home/arda/.agents/skills",
     );
+
+    const result = spawnSync("shellcheck", ["-s", "sh", "-"], {
+      input: command,
+    });
+
+    if (result.status !== 0) {
+      const stderr = result.stderr.toString();
+      throw new Error(`shellcheck failed:\n${stderr}`);
+    }
+
+    expect(result.status).toBe(0);
+  });
+
+  it("builds command lookup with common remote user bin fallbacks", () => {
+    const command = buildRemoteCommandPathResolutionCommand("exa-mcp-server", "/home/arda");
+
+    expect(command).toContain("command -v 'exa-mcp-server'");
+    expect(command).toContain("'/home/arda/.bun/bin/exa-mcp-server'");
+    expect(command).toContain("'/home/arda/.local/bin/exa-mcp-server'");
+    expect(command).toContain("'/home/arda/bin/exa-mcp-server'");
+  });
+
+  it("generates valid command lookup shell syntax (shellcheck)", () => {
+    const command = buildRemoteCommandPathResolutionCommand("exa-mcp-server", "/home/arda");
 
     const result = spawnSync("shellcheck", ["-s", "sh", "-"], {
       input: command,
