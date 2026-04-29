@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
+import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
 async function runRemote(
@@ -56,9 +57,14 @@ async function syncDirectory(host: string, sourceDir: string, targetDir: string)
 }
 
 async function backupDirectoryIfExists(host: string, dirPath: string): Promise<void> {
-  const backupDir = `${dirPath}.backup-${Date.now()}`;
-  const command = `if [ -d ${shellQuote(dirPath)} ]; then cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}; fi`;
-  await runRemote(host, command, { quiet: true, nothrow: true });
+  const dir = shellQuote(dirPath);
+  const pruneCommand = buildRemoteBackupPruneCommand(dirPath);
+  const command = `if [ -d ${dir} ]; then backup=${dir}.backup-$(date +%s%3N); cp -r ${dir} "$backup" && { ${pruneCommand}; }; fi`;
+  const result = await runRemote(host, command, { quiet: true, nothrow: true });
+
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to back up or prune ${dirPath} on ${host}: ${result.stderr || result.stdout}`);
+  }
 }
 
 async function mergeClaudeMcpConfig(

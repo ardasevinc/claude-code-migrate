@@ -6,6 +6,7 @@ import type { ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
+import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
 async function exists(path: string): Promise<boolean> {
@@ -30,6 +31,7 @@ export async function backupLocalDirectoryIfExists(dirPath: string): Promise<str
   const backupDir = `${dirPath}.backup-${Date.now()}`;
   await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
   log.dim(`  Backed up ${dirPath} -> ${backupDir}`);
+  await pruneLocalBackupsIfParentExists(dirPath);
   return backupDir;
 }
 

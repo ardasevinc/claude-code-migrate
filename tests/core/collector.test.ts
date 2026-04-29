@@ -117,4 +117,27 @@ describe("collector multi-provider", () => {
     expect(paths).toContain("shared/agents/.skill-lock.json");
     expect(paths.some((path) => path.startsWith("claude/"))).toBe(false);
   });
+
+  it("collects claude, codex, and shared once for multi-provider pushes", async () => {
+    const files = await collectFiles({
+      providers: ["claude", "codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: true,
+      paths: {
+        claudeDir: join(rootDir, ".claude"),
+        codexDir: join(rootDir, ".codex"),
+        claudeMcpConfigPath: join(rootDir, ".claude.json"),
+        sharedAgentsDir: join(rootDir, ".agents"),
+        sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
+      },
+    });
+
+    const paths = files.map((file) => file.relativePath);
+
+    expect(paths).toContain("claude/CLAUDE.md");
+    expect(paths).toContain("codex/AGENTS.md");
+    expect(paths).toContain("shared/agents/skills/shared-skill/SKILL.md");
+    expect(paths.filter((path) => path === "shared/agents/.skill-lock.json")).toHaveLength(1);
+  });
 });

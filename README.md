@@ -12,6 +12,10 @@ Launch providers:
 
 Shared skills are migrated from `~/.agents/skills` when any provider is active.
 
+`ccm push` uses overlay semantics: it overwrites/adds the selected portable config on the
+target host, but does not delete remote-only runtime state such as sessions, auth, logs, history,
+or cache.
+
 ## Installation
 
 ```bash
