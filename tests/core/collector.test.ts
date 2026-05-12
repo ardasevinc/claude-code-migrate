@@ -16,6 +16,7 @@ beforeEach(async () => {
   const claudeDir = join(rootDir, ".claude");
   const codexDir = join(rootDir, ".codex");
   const sharedSkillsDir = join(rootDir, ".agents", "skills");
+  const sharedLazySkillsDir = join(rootDir, ".agents", "lazy-skills");
 
   await mkdir(join(claudeDir, "agents"), { recursive: true });
   await mkdir(join(claudeDir, "skills", "native"), { recursive: true });
@@ -23,6 +24,7 @@ beforeEach(async () => {
   await mkdir(join(codexDir, "rules"), { recursive: true });
   await mkdir(join(codexDir, "skills"), { recursive: true });
   await mkdir(join(sharedSkillsDir, "shared-skill"), { recursive: true });
+  await mkdir(join(sharedLazySkillsDir, "lazy-pack"), { recursive: true });
 
   await writeFixtureFile(join(claudeDir, "CLAUDE.md"), "claude");
   await writeFixtureFile(join(claudeDir, "settings.json"), "{}");
@@ -57,6 +59,7 @@ command = "./scripts/run-mcp"
   await writeFixtureFile(join(codexDir, "skills", "codex-skill.md"), "skill");
 
   await writeFixtureFile(join(sharedSkillsDir, "shared-skill", "SKILL.md"), "shared");
+  await writeFixtureFile(join(sharedLazySkillsDir, "lazy-pack", "SKILL.md"), "lazy");
   await writeFixtureFile(join(rootDir, ".agents", ".skill-lock.json"), "{}\n");
 });
 
@@ -78,6 +81,7 @@ describe("collector multi-provider", () => {
         claudeMcpConfigPath: join(rootDir, ".claude.json"),
         sharedAgentsDir: join(rootDir, ".agents"),
         sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
         sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
       },
     });
@@ -89,6 +93,7 @@ describe("collector multi-provider", () => {
     expect(paths).toContain("claude/.mcp-config.json");
 
     expect(paths).toContain("shared/agents/skills/shared-skill/SKILL.md");
+    expect(paths).toContain("shared/agents/lazy-skills/lazy-pack/SKILL.md");
     expect(paths).toContain("shared/agents/.skill-lock.json");
 
     expect(paths).not.toContain("claude/skills/shared-skill/SKILL.md");
@@ -105,6 +110,7 @@ describe("collector multi-provider", () => {
         claudeMcpConfigPath: join(rootDir, ".claude.json"),
         sharedAgentsDir: join(rootDir, ".agents"),
         sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
         sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
       },
     });
@@ -114,6 +120,7 @@ describe("collector multi-provider", () => {
     expect(paths).toContain("codex/config.toml");
     expect(paths).toContain("codex/AGENTS.md");
     expect(paths).toContain("shared/agents/skills/shared-skill/SKILL.md");
+    expect(paths).toContain("shared/agents/lazy-skills/lazy-pack/SKILL.md");
     expect(paths).toContain("shared/agents/.skill-lock.json");
     expect(paths.some((path) => path.startsWith("claude/"))).toBe(false);
   });
@@ -129,6 +136,7 @@ describe("collector multi-provider", () => {
         claudeMcpConfigPath: join(rootDir, ".claude.json"),
         sharedAgentsDir: join(rootDir, ".agents"),
         sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
         sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
       },
     });
@@ -138,6 +146,9 @@ describe("collector multi-provider", () => {
     expect(paths).toContain("claude/CLAUDE.md");
     expect(paths).toContain("codex/AGENTS.md");
     expect(paths).toContain("shared/agents/skills/shared-skill/SKILL.md");
+    expect(
+      paths.filter((path) => path === "shared/agents/lazy-skills/lazy-pack/SKILL.md"),
+    ).toHaveLength(1);
     expect(paths.filter((path) => path === "shared/agents/.skill-lock.json")).toHaveLength(1);
   });
 });

@@ -43,6 +43,7 @@ export interface CollectionPaths {
   claudeMcpConfigPath: string;
   sharedAgentsDir: string;
   sharedSkillsDir: string;
+  sharedLazySkillsDir: string;
   sharedSkillLockPath: string;
 }
 

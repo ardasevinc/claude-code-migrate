@@ -127,7 +127,7 @@ export async function restoreArchive(
       }
 
       if (needsShared && hasShared) {
-        log.dim(`  shared skills -> ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
+        log.dim(`  shared agents assets -> ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
       }
 
       if (providersToRestore.includes("claude") && needsShared && hasShared) {
@@ -153,7 +153,7 @@ export async function restoreArchive(
     if (needsShared && hasShared) {
       await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.sharedAgentsDir);
       await copyDirectoryContents(sharedExtractPath, DEFAULT_COLLECTION_PATHS.sharedAgentsDir);
-      log.success(`Restored shared skills to ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
+      log.success(`Restored shared agents assets to ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
     }
 
     if (providersToRestore.includes("claude") && needsShared && hasShared) {

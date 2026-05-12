@@ -22,6 +22,7 @@ export const CLAUDE_MCP_CONFIG_PATH = join(home, ".claude.json");
 
 export const SHARED_AGENTS_DIR = join(home, ".agents");
 export const SHARED_SKILLS_DIR = join(SHARED_AGENTS_DIR, "skills");
+export const SHARED_LAZY_SKILLS_DIR = join(SHARED_AGENTS_DIR, "lazy-skills");
 export const SHARED_SKILL_LOCK_PATH = join(SHARED_AGENTS_DIR, ".skill-lock.json");
 
 export const SHARED_ARCHIVE_PREFIX = "shared/agents";
@@ -32,6 +33,7 @@ export const DEFAULT_COLLECTION_PATHS: CollectionPaths = {
   claudeMcpConfigPath: CLAUDE_MCP_CONFIG_PATH,
   sharedAgentsDir: SHARED_AGENTS_DIR,
   sharedSkillsDir: SHARED_SKILLS_DIR,
+  sharedLazySkillsDir: SHARED_LAZY_SKILLS_DIR,
   sharedSkillLockPath: SHARED_SKILL_LOCK_PATH,
 };
 

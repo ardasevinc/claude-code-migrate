@@ -12,6 +12,7 @@ Current release line: `1.x` (semver tags use `vX.Y.Z`).
 ## Scope
 - Providers at launch: `claude`, `codex`
 - Shared skills source: `~/.agents/skills`
+- Shared lazy skills source: `~/.agents/lazy-skills`
 - Shared skill lock file: `~/.agents/.skill-lock.json`
 
 ## Structure
@@ -69,5 +70,5 @@ bun run check
 ## Notes
 - Archive layout is provider-scoped: `claude/`, `codex/`, `shared/agents/`
 - Claude MCP data is extracted to `claude/.mcp-config.json` in archive and merged into remote `~/.claude.json`
-- Shared skills are synced to `~/.agents/skills`; Claude shared-skill symlinks are recreated in `~/.claude/skills`
+- Shared skills and lazy skills are synced to `~/.agents/skills` and `~/.agents/lazy-skills`; Claude shared-skill symlinks are recreated in `~/.claude/skills`
 - Remote paths are convention-based (`~/.claude`, `~/.codex`, `~/.agents`) and not configurable

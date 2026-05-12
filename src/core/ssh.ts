@@ -270,7 +270,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
       }
 
       if (action === "shared") {
-        log.info("Syncing shared skills...");
+        log.info("Syncing shared agents assets...");
         await backupDirectoryIfExists(host, remoteAgentsDir);
         await syncDirectory(host, remoteSharedExtract, remoteAgentsDir);
       }

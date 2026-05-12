@@ -13,7 +13,7 @@ ccm evolves from a Claude Code-only config migrator into a multi-provider AI CLI
 | `claude` | `~/.claude` | Anthropic Claude Code CLI |
 | `codex` | `~/.codex` | OpenAI Codex CLI |
 
-**Shared skills** (`~/.agents/skills/`) are not a standalone provider. They are a dependency automatically pulled in when any provider that uses them is active.
+**Shared agent assets** (`~/.agents/skills/`, `~/.agents/lazy-skills/`) are not a standalone provider. They are a dependency automatically pulled in when any provider that uses them is active.
 
 ---
 
@@ -85,18 +85,19 @@ ccm evolves from a Claude Code-only config migrator into a multi-provider AI CLI
 
 **Special handling**:
 - **MCP config**: Embedded in `config.toml`. The file is migrated wholesale, but path-dependent MCP entries are detected and produce warnings (TOML-aware parsing).
-- **Shared skills**: Codex reads from `~/.agents/skills/` natively (no symlinks needed). When the codex provider is active, shared skills are automatically included.
+- **Shared skills**: Codex reads from `~/.agents/skills/` and `~/.agents/lazy-skills/` natively (no symlinks needed). When the codex provider is active, shared agent assets are automatically included.
 
 ---
 
-## Shared Skills (`~/.agents/skills/`)
+## Shared Agent Assets (`~/.agents/`)
 
-Shared skills live at `~/.agents/skills/` and are consumed by multiple AI CLI tools:
-- **Codex**: Reads from `~/.agents/skills/` natively via convention.
+Shared agent assets live under `~/.agents/` and are consumed by multiple AI CLI tools:
+- **Codex**: Reads from `~/.agents/skills/` and `~/.agents/lazy-skills/` natively via convention.
 - **Claude Code**: Accesses via symlinks in `~/.claude/skills/` (created by the Vercel skills tooling or manually).
 
 ### What gets migrated
 - All skill directories under `~/.agents/skills/`
+- All lazy skill directories under `~/.agents/lazy-skills/`
 - `~/.agents/.skill-lock.json` (skill registry/metadata)
 
 ### Behavior
@@ -108,6 +109,7 @@ Shared skills live at `~/.agents/skills/` and are consumed by multiple AI CLI to
 
 ### Remote deployment
 - Files are copied to `~/.agents/skills/` on the remote.
+- Lazy skills are copied to `~/.agents/lazy-skills/` on the remote.
 - `.skill-lock.json` is copied to `~/.agents/`.
 - For Claude Code: symlinks are created in `~/.claude/skills/` pointing to `~/.agents/skills/{skill}` for each shared skill.
 - For Codex: no symlinks needed (reads from `~/.agents/` directly).
@@ -155,6 +157,9 @@ ccm-backup-2026-02-25.tar.gz
 └── shared/
     └── agents/
         ├── .skill-lock.json
+        ├── lazy-skills/
+        │   └── browser-use/
+        │       └── ...
         └── skills/
             ├── find-skills/
             ├── interview/
@@ -233,6 +238,7 @@ push command
   → for each provider: collect files
   → if any provider declares shared skills dependency:
       → collect ~/.agents/skills/ (once)
+      → collect ~/.agents/lazy-skills/ (once)
       → collect ~/.agents/.skill-lock.json
   → deduplicate (remove claude symlinks that point to shared skills)
   → archive and push
@@ -246,4 +252,5 @@ push command
 | Claude native skill (e.g. `dokploy/`) | Collected under claude provider | Copied to `~/.claude/skills/` |
 | Claude symlinked skill → `~/.agents/skills/X` | Skipped in claude collection | Symlink created: `~/.claude/skills/X -> ~/.agents/skills/X` |
 | Shared skill in `~/.agents/skills/` | Collected as shared dependency | Copied to `~/.agents/skills/` |
+| Lazy skill in `~/.agents/lazy-skills/` | Collected as shared dependency | Copied to `~/.agents/lazy-skills/` |
 | Codex skill in `~/.codex/skills/` | Collected under codex provider | Copied to `~/.codex/skills/` |

@@ -292,7 +292,7 @@ async function collectProviderFiles(
   return entries;
 }
 
-async function collectSharedSkills(paths: CollectionPaths): Promise<FileEntry[]> {
+async function collectSharedAgentsFiles(paths: CollectionPaths): Promise<FileEntry[]> {
   const entries: FileEntry[] = [];
 
   if (await exists(paths.sharedSkillsDir)) {
@@ -303,6 +303,16 @@ async function collectSharedSkills(paths: CollectionPaths): Promise<FileEntry[]>
     };
 
     await collectDirectory(paths.sharedSkillsDir, entries, context);
+  }
+
+  if (await exists(paths.sharedLazySkillsDir)) {
+    const context: CollectContext = {
+      archivePrefix: join(SHARED_ARCHIVE_PREFIX, "lazy-skills"),
+      basePath: paths.sharedLazySkillsDir,
+      paths,
+    };
+
+    await collectDirectory(paths.sharedLazySkillsDir, entries, context);
   }
 
   if (await exists(paths.sharedSkillLockPath)) {
@@ -333,7 +343,7 @@ export async function collectFiles(options: CollectorOptions): Promise<FileEntry
     (providerName) => PROVIDERS[providerName].usesSharedSkills,
   );
   if (needsSharedSkills) {
-    const sharedEntries = await collectSharedSkills(paths);
+    const sharedEntries = await collectSharedAgentsFiles(paths);
     entries.push(...sharedEntries);
   }
 
