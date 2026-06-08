@@ -9,6 +9,9 @@
     "type": "git",
     "url": "git+https://github.com/ardasevinc/claude-code-migrate.git"
   },
+  "bugs": {
+    "url": "https://github.com/ardasevinc/claude-code-migrate/issues"
+  },
   "homepage": "https://github.com/ardasevinc/claude-code-migrate",
   "keywords": [
     "claude-code",
