@@ -3,7 +3,11 @@ import type { FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
-import { codexMarketplaceArchivePath, rewriteCodexMarketplaceSources } from "./codex.ts";
+import {
+  adaptCodexConfigForHost,
+  codexMarketplaceArchivePath,
+  rewriteCodexMarketplaceSources,
+} from "./codex.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
@@ -205,6 +209,44 @@ async function normalizeRemoteCodexMarketplaceSources(
   }
 }
 
+async function adaptRemoteCodexConfigForHost(
+  host: string,
+  remoteCodexConfigPath: string,
+): Promise<void> {
+  const existingResult = await runRemote(
+    host,
+    `if [ -f ${shellQuote(remoteCodexConfigPath)} ]; then cat ${shellQuote(remoteCodexConfigPath)}; fi`,
+    { quiet: true },
+  );
+
+  if (!existingResult.stdout.trim()) {
+    return;
+  }
+
+  const adapted = await adaptCodexConfigForHost(existingResult.stdout, async (path) =>
+    remotePathExists(host, path),
+  );
+
+  for (const warning of adapted.warnings) {
+    log.warn(`[codex] Host adaptation skipped: ${warning}`);
+  }
+
+  if (adapted.changes.length === 0) {
+    return;
+  }
+
+  const b64 = Buffer.from(adapted.content).toString("base64");
+  await runRemote(
+    host,
+    `echo ${shellQuote(b64)} | base64 -d > ${shellQuote(remoteCodexConfigPath)}`,
+  );
+
+  log.dim(`  Adapted ${adapted.changes.length} Codex host-specific setting(s):`);
+  for (const change of adapted.changes) {
+    log.dim(`    ${change}`);
+  }
+}
+
 async function recreateClaudeSharedSkillSymlinks(
   host: string,
   remoteClaudeDir: string,
@@ -309,6 +351,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
         await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath, remoteHome);
         await normalizeRemoteCodexMarketplaceSources(host, remoteCodexConfigPath, remoteCodexDir);
+        await adaptRemoteCodexConfigForHost(host, remoteCodexConfigPath);
       }
 
       if (action === "shared") {

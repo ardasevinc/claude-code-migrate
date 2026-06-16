@@ -11,8 +11,15 @@ interface CodexMarketplaceConfig {
   source?: string;
 }
 
+interface CodexMcpServerConfig {
+  command?: string;
+}
+
 interface CodexConfig {
   marketplaces?: Record<string, CodexMarketplaceConfig>;
+  mcp_servers?: Record<string, CodexMcpServerConfig>;
+  mcpServers?: Record<string, CodexMcpServerConfig>;
+  notify?: string[];
 }
 
 export interface CodexLocalMarketplaceSource {
@@ -22,6 +29,12 @@ export interface CodexLocalMarketplaceSource {
 }
 
 export interface CodexMarketplaceSourceRewrite {
+  content: string;
+  changes: string[];
+  warnings: string[];
+}
+
+export interface CodexHostAdaptation {
   content: string;
   changes: string[];
   warnings: string[];
@@ -125,6 +138,53 @@ export async function rewriteCodexMarketplaceSources(
   return { content, changes, warnings };
 }
 
+export async function adaptCodexConfigForHost(
+  rawConfig: string,
+  pathExists: (path: string) => Promise<boolean>,
+): Promise<CodexHostAdaptation> {
+  const parsed = parse(rawConfig) as unknown as CodexConfig;
+  const changes: string[] = [];
+  const warnings: string[] = [];
+  let content = rawConfig;
+
+  const notifyCommand = parsed.notify?.[0];
+  if (
+    typeof notifyCommand === "string" &&
+    LOCAL_PATH_PATTERN.test(notifyCommand) &&
+    isClearlyNonPortableCodexPath(notifyCommand) &&
+    !(await pathExists(notifyCommand))
+  ) {
+    const nextContent = removeTopLevelTomlAssignment(content, "notify");
+    if (nextContent === content) {
+      warnings.push(`notify: could not remove missing command "${notifyCommand}"`);
+    } else {
+      content = nextContent;
+      changes.push(`notify: removed missing command ${notifyCommand}`);
+    }
+  }
+
+  const mcpServers = parsed.mcp_servers ?? parsed.mcpServers ?? {};
+  for (const [name, server] of Object.entries(mcpServers)) {
+    const command = server.command;
+    if (
+      typeof command === "string" &&
+      LOCAL_PATH_PATTERN.test(command) &&
+      isClearlyNonPortableCodexPath(command) &&
+      !(await pathExists(command))
+    ) {
+      const nextContent = removeTomlSectionTree(content, "mcp_servers", name);
+      if (nextContent === content) {
+        warnings.push(`${name}: could not remove missing MCP command "${command}"`);
+      } else {
+        content = nextContent;
+        changes.push(`${name}: removed missing MCP command ${command}`);
+      }
+    }
+  }
+
+  return { content, changes, warnings };
+}
+
 export function codexMarketplaceArchivePath(codexDir: string, marketplaceName: string): string {
   return join(codexDir, ".ccm", "marketplaces", marketplaceName);
 }
@@ -179,6 +239,31 @@ function replaceCodexMarketplaceSource(
   }
 
   return rawConfig.replace(section, `${header}${nextBody}`);
+}
+
+function removeTopLevelTomlAssignment(rawConfig: string, key: string): string {
+  const assignmentPattern = new RegExp(`^${escapeRegExp(key)}\\s*=\\s*.*(?:\\n|$)`, "m");
+  return rawConfig.replace(assignmentPattern, "");
+}
+
+function removeTomlSectionTree(rawConfig: string, tableName: string, sectionName: string): string {
+  const sectionPattern = new RegExp(
+    `^\\[${escapeRegExp(tableName)}\\.(?:${tomlSectionNamePattern(sectionName)})(?:\\.[^\\]]+)?\\]\\n[\\s\\S]*?(?=^\\[[^\\n]+\\]|(?![\\s\\S]))`,
+    "gm",
+  );
+  return rawConfig.replace(sectionPattern, "");
+}
+
+function tomlSectionNamePattern(value: string): string {
+  return `${escapeRegExp(value)}|${escapeRegExp(JSON.stringify(value))}`;
+}
+
+function isClearlyNonPortableCodexPath(path: string): boolean {
+  return (
+    path.startsWith("/Applications/Codex.app/") ||
+    path.startsWith("/Users/") ||
+    path.includes("/Codex Computer Use.app/")
+  );
 }
 
 function escapeRegExp(value: string): string {

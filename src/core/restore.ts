@@ -7,7 +7,7 @@ import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
-import { normalizeLocalCodexMarketplaceSources } from "./codex.ts";
+import { adaptCodexConfigForHost, normalizeLocalCodexMarketplaceSources } from "./codex.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
 async function exists(path: string): Promise<boolean> {
@@ -161,6 +161,18 @@ export async function restoreArchive(
 
         if (normalized.changes.length > 0) {
           log.dim(`  Normalized ${normalized.changes.length} Codex marketplace source path(s)`);
+        }
+
+        const rawConfig = await readFile(codexConfigPath, "utf8");
+        const adapted = await adaptCodexConfigForHost(rawConfig, exists);
+
+        for (const warning of adapted.warnings) {
+          log.warn(`[codex] Host adaptation skipped: ${warning}`);
+        }
+
+        if (adapted.changes.length > 0) {
+          await writeFile(codexConfigPath, adapted.content, "utf8");
+          log.dim(`  Adapted ${adapted.changes.length} Codex host-specific setting(s)`);
         }
       }
       log.success(`Restored Codex provider to ${DEFAULT_COLLECTION_PATHS.codexDir}`);
