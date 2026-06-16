@@ -3,6 +3,7 @@ import type { FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
+import { codexMarketplaceArchivePath, rewriteCodexMarketplaceSources } from "./codex.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
@@ -164,6 +165,46 @@ async function normalizeRemoteCodexMcpCommands(
   }
 }
 
+async function normalizeRemoteCodexMarketplaceSources(
+  host: string,
+  remoteCodexConfigPath: string,
+  remoteCodexDir: string,
+): Promise<void> {
+  const existingResult = await runRemote(
+    host,
+    `if [ -f ${shellQuote(remoteCodexConfigPath)} ]; then cat ${shellQuote(remoteCodexConfigPath)}; fi`,
+    { quiet: true },
+  );
+
+  if (!existingResult.stdout.trim()) {
+    return;
+  }
+
+  const normalized = await rewriteCodexMarketplaceSources(existingResult.stdout, async (source) => {
+    const target = codexMarketplaceArchivePath(remoteCodexDir, source.name);
+    return (await remoteDirectoryExists(host, target)) ? target : null;
+  });
+
+  for (const warning of normalized.warnings) {
+    log.warn(`[codex] Marketplace source normalization skipped: ${warning}`);
+  }
+
+  if (normalized.changes.length === 0) {
+    return;
+  }
+
+  const b64 = Buffer.from(normalized.content).toString("base64");
+  await runRemote(
+    host,
+    `echo ${shellQuote(b64)} | base64 -d > ${shellQuote(remoteCodexConfigPath)}`,
+  );
+
+  log.dim(`  Normalized ${normalized.changes.length} Codex marketplace source path(s):`);
+  for (const change of normalized.changes) {
+    log.dim(`    ${change}`);
+  }
+}
+
 async function recreateClaudeSharedSkillSymlinks(
   host: string,
   remoteClaudeDir: string,
@@ -267,6 +308,7 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
         await backupDirectoryIfExists(host, remoteCodexDir);
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
         await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath, remoteHome);
+        await normalizeRemoteCodexMarketplaceSources(host, remoteCodexConfigPath, remoteCodexDir);
       }
 
       if (action === "shared") {

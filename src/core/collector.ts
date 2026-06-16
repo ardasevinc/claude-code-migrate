@@ -3,6 +3,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { DEFAULT_COLLECTION_PATHS, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../config/providers.ts";
 import type { CollectionPaths, CollectorOptions, FileEntry, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { discoverCodexLocalMarketplaceSources } from "./codex.ts";
 import { detectCodexMcpPathWarnings, extractMcpServers } from "./mcp.ts";
 
 interface CollectContext {
@@ -10,6 +11,7 @@ interface CollectContext {
   basePath: string;
   providerName?: ProviderName;
   neverMigrate?: Set<string>;
+  neverMigratePaths?: Set<string>;
   paths: CollectionPaths;
 }
 
@@ -55,6 +57,14 @@ function isPathInside(targetPath: string, parentPath: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+function relativeInsidePath(targetPath: string, parentPath: string): string {
+  if (isPathInside(targetPath, parentPath)) {
+    return relative(parentPath, targetPath);
+  }
+
+  return relative(normalizePrivatePrefix(parentPath), normalizePrivatePrefix(targetPath));
+}
+
 function normalizePrivatePrefix(path: string): string {
   return path.startsWith("/private/") ? path.slice("/private".length) : path;
 }
@@ -66,6 +76,30 @@ function shouldSkipRelativePath(relativePath: string, neverMigrate?: Set<string>
 
   const firstSegment = relativePath.split("/")[0];
   return firstSegment ? neverMigrate.has(firstSegment) : false;
+}
+
+function shouldSkipExactOrNestedPath(
+  relativePath: string,
+  neverMigratePaths?: Set<string>,
+): boolean {
+  if (!neverMigratePaths) {
+    return false;
+  }
+
+  for (const excludedPath of neverMigratePaths) {
+    if (relativePath === excludedPath || relativePath.startsWith(`${excludedPath}/`)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function shouldSkipCollectionPath(context: CollectContext, relativePath: string): boolean {
+  return (
+    shouldSkipRelativePath(relativePath, context.neverMigrate) ||
+    shouldSkipExactOrNestedPath(relativePath, context.neverMigratePaths)
+  );
 }
 
 function shouldSkipSymlink(
@@ -83,6 +117,23 @@ function shouldSkipSymlink(
   }
 
   return isInsidePath(resolvedTargetPath, paths.sharedSkillsDir);
+}
+
+function shouldSkipResolvedSymlink(
+  context: CollectContext,
+  relativePath: string,
+  resolvedPath: string,
+): boolean {
+  if (shouldSkipSymlink(context.providerName, relativePath, resolvedPath, context.paths)) {
+    return true;
+  }
+
+  if (!isInsidePath(resolvedPath, context.basePath)) {
+    return true;
+  }
+
+  const resolvedRelativePath = relativeInsidePath(resolvedPath, context.basePath);
+  return shouldSkipCollectionPath(context, resolvedRelativePath);
 }
 
 function pushEntry(
@@ -115,7 +166,7 @@ async function collectDirectory(
       ? join(virtualPrefix, entry.name)
       : relative(context.basePath, fullPath);
 
-    if (shouldSkipRelativePath(relativePath, context.neverMigrate)) {
+    if (shouldSkipCollectionPath(context, relativePath)) {
       continue;
     }
 
@@ -128,7 +179,7 @@ async function collectDirectory(
         continue;
       }
 
-      if (shouldSkipSymlink(context.providerName, relativePath, resolvedPath, context.paths)) {
+      if (shouldSkipResolvedSymlink(context, relativePath, resolvedPath)) {
         continue;
       }
 
@@ -165,7 +216,7 @@ async function collectPath(
 
   const relativePath = relative(context.basePath, fullPath);
 
-  if (shouldSkipRelativePath(relativePath, context.neverMigrate)) {
+  if (shouldSkipCollectionPath(context, relativePath)) {
     return;
   }
 
@@ -177,7 +228,7 @@ async function collectPath(
       return;
     }
 
-    if (shouldSkipSymlink(context.providerName, relativePath, resolvedPath, context.paths)) {
+    if (shouldSkipResolvedSymlink(context, relativePath, resolvedPath)) {
       return;
     }
 
@@ -227,6 +278,7 @@ async function collectProviderFiles(
     basePath,
     providerName,
     neverMigrate: new Set(provider.neverMigrate),
+    neverMigratePaths: new Set(provider.neverMigratePaths ?? []),
     paths,
   };
 
@@ -286,6 +338,21 @@ async function collectProviderFiles(
       for (const warning of warnings) {
         log.dim(`  ${warning}`);
       }
+    }
+
+    for (const marketplaceSource of await discoverCodexLocalMarketplaceSources(codexConfigPath)) {
+      if (!(await isDirectory(marketplaceSource.source))) {
+        log.warn(
+          `[codex] Marketplace source not found, skipping: ${marketplaceSource.name} (${marketplaceSource.source})`,
+        );
+        continue;
+      }
+
+      await collectDirectory(marketplaceSource.source, entries, {
+        archivePrefix: join(providerName, ".ccm", "marketplaces", marketplaceSource.name),
+        basePath: marketplaceSource.source,
+        paths,
+      });
     }
   }
 

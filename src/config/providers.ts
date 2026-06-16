@@ -9,6 +9,7 @@ export interface ProviderDefinition {
   alwaysInclude: string[];
   includeIfExists: string[];
   neverMigrate: string[];
+  neverMigratePaths?: string[];
   usesSharedSkills: boolean;
 }
 
@@ -81,6 +82,7 @@ export const PROVIDERS: Record<ProviderName, ProviderDefinition> = {
       "version.json",
       ".personality_migration",
     ],
+    neverMigratePaths: ["skills/.system"],
     usesSharedSkills: true,
   },
 };

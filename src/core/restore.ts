@@ -7,6 +7,7 @@ import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
+import { normalizeLocalCodexMarketplaceSources } from "./codex.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
 async function exists(path: string): Promise<boolean> {
@@ -147,6 +148,21 @@ export async function restoreArchive(
     if (providersToRestore.includes("codex")) {
       await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.codexDir);
       await copyDirectoryContents(join(tempDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
+      const codexConfigPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "config.toml");
+      if (await exists(codexConfigPath)) {
+        const normalized = await normalizeLocalCodexMarketplaceSources(
+          codexConfigPath,
+          DEFAULT_COLLECTION_PATHS.codexDir,
+        );
+
+        for (const warning of normalized.warnings) {
+          log.warn(`[codex] Marketplace source normalization skipped: ${warning}`);
+        }
+
+        if (normalized.changes.length > 0) {
+          log.dim(`  Normalized ${normalized.changes.length} Codex marketplace source path(s)`);
+        }
+      }
       log.success(`Restored Codex provider to ${DEFAULT_COLLECTION_PATHS.codexDir}`);
     }
 
