@@ -8,7 +8,7 @@ import { runCommand, shellQuote } from "../utils/shell.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
-const PACKAGE_VERSION = "1.5.1";
+const PACKAGE_VERSION = "1.6.0";
 
 function getManifestProviders(files: FileEntry[]): ProviderName[] {
   const providers = new Set<ProviderName>();
