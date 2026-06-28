@@ -87,6 +87,7 @@ ccm evolves from a Claude Code-only config migrator into a multi-provider AI CLI
 - **MCP config**: Embedded in `config.toml`. The file is migrated wholesale, but path-dependent MCP entries are detected and produce warnings (TOML-aware parsing).
 - **Shared skills**: Codex reads from `~/.agents/skills/` and `~/.agents/lazy-skills/` natively (no symlinks needed). When the codex provider is active, shared agent assets are automatically included.
 - **Plugin policy**: After push, ccm evaluates enabled Codex plugins against target host capabilities before finalizing target config. It preserves portable plugins by default, disables known incompatible platform plugins, and installs missing allowed plugins with `codex plugin add`.
+- **Dry-run plugin preview**: `ccm push codex ... --dry-run` does not mutate the target, but it does probe the target to preview host policy and missing-plugin install decisions.
 
 ---
 
@@ -212,6 +213,7 @@ path = "~/backups/ccm"
 - `providers.claude.mcp_config` — Whether to extract and migrate MCP server config from `~/.claude.json`.
 - `providers.claude.settings_local` — Whether to include `settings.local.json`.
 - `providers.codex.plugin_policies.<plugin-id>.mode` — Codex plugin sync mode. `auto` checks host capabilities, `always` mirrors enabled state, `never` disables on target, and `preserve` leaves the target plugin state untouched.
+- `mode = "preserve"` restores the target's previous enabled value after overlay copy, including remote-only plugin entries that are absent from the incoming local config.
 - `providers.codex.plugin_policies.<plugin-id>.os` — Optional OS allowlist for `auto`; currently useful values are `darwin`, `linux`, and `windows`.
 - `providers.codex.plugin_policies.<plugin-id>.commands` — Optional command requirements for `auto`, resolved with `command -v` on the target.
 - `providers.codex.plugin_policies.<plugin-id>.gui` — Optional GUI requirement for `auto`.

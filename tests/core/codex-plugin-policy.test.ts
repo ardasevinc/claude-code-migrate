@@ -121,6 +121,30 @@ enabled = false
     ]);
   });
 
+  it("restores preserved target plugin entries that are missing from incoming config", () => {
+    const result = applyCodexPluginPolicies(
+      `
+[plugins."build-web-apps@openai-curated"]
+enabled = true
+`,
+      linuxServer,
+      {
+        "computer-use@openai-bundled": { mode: "preserve" },
+      },
+      {
+        preserveConfigRaw: `
+[plugins."computer-use@openai-bundled"]
+enabled = false
+`,
+      },
+    );
+
+    expect(result.content).toContain(`[plugins."computer-use@openai-bundled"]\nenabled = false`);
+    expect(result.changes).toContain(
+      "computer-use@openai-bundled: preserved target enabled = false",
+    );
+  });
+
   it("collects command probes from merged policies", () => {
     expect(codexPluginPolicyCommandNames(mergeCodexPluginPolicies())).toEqual([
       "adb",

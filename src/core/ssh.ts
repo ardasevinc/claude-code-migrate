@@ -395,6 +395,52 @@ export async function pushArchive(
   }
 }
 
+export async function previewRemoteCodexPluginPolicy(
+  host: string,
+  rawConfig: string,
+  pluginPolicies: Record<string, CodexPluginPolicy> = {},
+): Promise<void> {
+  try {
+    const remoteHome = await getRemoteHome(host);
+    const remoteCodexConfigPath = join(remoteHome, ".codex", "config.toml");
+    const previousRemoteCodexConfig = await readRemoteFileIfExists(host, remoteCodexConfigPath);
+    const policies = mergeCodexPluginPolicies(pluginPolicies);
+    const capabilities = await probeRemoteHostCapabilities(
+      host,
+      codexPluginPolicyCommandNames(policies),
+    );
+    const applied = applyCodexPluginPolicies(rawConfig, capabilities, policies, {
+      preserveConfigRaw: previousRemoteCodexConfig,
+    });
+
+    log.info(`Codex plugin policy preview for ${host} (${capabilities.os}/${capabilities.arch})`);
+    log.dim(
+      `  gui=${capabilities.gui}; commands=${capabilities.commands.length > 0 ? capabilities.commands.join(",") : "none"}`,
+    );
+
+    if (applied.decisions.length === 0) {
+      log.dim("  no enabled Codex plugins matched policy evaluation");
+      return;
+    }
+
+    for (const decision of applied.decisions) {
+      const state = decision.enabled ? "enabled" : "disabled";
+      log.dim(`  ${decision.pluginId}: ${state} (${decision.reason})`);
+    }
+
+    const pluginsToInstall = applied.decisions
+      .filter((decision) => decision.enabled && decision.action !== "preserve")
+      .map((decision) => decision.pluginId);
+    if (pluginsToInstall.length === 0) {
+      return;
+    }
+
+    await previewMissingRemoteCodexPlugins(host, remoteHome, pluginsToInstall);
+  } catch (error) {
+    log.warn(`[codex] Plugin policy dry-run preview skipped: ${error}`);
+  }
+}
+
 async function reconcileRemoteCodexPlugins(
   host: string,
   remoteCodexConfigPath: string,
@@ -440,28 +486,52 @@ async function reconcileRemoteCodexPlugins(
   await installMissingRemoteCodexPlugins(host, remoteHome, pluginsToInstall);
 }
 
+async function previewMissingRemoteCodexPlugins(
+  host: string,
+  remoteHome: string,
+  pluginIds: string[],
+): Promise<void> {
+  const codexCommand = await resolveRemoteCodexCommand(host, remoteHome);
+  if (!codexCommand) {
+    log.warn("[codex] Plugin install preview skipped: codex command not found on remote");
+    return;
+  }
+
+  const listResult = await runRemote(
+    host,
+    `${shellQuote(codexCommand)} plugin list --available --json`,
+    {
+      quiet: true,
+      nothrow: true,
+    },
+  );
+  if (listResult.exitCode !== 0) {
+    log.warn(`[codex] Plugin install preview skipped: ${listResult.stderr || listResult.stdout}`);
+    return;
+  }
+
+  const list = parseCodexPluginList(listResult.stdout);
+  const installed = new Set(list.installed.map((plugin) => plugin.pluginId));
+  const available = new Set(list.available.map((plugin) => plugin.pluginId));
+
+  for (const pluginId of pluginIds) {
+    if (installed.has(pluginId)) {
+      log.dim(`  ${pluginId}: already installed`);
+    } else if (available.has(pluginId)) {
+      log.dim(`  ${pluginId}: would install`);
+    } else {
+      log.warn(`[codex] Plugin install would be skipped: ${pluginId} is not available on remote`);
+    }
+  }
+}
+
 async function probeRemoteHostCapabilities(
   host: string,
   commandNames: string[],
 ): Promise<HostCapabilities> {
-  const commandChecks = commandNames
-    .map(
-      (command) =>
-        `if command -v ${shellQuote(command)} >/dev/null 2>&1; then echo cmd=${shellQuote(command)}; fi`,
-    )
-    .join(" ");
-  const result = await runRemote(
-    host,
-    [
-      `printf 'os=%s\\n' "$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo unknown)"`,
-      `printf 'arch=%s\\n' "$(uname -m 2>/dev/null || echo unknown)"`,
-      `if [ -n "\${DISPLAY:-}" ] || [ -n "\${WAYLAND_DISPLAY:-}" ] || [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then echo gui=true; else echo gui=false; fi`,
-      commandChecks,
-    ]
-      .filter(Boolean)
-      .join("; "),
-    { quiet: true },
-  );
+  const result = await runRemote(host, buildRemoteHostCapabilityProbeCommand(commandNames), {
+    quiet: true,
+  });
 
   const commands: string[] = [];
   let os = "unknown";
@@ -482,6 +552,24 @@ async function probeRemoteHostCapabilities(
   }
 
   return { os, arch, gui, commands };
+}
+
+export function buildRemoteHostCapabilityProbeCommand(commandNames: string[]): string {
+  const commandChecks = commandNames
+    .map(
+      (command) =>
+        `if command -v ${shellQuote(command)} >/dev/null 2>&1; then echo cmd=${shellQuote(command)}; fi`,
+    )
+    .join("; ");
+
+  return [
+    `printf 'os=%s\\n' "$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo unknown)"`,
+    `printf 'arch=%s\\n' "$(uname -m 2>/dev/null || echo unknown)"`,
+    `if [ -n "\${DISPLAY:-}" ] || [ -n "\${WAYLAND_DISPLAY:-}" ] || [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then echo gui=true; else echo gui=false; fi`,
+    commandChecks,
+  ]
+    .filter(Boolean)
+    .join("; ");
 }
 
 async function installMissingRemoteCodexPlugins(

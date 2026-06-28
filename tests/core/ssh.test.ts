@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   buildClaudeSharedSkillSymlinkCommand,
+  buildRemoteHostCapabilityProbeCommand,
   buildRemoteCommandPathResolutionCommand,
   parseRemoteHome,
   resolvePushActions,
@@ -71,6 +72,22 @@ describe("ssh helpers", () => {
       throw new Error(`shellcheck failed:\n${stderr}`);
     }
 
+    expect(result.status).toBe(0);
+  });
+
+  it("generates valid host capability probe shell syntax (shellcheck)", () => {
+    const command = buildRemoteHostCapabilityProbeCommand(["adb", "xcodebuild"]);
+
+    const result = spawnSync("shellcheck", ["-s", "sh", "-"], {
+      input: command,
+    });
+
+    if (result.status !== 0) {
+      const stderr = result.stderr.toString();
+      throw new Error(`shellcheck failed:\n${stderr}`);
+    }
+
+    expect(command).toContain("; if command -v 'xcodebuild'");
     expect(result.status).toBe(0);
   });
 

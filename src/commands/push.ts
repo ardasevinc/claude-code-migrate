@@ -1,10 +1,17 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { loadConfig } from "../config/loader.ts";
+import { CODEX_DIR } from "../config/providers.ts";
 import { createArchive } from "../core/archiver.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
-import { previewPush, pushArchive, testConnection } from "../core/ssh.ts";
+import {
+  previewPush,
+  previewRemoteCodexPluginPolicy,
+  pushArchive,
+  testConnection,
+} from "../core/ssh.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
 import type { PushOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
@@ -56,6 +63,17 @@ export async function pushCommand(
 
   if (options.dryRun) {
     await previewPush(files, host);
+    if (providers.includes("codex")) {
+      const codexConfigPath = join(CODEX_DIR, "config.toml");
+      const rawCodexConfig = await readFile(codexConfigPath, "utf8").catch(() => "");
+      if (rawCodexConfig.trim()) {
+        await previewRemoteCodexPluginPolicy(
+          host,
+          rawCodexConfig,
+          config.providers.codex.plugin_policies,
+        );
+      }
+    }
     return;
   }
 

@@ -105,7 +105,7 @@ export function applyCodexPluginPolicies(
         reason: "policy preserves target value",
       });
 
-      const nextContent = setCodexPluginEnabled(content, pluginId, preservedEnabled);
+      const nextContent = upsertCodexPluginEnabled(content, pluginId, preservedEnabled);
       if (nextContent === content) {
         continue;
       }
@@ -126,7 +126,7 @@ export function applyCodexPluginPolicies(
       continue;
     }
 
-    const nextContent = setCodexPluginEnabled(content, pluginId, decision.enabled);
+    const nextContent = upsertCodexPluginEnabled(content, pluginId, decision.enabled);
     if (nextContent === content) {
       warnings.push(`${pluginId}: could not set enabled = ${decision.enabled}`);
       continue;
@@ -134,6 +134,27 @@ export function applyCodexPluginPolicies(
 
     content = nextContent;
     changes.push(`${pluginId}: enabled -> ${decision.enabled} (${decision.reason})`);
+  }
+
+  for (const [pluginId, policy] of Object.entries(policies)) {
+    if (policy.mode !== "preserve" || pluginId in plugins) {
+      continue;
+    }
+
+    const preservedEnabled = preservedPlugins[pluginId]?.enabled;
+    if (typeof preservedEnabled !== "boolean") {
+      continue;
+    }
+
+    decisions.push({
+      pluginId,
+      enabled: preservedEnabled,
+      policy,
+      action: "preserve",
+      reason: "policy preserves target value",
+    });
+    content = upsertCodexPluginEnabled(content, pluginId, preservedEnabled);
+    changes.push(`${pluginId}: preserved target enabled = ${preservedEnabled}`);
   }
 
   return { content, decisions, changes, warnings };
@@ -200,14 +221,14 @@ export function evaluateCodexPluginPolicy(
   return { pluginId, enabled: true, policy, action: "enable", reason: "host matches policy" };
 }
 
-function setCodexPluginEnabled(rawConfig: string, pluginId: string, enabled: boolean): string {
+function upsertCodexPluginEnabled(rawConfig: string, pluginId: string, enabled: boolean): string {
   const sectionPattern = new RegExp(
     `(^\\[plugins\\.(?:${tomlSectionNamePattern(pluginId)})\\]\\n)([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))`,
     "m",
   );
   const sectionMatch = rawConfig.match(sectionPattern);
   if (!sectionMatch) {
-    return rawConfig;
+    return `${rawConfig.trimEnd()}\n\n[plugins.${JSON.stringify(pluginId)}]\nenabled = ${enabled}\n`;
   }
 
   const [section, header = "", body = ""] = sectionMatch;
