@@ -80,7 +80,9 @@ export async function pushCommand(
 
   try {
     await createArchive(files, tempArchive);
-    const success = await pushArchive(tempArchive, host);
+    const success = await pushArchive(tempArchive, host, {
+      codexPluginPolicies: config.providers.codex.plugin_policies,
+    });
 
     if (!success) {
       process.exit(1);

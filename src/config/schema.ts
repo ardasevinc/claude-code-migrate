@@ -18,6 +18,13 @@ mcp_config = true
 [providers.codex]
 enabled = true
 
+# Host-aware Codex plugin policy. Built-in defaults already keep clearly
+# platform-specific plugins off incompatible hosts.
+# [providers.codex.plugin_policies."build-ios-apps@openai-curated"]
+# mode = "auto" # auto | always | never | preserve
+# os = ["darwin"]
+# commands = ["xcodebuild"]
+
 [backup]
 path = "~/backups/ccm"
 `;

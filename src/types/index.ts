@@ -13,11 +13,21 @@ export interface Config {
     };
     codex: {
       enabled: boolean;
+      plugin_policies: Record<string, CodexPluginPolicy>;
     };
   };
   backup: {
     path: string;
   };
+}
+
+export type CodexPluginPolicyMode = "auto" | "always" | "never" | "preserve";
+
+export interface CodexPluginPolicy {
+  mode: CodexPluginPolicyMode;
+  os?: string[];
+  commands?: string[];
+  gui?: boolean;
 }
 
 export interface FileEntry {

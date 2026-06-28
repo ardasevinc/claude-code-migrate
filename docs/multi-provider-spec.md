@@ -86,6 +86,7 @@ ccm evolves from a Claude Code-only config migrator into a multi-provider AI CLI
 **Special handling**:
 - **MCP config**: Embedded in `config.toml`. The file is migrated wholesale, but path-dependent MCP entries are detected and produce warnings (TOML-aware parsing).
 - **Shared skills**: Codex reads from `~/.agents/skills/` and `~/.agents/lazy-skills/` natively (no symlinks needed). When the codex provider is active, shared agent assets are automatically included.
+- **Plugin policy**: After push, ccm evaluates enabled Codex plugins against target host capabilities before finalizing target config. It preserves portable plugins by default, disables known incompatible platform plugins, and installs missing allowed plugins with `codex plugin add`.
 
 ---
 
@@ -191,6 +192,14 @@ settings_local = false
 [providers.codex]
 enabled = true
 
+# Optional Codex plugin policy overrides.
+# mode = "auto" | "always" | "never" | "preserve"
+#
+# [providers.codex.plugin_policies."build-ios-apps@openai-curated"]
+# mode = "auto"
+# os = ["darwin"]
+# commands = ["xcodebuild"]
+
 [backup]
 path = "~/backups/ccm"
 ```
@@ -202,6 +211,10 @@ path = "~/backups/ccm"
 - `providers.<name>.enabled` — Whether this provider is included in default (no-argument) operations.
 - `providers.claude.mcp_config` — Whether to extract and migrate MCP server config from `~/.claude.json`.
 - `providers.claude.settings_local` — Whether to include `settings.local.json`.
+- `providers.codex.plugin_policies.<plugin-id>.mode` — Codex plugin sync mode. `auto` checks host capabilities, `always` mirrors enabled state, `never` disables on target, and `preserve` leaves the target plugin state untouched.
+- `providers.codex.plugin_policies.<plugin-id>.os` — Optional OS allowlist for `auto`; currently useful values are `darwin`, `linux`, and `windows`.
+- `providers.codex.plugin_policies.<plugin-id>.commands` — Optional command requirements for `auto`, resolved with `command -v` on the target.
+- `providers.codex.plugin_policies.<plugin-id>.gui` — Optional GUI requirement for `auto`.
 - `backup.path` — Default output directory for backup archives.
 
 Remote paths (`~/.claude`, `~/.codex`, `~/.agents`) are convention-based per provider and not configurable.

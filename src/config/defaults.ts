@@ -13,6 +13,7 @@ export const DEFAULT_CONFIG: Config = {
     },
     codex: {
       enabled: true,
+      plugin_policies: {},
     },
   },
   backup: {

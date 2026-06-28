@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { parse } from "smol-toml";
-import type { Config } from "../types/index.ts";
+import type { CodexPluginPolicy, CodexPluginPolicyMode, Config } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
 import { CONFIG_DIR, CONFIG_PATH, DEFAULT_CONFIG_TOML } from "./schema.ts";
@@ -23,11 +23,27 @@ type RawConfig = {
     };
     codex?: {
       enabled?: boolean;
+      plugin_policies?: Record<
+        string,
+        {
+          mode?: string;
+          os?: string[];
+          commands?: string[];
+          gui?: boolean;
+        }
+      >;
     };
   };
   backup?: {
     path?: string;
   };
+};
+
+type RawCodexPluginPolicy = {
+  mode?: string;
+  os?: string[];
+  commands?: string[];
+  gui?: boolean;
 };
 
 function normalizeConfig(raw: RawConfig): Config {
@@ -52,12 +68,51 @@ function normalizeConfig(raw: RawConfig): Config {
       },
       codex: {
         enabled: raw.providers?.codex?.enabled ?? DEFAULT_CONFIG.providers.codex.enabled,
+        plugin_policies: normalizeCodexPluginPolicies(raw.providers?.codex?.plugin_policies),
       },
     },
     backup: {
       path: raw.backup?.path ?? DEFAULT_CONFIG.backup.path,
     },
   };
+}
+
+function normalizeCodexPluginPolicies(
+  rawPolicies: Record<string, RawCodexPluginPolicy> | undefined,
+): Record<string, CodexPluginPolicy> {
+  const policies: Record<string, CodexPluginPolicy> = {};
+  if (!rawPolicies || typeof rawPolicies !== "object") {
+    return policies;
+  }
+
+  for (const [pluginId, rawPolicy] of Object.entries(rawPolicies)) {
+    if (!rawPolicy || typeof rawPolicy !== "object") {
+      continue;
+    }
+
+    const mode = normalizeCodexPluginPolicyMode(rawPolicy.mode);
+    policies[pluginId] = {
+      mode,
+      os: normalizeStringArray(rawPolicy.os),
+      commands: normalizeStringArray(rawPolicy.commands),
+      gui: typeof rawPolicy.gui === "boolean" ? rawPolicy.gui : undefined,
+    };
+  }
+
+  return policies;
+}
+
+function normalizeCodexPluginPolicyMode(value: string | undefined): CodexPluginPolicyMode {
+  return value === "always" || value === "never" || value === "preserve" ? value : "auto";
+}
+
+function normalizeStringArray(value: string[] | undefined): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value.filter((item) => typeof item === "string" && item.trim().length > 0);
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 export async function loadConfig(): Promise<Config> {

@@ -18,6 +18,7 @@ function makeConfig(enabled: ProviderName[]): Config {
       },
       codex: {
         enabled: enabled.includes("codex"),
+        plugin_policies: {},
       },
     },
     backup: { path: "~/backups/ccm" },

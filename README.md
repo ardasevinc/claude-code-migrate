@@ -19,6 +19,12 @@ or cache.
 After pushing Codex, ccm normalizes path-based Codex MCP `command` values when the same binary is
 available on the remote `PATH`.
 
+Codex plugin enablement is host-aware. ccm copies portable marketplace sources, then evaluates
+enabled plugins against target capabilities before installing missing plugins through the remote
+`codex plugin add` command. Built-in policy keeps clearly platform-specific plugins off incompatible
+hosts, for example iOS/macOS build plugins on Linux hosts without Xcode and Computer Use outside a
+macOS GUI host.
+
 ## Installation
 
 ```bash
@@ -81,6 +87,18 @@ mcp_config = true
 
 [providers.codex]
 enabled = true
+
+# Optional host-aware Codex plugin overrides.
+# Built-in defaults already handle obvious platform-specific OpenAI plugins.
+# mode: auto | always | never | preserve
+#
+# [providers.codex.plugin_policies."build-ios-apps@openai-curated"]
+# mode = "auto"
+# os = ["darwin"]
+# commands = ["xcodebuild"]
+#
+# [providers.codex.plugin_policies."computer-use@openai-bundled"]
+# mode = "never"
 
 [backup]
 path = "~/backups/ccm"

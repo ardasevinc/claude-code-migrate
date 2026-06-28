@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
+import type { CodexPluginPolicy } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
@@ -8,6 +9,12 @@ import {
   codexMarketplaceArchivePath,
   rewriteCodexMarketplaceSources,
 } from "./codex.ts";
+import {
+  applyCodexPluginPolicies,
+  codexPluginPolicyCommandNames,
+  type HostCapabilities,
+  mergeCodexPluginPolicies,
+} from "./codex-plugin-policy.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
@@ -302,7 +309,11 @@ export async function getRemoteHome(host: string): Promise<string> {
   return parseRemoteHome(result.stdout);
 }
 
-export async function pushArchive(archivePath: string, host: string): Promise<boolean> {
+export async function pushArchive(
+  archivePath: string,
+  host: string,
+  options: { codexPluginPolicies?: Record<string, CodexPluginPolicy> } = {},
+): Promise<boolean> {
   const remoteTempArchive = `/tmp/ccm-archive-${Date.now()}.tar.gz`;
   const remoteTempDir = `/tmp/ccm-extract-${Date.now()}`;
 
@@ -348,10 +359,15 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
       if (action === "codex") {
         log.info("Syncing Codex provider...");
         await backupDirectoryIfExists(host, remoteCodexDir);
+        const previousRemoteCodexConfig = await readRemoteFileIfExists(host, remoteCodexConfigPath);
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
         await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath, remoteHome);
         await normalizeRemoteCodexMarketplaceSources(host, remoteCodexConfigPath, remoteCodexDir);
         await adaptRemoteCodexConfigForHost(host, remoteCodexConfigPath);
+        await reconcileRemoteCodexPlugins(host, remoteCodexConfigPath, remoteHome, {
+          pluginPolicies: options.codexPluginPolicies,
+          preserveConfigRaw: previousRemoteCodexConfig,
+        });
       }
 
       if (action === "shared") {
@@ -377,6 +393,214 @@ export async function pushArchive(archivePath: string, host: string): Promise<bo
       nothrow: true,
     });
   }
+}
+
+async function reconcileRemoteCodexPlugins(
+  host: string,
+  remoteCodexConfigPath: string,
+  remoteHome: string,
+  options: { pluginPolicies?: Record<string, CodexPluginPolicy>; preserveConfigRaw?: string },
+): Promise<void> {
+  const rawConfig = await readRemoteFileIfExists(host, remoteCodexConfigPath);
+  if (!rawConfig.trim()) {
+    return;
+  }
+
+  const policies = mergeCodexPluginPolicies(options.pluginPolicies);
+  const capabilities = await probeRemoteHostCapabilities(
+    host,
+    codexPluginPolicyCommandNames(policies),
+  );
+  const applied = applyCodexPluginPolicies(rawConfig, capabilities, policies, {
+    preserveConfigRaw: options.preserveConfigRaw,
+  });
+
+  for (const warning of applied.warnings) {
+    log.warn(`[codex] Plugin policy skipped: ${warning}`);
+  }
+
+  if (applied.changes.length > 0) {
+    await writeRemoteFile(host, remoteCodexConfigPath, applied.content);
+    log.dim(
+      `  Applied ${applied.changes.length} Codex plugin host policy change(s) for ${capabilities.os}/${capabilities.arch}`,
+    );
+    for (const change of applied.changes) {
+      log.dim(`    ${change}`);
+    }
+  }
+
+  const pluginsToInstall = applied.decisions
+    .filter((decision) => decision.enabled && decision.action !== "preserve")
+    .map((decision) => decision.pluginId);
+
+  if (pluginsToInstall.length === 0) {
+    return;
+  }
+
+  await installMissingRemoteCodexPlugins(host, remoteHome, pluginsToInstall);
+}
+
+async function probeRemoteHostCapabilities(
+  host: string,
+  commandNames: string[],
+): Promise<HostCapabilities> {
+  const commandChecks = commandNames
+    .map(
+      (command) =>
+        `if command -v ${shellQuote(command)} >/dev/null 2>&1; then echo cmd=${shellQuote(command)}; fi`,
+    )
+    .join(" ");
+  const result = await runRemote(
+    host,
+    [
+      `printf 'os=%s\\n' "$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo unknown)"`,
+      `printf 'arch=%s\\n' "$(uname -m 2>/dev/null || echo unknown)"`,
+      `if [ -n "\${DISPLAY:-}" ] || [ -n "\${WAYLAND_DISPLAY:-}" ] || [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then echo gui=true; else echo gui=false; fi`,
+      commandChecks,
+    ]
+      .filter(Boolean)
+      .join("; "),
+    { quiet: true },
+  );
+
+  const commands: string[] = [];
+  let os = "unknown";
+  let arch = "unknown";
+  let gui = false;
+
+  for (const line of result.stdout.split("\n")) {
+    const [key, value = ""] = line.trim().split("=", 2);
+    if (key === "os") {
+      os = normalizeHostOs(value);
+    } else if (key === "arch") {
+      arch = value || "unknown";
+    } else if (key === "gui") {
+      gui = value === "true";
+    } else if (key === "cmd" && value) {
+      commands.push(value);
+    }
+  }
+
+  return { os, arch, gui, commands };
+}
+
+async function installMissingRemoteCodexPlugins(
+  host: string,
+  remoteHome: string,
+  pluginIds: string[],
+): Promise<void> {
+  const codexCommand = await resolveRemoteCodexCommand(host, remoteHome);
+  if (!codexCommand) {
+    log.warn("[codex] Plugin install reconciliation skipped: codex command not found on remote");
+    return;
+  }
+
+  const listResult = await runRemote(
+    host,
+    `${shellQuote(codexCommand)} plugin list --available --json`,
+    {
+      quiet: true,
+      nothrow: true,
+    },
+  );
+  if (listResult.exitCode !== 0) {
+    log.warn(
+      `[codex] Plugin install reconciliation skipped: ${listResult.stderr || listResult.stdout}`,
+    );
+    return;
+  }
+
+  const list = parseCodexPluginList(listResult.stdout);
+  const installed = new Set(list.installed.map((plugin) => plugin.pluginId));
+  const available = new Set(list.available.map((plugin) => plugin.pluginId));
+  const toInstall = pluginIds.filter(
+    (pluginId) => !installed.has(pluginId) && available.has(pluginId),
+  );
+
+  for (const pluginId of pluginIds) {
+    if (!installed.has(pluginId) && !available.has(pluginId)) {
+      log.warn(`[codex] Plugin install skipped: ${pluginId} is not available on remote`);
+    }
+  }
+
+  if (toInstall.length === 0) {
+    return;
+  }
+
+  log.dim(`  Installing ${toInstall.length} missing Codex plugin(s) on remote`);
+  for (const pluginId of toInstall) {
+    const result = await runRemote(
+      host,
+      `${shellQuote(codexCommand)} plugin add ${shellQuote(pluginId)} --json >/dev/null`,
+      { quiet: true, nothrow: true },
+    );
+    if (result.exitCode === 0) {
+      log.dim(`    installed ${pluginId}`);
+    } else {
+      log.warn(`[codex] Plugin install failed for ${pluginId}: ${result.stderr || result.stdout}`);
+    }
+  }
+}
+
+async function resolveRemoteCodexCommand(host: string, remoteHome: string): Promise<string | null> {
+  const result = await runRemote(
+    host,
+    buildRemoteCommandPathResolutionCommand("codex", remoteHome),
+    {
+      quiet: true,
+      nothrow: true,
+    },
+  );
+  return result.exitCode === 0 ? result.stdout.trim() || null : null;
+}
+
+async function readRemoteFileIfExists(host: string, path: string): Promise<string> {
+  const result = await runRemote(
+    host,
+    `if [ -f ${shellQuote(path)} ]; then cat ${shellQuote(path)}; fi`,
+    { quiet: true },
+  );
+  return result.stdout;
+}
+
+async function writeRemoteFile(host: string, path: string, content: string): Promise<void> {
+  const b64 = Buffer.from(content).toString("base64");
+  await runRemote(host, `echo ${shellQuote(b64)} | base64 -d > ${shellQuote(path)}`);
+}
+
+function parseCodexPluginList(raw: string): {
+  installed: Array<{ pluginId: string }>;
+  available: Array<{ pluginId: string }>;
+} {
+  try {
+    const parsed = JSON.parse(raw) as {
+      installed?: Array<{ pluginId?: string }>;
+      available?: Array<{ pluginId?: string }>;
+    };
+    return {
+      installed: (parsed.installed ?? []).flatMap((plugin) =>
+        typeof plugin.pluginId === "string" ? [{ pluginId: plugin.pluginId }] : [],
+      ),
+      available: (parsed.available ?? []).flatMap((plugin) =>
+        typeof plugin.pluginId === "string" ? [{ pluginId: plugin.pluginId }] : [],
+      ),
+    };
+  } catch {
+    return { installed: [], available: [] };
+  }
+}
+
+function normalizeHostOs(value: string): string {
+  if (value === "darwin") {
+    return "darwin";
+  }
+  if (value === "linux") {
+    return "linux";
+  }
+  if (value.startsWith("mingw") || value.startsWith("msys") || value.startsWith("cygwin")) {
+    return "windows";
+  }
+  return value || "unknown";
 }
 
 export async function previewPush(files: FileEntry[], host: string): Promise<void> {
