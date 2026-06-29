@@ -10,7 +10,7 @@ export function createCli(): Command {
   program
     .name("ccm")
     .description("Migrate Claude Code and Codex configurations between machines")
-    .version("1.6.0");
+    .version("1.6.1");
 
   program
     .command("config")
@@ -36,6 +36,7 @@ export function createCli(): Command {
     .option("--skip-version-check", "Skip Claude version check", false)
     .option("--providers <providers>", "Comma-separated providers to push (claude,codex)")
     .option("--all", "Push all providers")
+    .option("--verbose", "Show the full dry-run file list", false)
     .action(pushCommand);
 
   program

@@ -70,6 +70,7 @@ export interface PushOptions {
   skipVersionCheck: boolean;
   providers?: string;
   all?: boolean;
+  verbose?: boolean;
 }
 
 export interface BackupOptions {

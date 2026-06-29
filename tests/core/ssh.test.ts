@@ -1,12 +1,18 @@
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import type { FileEntry } from "../../src/types/index.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildClaudeSharedSkillSymlinkCommand,
   buildRemoteHostCapabilityProbeCommand,
   buildRemoteCommandPathResolutionCommand,
   parseRemoteHome,
+  previewPush,
   resolvePushActions,
 } from "../../src/core/ssh.ts";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("ssh helpers", () => {
   it("parses remote home when absolute", () => {
@@ -117,5 +123,67 @@ describe("ssh helpers", () => {
         hasShared: false,
       }),
     ).toEqual(["claude"]);
+  });
+
+  it("previews push with a compact file summary by default", async () => {
+    const output: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      output.push(args.join(" "));
+    });
+
+    const files: FileEntry[] = [
+      {
+        sourcePath: "/tmp/config.toml",
+        relativePath: "codex/config.toml",
+        isSymlink: false,
+      },
+      {
+        sourcePath: "/tmp/plugin-a",
+        relativePath: "codex/.ccm/marketplaces/openai-bundled/plugins/browser/SKILL.md",
+        isSymlink: false,
+      },
+      {
+        sourcePath: "/tmp/plugin-b",
+        relativePath: "codex/.ccm/marketplaces/openai-bundled/plugins/browser/README.md",
+        isSymlink: false,
+      },
+      {
+        sourcePath: "/tmp/lazy",
+        relativePath: "shared/agents/lazy-skills/example/SKILL.md",
+        isSymlink: false,
+      },
+    ];
+
+    await previewPush(files, "devbox");
+
+    const rendered = output.join("\n");
+    expect(rendered).toContain("Push dry-run for devbox");
+    expect(rendered).toContain("Transfer summary:");
+    expect(rendered).toContain("codex marketplaces/openai-bundled: 2 files");
+    expect(rendered).toContain("Sample paths:");
+    expect(rendered).not.toContain("Files to transfer (4):");
+  });
+
+  it("previews the full push file list when verbose", async () => {
+    const output: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      output.push(args.join(" "));
+    });
+
+    await previewPush(
+      [
+        {
+          sourcePath: "/tmp/mcp",
+          relativePath: "claude/.mcp-config.json",
+          isSymlink: false,
+        },
+      ],
+      "devbox",
+      { verbose: true },
+    );
+
+    const rendered = output.join("\n");
+    expect(rendered).toContain("Files to transfer (1):");
+    expect(rendered).toContain("~/.claude.json (MCP)");
   });
 });

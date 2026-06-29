@@ -62,7 +62,7 @@ export async function pushCommand(
   }
 
   if (options.dryRun) {
-    await previewPush(files, host);
+    await previewPush(files, host, { verbose: options.verbose ?? false });
     if (providers.includes("codex")) {
       const codexConfigPath = join(CODEX_DIR, "config.toml");
       const rawCodexConfig = await readFile(codexConfigPath, "utf8").catch(() => "");

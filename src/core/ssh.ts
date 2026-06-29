@@ -7,6 +7,7 @@ import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import {
   adaptCodexConfigForHost,
   codexMarketplaceArchivePath,
+  getCodexLocalMarketplaceSources,
   rewriteCodexMarketplaceSources,
 } from "./codex.ts";
 import {
@@ -412,6 +413,9 @@ export async function previewRemoteCodexPluginPolicy(
     const applied = applyCodexPluginPolicies(rawConfig, capabilities, policies, {
       preserveConfigRaw: previousRemoteCodexConfig,
     });
+    const incomingLocalMarketplaces = new Set(
+      getCodexLocalMarketplaceSources(rawConfig, remoteHome).map((source) => source.name),
+    );
 
     log.info(`Codex plugin policy preview for ${host} (${capabilities.os}/${capabilities.arch})`);
     log.dim(
@@ -435,10 +439,20 @@ export async function previewRemoteCodexPluginPolicy(
       return;
     }
 
-    await previewMissingRemoteCodexPlugins(host, remoteHome, pluginsToInstall);
+    await previewMissingRemoteCodexPlugins(host, remoteHome, pluginsToInstall, {
+      incomingLocalMarketplaces,
+    });
   } catch (error) {
     log.warn(`[codex] Plugin policy dry-run preview skipped: ${error}`);
   }
+}
+
+function pluginMarketplaceName(pluginId: string): string | null {
+  const separatorIndex = pluginId.lastIndexOf("@");
+  if (separatorIndex === -1 || separatorIndex === pluginId.length - 1) {
+    return null;
+  }
+  return pluginId.slice(separatorIndex + 1);
 }
 
 async function reconcileRemoteCodexPlugins(
@@ -490,6 +504,7 @@ async function previewMissingRemoteCodexPlugins(
   host: string,
   remoteHome: string,
   pluginIds: string[],
+  options: { incomingLocalMarketplaces?: Set<string> } = {},
 ): Promise<void> {
   const codexCommand = await resolveRemoteCodexCommand(host, remoteHome);
   if (!codexCommand) {
@@ -514,11 +529,14 @@ async function previewMissingRemoteCodexPlugins(
   const installed = new Set(list.installed.map((plugin) => plugin.pluginId));
   const available = new Set(list.available.map((plugin) => plugin.pluginId));
 
+  log.info("Plugin install plan:");
   for (const pluginId of pluginIds) {
     if (installed.has(pluginId)) {
       log.dim(`  ${pluginId}: already installed`);
     } else if (available.has(pluginId)) {
       log.dim(`  ${pluginId}: would install`);
+    } else if (options.incomingLocalMarketplaces?.has(pluginMarketplaceName(pluginId) ?? "")) {
+      log.dim(`  ${pluginId}: would install after syncing local marketplace source`);
     } else {
       log.warn(`[codex] Plugin install would be skipped: ${pluginId} is not available on remote`);
     }
@@ -691,14 +709,119 @@ function normalizeHostOs(value: string): string {
   return value || "unknown";
 }
 
-export async function previewPush(files: FileEntry[], host: string): Promise<void> {
-  log.info(`Would push to ${host}`);
-  log.info(`Files to transfer (${files.length}):`);
+interface PushPreviewOptions {
+  verbose?: boolean;
+}
+
+interface TransferGroup {
+  label: string;
+  count: number;
+}
+
+function displayTransferPath(file: FileEntry): string {
+  return file.relativePath === "claude/.mcp-config.json"
+    ? "~/.claude.json (MCP)"
+    : file.relativePath;
+}
+
+function transferGroupLabel(relativePath: string): string {
+  const parts = relativePath.split("/");
+
+  if (parts[0] === "codex" && parts[1] === ".ccm" && parts[2] === "marketplaces" && parts[3]) {
+    return `codex marketplaces/${parts[3]}`;
+  }
+
+  if (parts[0] === "shared" && parts[1] === "agents" && parts[2]) {
+    return `shared agents/${parts[2]}`;
+  }
+
+  if (parts[0] === "claude" && parts[1]) {
+    return `claude/${parts[1]}`;
+  }
+
+  if (parts[0] === "codex" && parts[1]) {
+    return `codex/${parts[1]}`;
+  }
+
+  return parts[0] || "other";
+}
+
+function summarizeTransferGroups(files: FileEntry[]): TransferGroup[] {
+  const counts = new Map<string, number>();
 
   for (const file of files) {
+    const label = transferGroupLabel(file.relativePath);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+function summarizeProviderCounts(files: FileEntry[]): TransferGroup[] {
+  const counts = new Map<string, number>();
+
+  for (const file of files) {
+    const provider = file.relativePath.split("/")[0] || "other";
+    counts.set(provider, (counts.get(provider) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+function formatCount(count: number, noun: string): string {
+  return `${count.toLocaleString()} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+export async function previewPush(
+  files: FileEntry[],
+  host: string,
+  options: PushPreviewOptions = {},
+): Promise<void> {
+  log.info(`Push dry-run for ${host}`);
+  log.dim(`  transfer: ${formatCount(files.length, "file")}`);
+
+  const providerCounts = summarizeProviderCounts(files)
+    .map((group) => `${group.label} ${group.count.toLocaleString()}`)
+    .join(", ");
+  if (providerCounts) {
+    log.dim(`  archive areas: ${providerCounts}`);
+  }
+
+  const symlinkCount = files.filter((file) => file.isSymlink).length;
+  if (symlinkCount > 0) {
+    log.dim(`  symlinks: ${symlinkCount.toLocaleString()}`);
+  }
+
+  const groups = summarizeTransferGroups(files);
+  log.info("Transfer summary:");
+  for (const group of groups.slice(0, 12)) {
+    log.dim(`  ${group.label}: ${formatCount(group.count, "file")}`);
+  }
+  if (groups.length > 12) {
+    log.dim(`  ... ${groups.length - 12} more group${groups.length - 12 === 1 ? "" : "s"}`);
+  }
+
+  if (!options.verbose) {
+    log.info("Sample paths:");
+    for (const file of files.slice(0, 12)) {
+      const symlinkNote = file.isSymlink ? ` (symlink -> ${file.originalSymlinkTarget})` : "";
+      log.file(displayTransferPath(file), symlinkNote);
+    }
+    if (files.length > 12) {
+      log.dim(
+        `  ... ${formatCount(files.length - 12, "more file")} hidden; use --verbose to list all`,
+      );
+    }
+    return;
+  }
+
+  log.info(`Files to transfer (${files.length.toLocaleString()}):`);
+  for (const file of files) {
     const symlinkNote = file.isSymlink ? ` (symlink -> ${file.originalSymlinkTarget})` : "";
-    const displayPath =
-      file.relativePath === "claude/.mcp-config.json" ? "~/.claude.json (MCP)" : file.relativePath;
-    log.file(displayPath, symlinkNote);
+    log.file(displayTransferPath(file), symlinkNote);
   }
 }

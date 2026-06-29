@@ -94,7 +94,8 @@ ccm push user@host              # all enabled providers + shared
 ccm push claude user@host       # claude + shared
 ccm push --all user@host        # all providers + shared, regardless of config enablement
 ccm push --providers claude,codex user@host
-ccm push codex user@host --dry-run # preview files + Codex plugin policy/install decisions
+ccm push codex user@host --dry-run           # compact transfer + Codex plugin plan
+ccm push codex user@host --dry-run --verbose # full file list when needed
 ```
 
 ### Restore
