@@ -61,6 +61,16 @@ plugin policy/install decisions.
 
 ## Installation
 
+Install the published CLI:
+
+```bash
+bun add -g claude-code-migrate
+# or
+npm install -g claude-code-migrate
+```
+
+For local development from a checkout:
+
 ```bash
 bun install
 bun link
