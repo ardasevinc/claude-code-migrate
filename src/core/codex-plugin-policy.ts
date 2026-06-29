@@ -126,6 +126,10 @@ export function applyCodexPluginPolicies(
       continue;
     }
 
+    if (plugin.enabled === decision.enabled) {
+      continue;
+    }
+
     const nextContent = upsertCodexPluginEnabled(content, pluginId, decision.enabled);
     if (nextContent === content) {
       warnings.push(`${pluginId}: could not set enabled = ${decision.enabled}`);

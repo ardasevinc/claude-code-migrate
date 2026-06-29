@@ -64,6 +64,27 @@ enabled = true
     expect(result.changes).toEqual([]);
   });
 
+  it("does not warn when a known enabled plugin remains enabled", () => {
+    const result = applyCodexPluginPolicies(
+      `
+[plugins."build-web-apps@openai-curated"]
+enabled = true
+`,
+      linuxServer,
+    );
+
+    expect(result.content).toContain("enabled = true");
+    expect(result.changes).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(result.decisions).toMatchObject([
+      {
+        pluginId: "build-web-apps@openai-curated",
+        enabled: true,
+        action: "enable",
+      },
+    ]);
+  });
+
   it("rewrites enabled values for plugins that do not match host policy", () => {
     const result = applyCodexPluginPolicies(
       `
