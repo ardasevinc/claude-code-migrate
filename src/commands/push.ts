@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../config/loader.ts";
@@ -16,9 +16,8 @@ import {
 import { checkVersionCompatibility } from "../core/version-checker.ts";
 import { CliError } from "../errors.ts";
 import type { PushOptions } from "../types/index.ts";
-import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { log } from "../utils/logger.ts";
-import { runCommand, shellQuote } from "../utils/shell.ts";
+import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 
 export async function pushCommand(
   arg1: string | undefined,
@@ -99,23 +98,20 @@ export async function pushCommand(
     }
   }
 
-  const tempArchive = join(tmpdir(), `ccm-push-${Date.now()}.tar.gz`);
+  const tempWorkspace = await mkdtemp(join(tmpdir(), "ccm-push-"));
+  const tempArchive = join(tempWorkspace, "archive.tar.gz");
   let unregisterInterruptCleanup: (() => void) | undefined;
 
   try {
     await createArchive(files, tempArchive);
     unregisterInterruptCleanup = registerInterruptCleanup(async () => {
-      await runCommand(`rm -f ${shellQuote(tempArchive)}`, { quiet: true, nothrow: true });
+      await rm(tempWorkspace, { recursive: true, force: true });
     });
-    const success = await pushArchive(tempArchive, host, {
+    await pushArchive(tempArchive, host, {
       codexPluginPolicies: config.providers.codex.plugin_policies,
     });
-
-    if (!success) {
-      throw new CliError(`Failed to push configuration to ${host}`);
-    }
   } finally {
-    await runCommand(`rm -f ${shellQuote(tempArchive)}`, { quiet: true, nothrow: true });
+    await rm(tempWorkspace, { recursive: true, force: true });
     unregisterInterruptCleanup?.();
   }
 }

@@ -14,7 +14,7 @@ function isValidHost(host: string): boolean {
 export function parseSshTarget(raw: string): SshTarget {
   const parts = raw.split("@");
   if (parts.length > 2) {
-    throw new Error(`Invalid SSH target '${raw}'`);
+    throw new Error(`Invalid SSH target ${JSON.stringify(raw)}`);
   }
 
   const host = parts.at(-1) ?? "";

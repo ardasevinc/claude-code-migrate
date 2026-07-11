@@ -43,5 +43,8 @@ describe("ssh-target", () => {
 
   it("escapes rejected control characters in errors", () => {
     expect(() => parseSshTarget("host\nforged")).toThrow('Invalid SSH target "host\\nforged"');
+    expect(() => parseSshTarget("a@@host\nforged")).toThrow(
+      'Invalid SSH target "a@@host\\nforged"',
+    );
   });
 });

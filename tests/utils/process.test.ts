@@ -82,7 +82,7 @@ describe("process runner", () => {
 
     expect(result).toMatchObject({
       exitCode: null,
-      signal: null,
+      signal: "SIGKILL",
       error: "output exceeded 4 byte buffer limit",
     });
   });

@@ -63,24 +63,15 @@ async function executeProcess(
     const stderr: Buffer[] = [];
     const maxBuffer = options.maxBuffer ?? 20 * 1024 * 1024;
     let bufferedBytes = 0;
+    let bufferError: string | undefined;
     let settled = false;
 
     const capture = (chunks: Buffer[], chunk: Buffer) => {
-      if (settled) return;
+      if (settled || bufferError) return;
       bufferedBytes += chunk.length;
       if (bufferedBytes > maxBuffer) {
-        child.kill();
-        const error = `output exceeded ${maxBuffer} byte buffer limit`;
-        finish(
-          {
-            stdout: Buffer.concat(stdout).toString(),
-            stderr: Buffer.concat(stderr).toString(),
-            exitCode: null,
-            signal: null,
-            error,
-          },
-          new Error(error),
-        );
+        bufferError = `output exceeded ${maxBuffer} byte buffer limit`;
+        child.kill("SIGKILL");
         return;
       }
       chunks.push(chunk);
@@ -106,12 +97,14 @@ async function executeProcess(
       finish({ stdout: "", stderr: "", exitCode: null, signal: null, error: error.message }, error);
     });
     child.on("close", (exitCode, signal) => {
-      finish({
+      const result: ProcessResult = {
         stdout: Buffer.concat(stdout).toString(),
         stderr: Buffer.concat(stderr).toString(),
         exitCode,
         signal,
-      });
+        ...(bufferError ? { error: bufferError } : {}),
+      };
+      finish(result, bufferError ? new Error(bufferError) : undefined);
     });
   });
 }

@@ -8,6 +8,7 @@ import {
   buildRemoteHostCapabilityProbeCommand,
   buildRemoteCommandPathResolutionCommand,
   parseRemoteHome,
+  parseRemoteWorkspace,
   previewPush,
   resolvePushActions,
 } from "../../src/core/ssh.ts";
@@ -43,6 +44,15 @@ describe("ssh helpers", () => {
 
   it("throws when remote home is not absolute", () => {
     expect(() => parseRemoteHome("home/arda\n")).toThrow("Unexpected remote $HOME value");
+  });
+
+  it("accepts only one safe absolute remote workspace", () => {
+    expect(parseRemoteWorkspace("/tmp/ccm.aB12\n")).toBe("/tmp/ccm.aB12");
+    expect(() => parseRemoteWorkspace("tmp/ccm.bad")).toThrow("safe temporary workspace");
+    expect(() => parseRemoteWorkspace("/tmp/../escape")).toThrow("safe temporary workspace");
+    expect(() => parseRemoteWorkspace("/tmp/good\n/tmp/forged")).toThrow(
+      "safe temporary workspace",
+    );
   });
 
   it("builds symlink command that removes preexisting target before linking", () => {

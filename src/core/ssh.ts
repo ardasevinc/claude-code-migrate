@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
@@ -107,8 +109,27 @@ async function backupDirectoryIfExists(
   const result = await runRemote(host, command, { quiet: true, nothrow: true });
 
   if (result.exitCode !== 0) {
-    log.warn(`Failed to back up or prune ${dirPath} on ${host}: ${result.stderr || result.stdout}`);
+    throw new Error(`Failed to back up ${dirPath}: ${result.stderr || result.stdout}`);
   }
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+export function parseRemoteWorkspace(raw: string): string {
+  const workspace = raw.trim();
+  if (
+    !workspace.startsWith("/") ||
+    workspace.includes("\n") ||
+    workspace.includes("\r") ||
+    workspace.split("/").includes("..")
+  ) {
+    throw new Error("Remote did not return a safe temporary workspace");
+  }
+  return workspace;
 }
 
 export function buildRemoteManagedBackupCommand(
@@ -384,20 +405,29 @@ export async function pushArchive(
   archivePath: string,
   host: string,
   options: { codexPluginPolicies?: Record<string, CodexPluginPolicy> } = {},
-): Promise<boolean> {
+): Promise<void> {
   parseSshTarget(host);
-  const remoteTempArchive = `/tmp/ccm-archive-${Date.now()}.tar.gz`;
-  const remoteTempDir = `/tmp/ccm-extract-${Date.now()}`;
-  const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
-    await runRemote(host, `rm -rf ${shellQuote(remoteTempArchive)} ${shellQuote(remoteTempDir)}`, {
-      quiet: true,
-      nothrow: true,
-    });
-  });
+  let remoteWorkspace: string | undefined;
+  let unregisterInterruptCleanup: (() => void) | undefined;
 
   try {
     await validateArchive(archivePath);
     const remoteHome = await getRemoteHome(host);
+    const workspaceResult = await runRemote(
+      host,
+      `umask 077; workspace=$(mktemp -d "\${TMPDIR:-/tmp}/ccm.XXXXXXXX") || exit 1; chmod 700 "$workspace"; printf '%s\\n' "$workspace"`,
+      { quiet: true },
+    );
+    remoteWorkspace = parseRemoteWorkspace(workspaceResult.stdout);
+    unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+      if (!remoteWorkspace) return;
+      await runRemote(host, `rm -rf ${shellQuote(remoteWorkspace)}`, {
+        quiet: true,
+        nothrow: true,
+      });
+    });
+    const remoteTempArchive = join(remoteWorkspace, "archive.tar.gz");
+    const remoteTempDir = join(remoteWorkspace, "extract");
     const remoteClaudeDir = join(remoteHome, ".claude");
     const remoteCodexDir = join(remoteHome, ".codex");
     const remoteCodexConfigPath = join(remoteCodexDir, "config.toml");
@@ -408,8 +438,7 @@ export async function pushArchive(
     const archiveSize = (await stat(archivePath)).size;
     log.info(`Uploading ${formatBytes(archiveSize)} archive to ${host}...`);
     const remoteSpec = `${host}:${remoteTempArchive}`;
-    const hasLocalRsync =
-      (await runProcess("command", ["-v", "rsync"], { nothrow: true })).exitCode === 0;
+    const hasLocalRsync = (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
     const hasRemoteRsync =
       (await runRemote(host, "command -v rsync", { quiet: true, nothrow: true })).exitCode === 0;
 
@@ -418,6 +447,16 @@ export async function pushArchive(
     } else {
       log.dim("  rsync unavailable; using scp without live progress");
       await runInheritedProcess("scp", buildArchiveUploadArgs(archivePath, remoteSpec, false));
+    }
+
+    const localArchiveHash = await sha256File(archivePath);
+    const remoteHashResult = await runRemote(
+      host,
+      `chmod 600 ${shellQuote(remoteTempArchive)}; if command -v sha256sum >/dev/null 2>&1; then sha256sum ${shellQuote(remoteTempArchive)} | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 ${shellQuote(remoteTempArchive)} | awk '{print $1}'; else exit 127; fi`,
+      { quiet: true },
+    );
+    if (remoteHashResult.stdout.trim() !== localArchiveHash) {
+      throw new Error("Uploaded archive checksum mismatch");
     }
 
     log.info("Extracting on remote...");
@@ -484,16 +523,16 @@ export async function pushArchive(
     }
 
     log.success(`Successfully pushed config to ${host}`);
-    return true;
   } catch (error) {
-    log.error(`Push failed: ${error}`);
-    return false;
+    throw new Error(`Push failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
-    await runRemote(host, `rm -rf ${shellQuote(remoteTempArchive)} ${shellQuote(remoteTempDir)}`, {
-      quiet: true,
-      nothrow: true,
-    });
-    unregisterInterruptCleanup();
+    if (remoteWorkspace) {
+      await runRemote(host, `rm -rf ${shellQuote(remoteWorkspace)}`, {
+        quiet: true,
+        nothrow: true,
+      });
+    }
+    unregisterInterruptCleanup?.();
   }
 }
 
