@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile as writeFileFs } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -280,5 +281,72 @@ source = "${marketplaceDir}"
       paths.filter((path) => path === "shared/agents/lazy-skills/lazy-pack/SKILL.md"),
     ).toHaveLength(1);
     expect(paths.filter((path) => path === "shared/agents/.skill-lock.json")).toHaveLength(1);
+  });
+
+  it("does not follow directory symlink cycles", async () => {
+    const codexDir = join(rootDir, ".codex");
+    await symlink(join(codexDir, "skills"), join(codexDir, "skills", "cycle"));
+
+    const files = await collectFiles({
+      providers: ["codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      paths: {
+        claudeDir: join(rootDir, ".claude"),
+        codexDir,
+        claudeMcpConfigPath: join(rootDir, ".claude.json"),
+        sharedAgentsDir: join(rootDir, ".agents"),
+        sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
+        sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
+      },
+    });
+
+    expect(files.some((file) => file.relativePath.includes("cycle"))).toBe(false);
+  });
+
+  it("skips special files", async () => {
+    const codexDir = join(rootDir, ".codex");
+    const fifoPath = join(codexDir, "skills", "input.fifo");
+    const result = spawnSync("mkfifo", [fifoPath]);
+    expect(result.status).toBe(0);
+
+    const files = await collectFiles({
+      providers: ["codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      paths: {
+        claudeDir: join(rootDir, ".claude"),
+        codexDir,
+        claudeMcpConfigPath: join(rootDir, ".claude.json"),
+        sharedAgentsDir: join(rootDir, ".agents"),
+        sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
+        sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
+      },
+    });
+
+    expect(files.some((file) => file.sourcePath === fifoPath)).toBe(false);
+  });
+
+  it("rejects control characters in collected paths", async () => {
+    await writeFixtureFile(join(rootDir, ".codex", "skills", "bad\nname"), "unsafe");
+
+    await expect(
+      collectFiles({
+        providers: ["codex"],
+        includeClaudeSettingsLocal: false,
+        includeClaudeMcpConfig: false,
+        paths: {
+          claudeDir: join(rootDir, ".claude"),
+          codexDir: join(rootDir, ".codex"),
+          claudeMcpConfigPath: join(rootDir, ".claude.json"),
+          sharedAgentsDir: join(rootDir, ".agents"),
+          sharedSkillsDir: join(rootDir, ".agents", "skills"),
+          sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
+          sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
+        },
+      }),
+    ).rejects.toThrow("Unsafe collection path");
   });
 });

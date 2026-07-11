@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
+import { lstat, readdir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { DEFAULT_COLLECTION_PATHS, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../config/providers.ts";
 import type { CollectionPaths, CollectorOptions, FileEntry, ProviderName } from "../types/index.ts";
@@ -13,6 +13,24 @@ interface CollectContext {
   neverMigrate?: Set<string>;
   neverMigratePaths?: Set<string>;
   paths: CollectionPaths;
+  visitedDirectories: Set<string>;
+}
+
+function validateRelativePath(path: string): void {
+  const segments = path.split("/");
+  const hasControlCharacter = Array.from(path).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (
+    path.length === 0 ||
+    isAbsolute(path) ||
+    path.includes("\\") ||
+    hasControlCharacter ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new Error(`Unsafe collection path: ${JSON.stringify(path)}`);
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -144,9 +162,12 @@ function pushEntry(
   isLink: boolean,
   linkTarget?: string,
 ): void {
+  validateRelativePath(relativePath);
+  const archivePath = join(context.archivePrefix, relativePath);
+  validateRelativePath(archivePath);
   entries.push({
     sourcePath,
-    relativePath: join(context.archivePrefix, relativePath),
+    relativePath: archivePath,
     isSymlink: isLink,
     originalSymlinkTarget: linkTarget,
   });
@@ -158,6 +179,18 @@ async function collectDirectory(
   context: CollectContext,
   virtualPrefix?: string,
 ): Promise<void> {
+  const resolvedDirectory = await realpath(dirPath);
+  const directoryStat = await stat(resolvedDirectory);
+  if (!directoryStat.isDirectory()) {
+    return;
+  }
+
+  const directoryKey = `${directoryStat.dev}:${directoryStat.ino}:${resolvedDirectory}`;
+  if (context.visitedDirectories.has(directoryKey)) {
+    return;
+  }
+  context.visitedDirectories.add(directoryKey);
+
   const dirEntries = await readdir(dirPath, { withFileTypes: true });
 
   for (const entry of dirEntries) {
@@ -165,6 +198,8 @@ async function collectDirectory(
     const relativePath = virtualPrefix
       ? join(virtualPrefix, entry.name)
       : relative(context.basePath, fullPath);
+
+    validateRelativePath(relativePath);
 
     if (shouldSkipCollectionPath(context, relativePath)) {
       continue;
@@ -187,7 +222,7 @@ async function collectDirectory(
 
       if (resolvedStat.isDirectory()) {
         await collectDirectory(resolvedPath, entries, context, relativePath);
-      } else {
+      } else if (resolvedStat.isFile()) {
         pushEntry(entries, context, resolvedPath, relativePath, true, target);
       }
 
@@ -201,7 +236,9 @@ async function collectDirectory(
       continue;
     }
 
-    pushEntry(entries, context, fullPath, relativePath, false);
+    if (stat.isFile()) {
+      pushEntry(entries, context, fullPath, relativePath, false);
+    }
   }
 }
 
@@ -215,6 +252,7 @@ async function collectPath(
   }
 
   const relativePath = relative(context.basePath, fullPath);
+  validateRelativePath(relativePath);
 
   if (shouldSkipCollectionPath(context, relativePath)) {
     return;
@@ -239,7 +277,9 @@ async function collectPath(
       return;
     }
 
-    pushEntry(entries, context, resolvedPath, relativePath, true, linkTarget);
+    if (resolvedStat.isFile()) {
+      pushEntry(entries, context, resolvedPath, relativePath, true, linkTarget);
+    }
     return;
   }
 
@@ -248,7 +288,10 @@ async function collectPath(
     return;
   }
 
-  pushEntry(entries, context, fullPath, relativePath, false);
+  const sourceStat = await lstat(fullPath);
+  if (sourceStat.isFile()) {
+    pushEntry(entries, context, fullPath, relativePath, false);
+  }
 }
 
 async function collectFilteredCuratedMarketplace(
@@ -310,6 +353,7 @@ async function collectProviderFiles(
     neverMigrate: new Set(provider.neverMigrate),
     neverMigratePaths: new Set(provider.neverMigratePaths ?? []),
     paths,
+    visitedDirectories: new Set(),
   };
 
   for (const item of provider.alwaysInclude) {
@@ -382,6 +426,7 @@ async function collectProviderFiles(
         archivePrefix: join(providerName, ".ccm", "marketplaces", marketplaceSource.name),
         basePath: marketplaceSource.source,
         paths,
+        visitedDirectories: new Set(),
       });
     }
 
@@ -396,6 +441,7 @@ async function collectProviderFiles(
         archivePrefix: curatedArchivePrefix,
         basePath: curatedRoot,
         paths,
+        visitedDirectories: new Set(),
       };
       await collectFilteredCuratedMarketplace(
         curatedRoot,
@@ -421,6 +467,7 @@ async function collectSharedAgentsFiles(paths: CollectionPaths): Promise<FileEnt
       archivePrefix: join(SHARED_ARCHIVE_PREFIX, "skills"),
       basePath: paths.sharedSkillsDir,
       paths,
+      visitedDirectories: new Set(),
     };
 
     await collectDirectory(paths.sharedSkillsDir, entries, context);
@@ -431,6 +478,7 @@ async function collectSharedAgentsFiles(paths: CollectionPaths): Promise<FileEnt
       archivePrefix: join(SHARED_ARCHIVE_PREFIX, "lazy-skills"),
       basePath: paths.sharedLazySkillsDir,
       paths,
+      visitedDirectories: new Set(),
     };
 
     await collectDirectory(paths.sharedLazySkillsDir, entries, context);
