@@ -55,6 +55,7 @@ command = "./scripts/run-mcp"
 `,
   );
   await writeFixtureFile(join(codexDir, "AGENTS.md"), "codex");
+  await writeFixtureFile(join(codexDir, "hooks.json"), '{"hooks":{}}');
   await writeFixtureFile(join(codexDir, "agents", "reviewer.md"), "reviewer");
   await writeFixtureFile(join(codexDir, "rules", "general.md"), "rules");
   await writeFixtureFile(join(codexDir, "skills", "codex-skill.md"), "skill");
@@ -121,6 +122,7 @@ describe("collector multi-provider", () => {
 
     expect(paths).toContain("codex/config.toml");
     expect(paths).toContain("codex/AGENTS.md");
+    expect(paths).toContain("codex/hooks.json");
     expect(paths).toContain("codex/skills/codex-skill.md");
     expect(paths).not.toContain("codex/skills/.system/openai-docs/SKILL.md");
     expect(paths).toContain("shared/agents/skills/shared-skill/SKILL.md");

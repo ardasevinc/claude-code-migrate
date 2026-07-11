@@ -70,7 +70,7 @@ export const PROVIDERS: Record<ProviderName, ProviderDefinition> = {
     baseDir: CODEX_DIR,
     remoteDir: "~/.codex",
     alwaysInclude: ["config.toml", "AGENTS.md", "agents", "rules", "skills"],
-    includeIfExists: ["AGENTS.override.md"],
+    includeIfExists: ["AGENTS.override.md", "hooks.json"],
     neverMigrate: [
       "auth.json",
       "history.jsonl",

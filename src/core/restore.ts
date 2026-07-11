@@ -1,6 +1,6 @@
 import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DEFAULT_COLLECTION_PATHS, isProviderName, PROVIDERS } from "../config/providers.ts";
 import type { ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
@@ -8,6 +8,7 @@ import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
 import { adaptCodexConfigForHost, normalizeLocalCodexMarketplaceSources } from "./codex.ts";
+import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 import { mergeMcpServers } from "./mcp.ts";
 
 async function exists(path: string): Promise<boolean> {
@@ -149,6 +150,7 @@ export async function restoreArchive(
       await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.codexDir);
       await copyDirectoryContents(join(tempDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
       const codexConfigPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "config.toml");
+      const codexHooksPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "hooks.json");
       if (await exists(codexConfigPath)) {
         const normalized = await normalizeLocalCodexMarketplaceSources(
           codexConfigPath,
@@ -161,6 +163,41 @@ export async function restoreArchive(
 
         if (normalized.changes.length > 0) {
           log.dim(`  Normalized ${normalized.changes.length} Codex marketplace source path(s)`);
+        }
+
+        if (await exists(codexHooksPath)) {
+          const hooksRaw = await readFile(codexHooksPath, "utf8");
+          const configRaw = await readFile(codexConfigPath, "utf8");
+          const home = dirname(DEFAULT_COLLECTION_PATHS.codexDir);
+          const hooksAdapted = await adaptCodexHooksForHost(
+            hooksRaw,
+            configRaw,
+            codexHooksPath,
+            async (binaryName) => {
+              for (const candidate of [
+                join(home, ".local", "bin", basename(binaryName)),
+                join(home, ".bun", "bin", basename(binaryName)),
+                join(home, "bin", basename(binaryName)),
+                join("/usr/local/bin", basename(binaryName)),
+                join("/usr/bin", basename(binaryName)),
+              ]) {
+                if (await exists(candidate)) return candidate;
+              }
+              return null;
+            },
+          );
+
+          for (const warning of hooksAdapted.warnings) {
+            log.warn(`[codex] Hook adaptation skipped: ${warning}`);
+          }
+          await writeFile(codexHooksPath, hooksAdapted.hooksContent, "utf8");
+          await writeFile(codexConfigPath, hooksAdapted.configContent, "utf8");
+          if (hooksAdapted.changes.length > 0) {
+            log.dim(`  Adapted ${hooksAdapted.changes.length} Codex hook command path(s)`);
+          }
+          if (hooksAdapted.trusted > 0) {
+            log.dim(`  Preserved trust for ${hooksAdapted.trusted} verified Codex hook(s)`);
+          }
         }
 
         const rawConfig = await readFile(codexConfigPath, "utf8");

@@ -19,6 +19,7 @@ import {
 } from "./codex-plugin-policy.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 import { validateArchive } from "./archiver.ts";
+import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
 
@@ -219,6 +220,53 @@ async function normalizeRemoteCodexMarketplaceSources(
   }
 }
 
+async function adaptRemoteCodexHooks(
+  host: string,
+  remoteCodexConfigPath: string,
+  remoteHooksPath: string,
+  remoteHome: string,
+): Promise<void> {
+  const [configResult, hooksResult] = await Promise.all([
+    runRemote(host, `cat ${shellQuote(remoteCodexConfigPath)}`, { quiet: true, nothrow: true }),
+    runRemote(host, `cat ${shellQuote(remoteHooksPath)}`, { quiet: true, nothrow: true }),
+  ]);
+
+  if (configResult.exitCode !== 0 || hooksResult.exitCode !== 0) return;
+
+  const adapted = await adaptCodexHooksForHost(
+    hooksResult.stdout,
+    configResult.stdout,
+    remoteHooksPath,
+    async (binaryName) => {
+      const result = await runRemote(
+        host,
+        buildRemoteCommandPathResolutionCommand(binaryName, remoteHome),
+        { quiet: true, nothrow: true },
+      );
+      return result.exitCode === 0 ? result.stdout.trim() || null : null;
+    },
+  );
+
+  for (const warning of adapted.warnings) {
+    log.warn(`[codex] Hook adaptation skipped: ${warning}`);
+  }
+
+  const hooksB64 = Buffer.from(adapted.hooksContent).toString("base64");
+  const configB64 = Buffer.from(adapted.configContent).toString("base64");
+  await runRemote(
+    host,
+    `echo ${shellQuote(hooksB64)} | base64 -d > ${shellQuote(remoteHooksPath)} && echo ${shellQuote(configB64)} | base64 -d > ${shellQuote(remoteCodexConfigPath)}`,
+  );
+
+  if (adapted.changes.length > 0) {
+    log.dim(`  Adapted ${adapted.changes.length} Codex hook command path(s):`);
+    for (const change of adapted.changes) log.dim(`    ${change}`);
+  }
+  if (adapted.trusted > 0) {
+    log.dim(`  Preserved trust for ${adapted.trusted} verified Codex hook(s)`);
+  }
+}
+
 async function adaptRemoteCodexConfigForHost(
   host: string,
   remoteCodexConfigPath: string,
@@ -326,6 +374,7 @@ export async function pushArchive(
     const remoteClaudeDir = join(remoteHome, ".claude");
     const remoteCodexDir = join(remoteHome, ".codex");
     const remoteCodexConfigPath = join(remoteCodexDir, "config.toml");
+    const remoteCodexHooksPath = join(remoteCodexDir, "hooks.json");
     const remoteAgentsDir = join(remoteHome, ".agents");
     const remoteMcpPath = join(remoteHome, ".claude.json");
 
@@ -378,6 +427,7 @@ export async function pushArchive(
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
         await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath, remoteHome);
         await normalizeRemoteCodexMarketplaceSources(host, remoteCodexConfigPath, remoteCodexDir);
+        await adaptRemoteCodexHooks(host, remoteCodexConfigPath, remoteCodexHooksPath, remoteHome);
         await adaptRemoteCodexConfigForHost(host, remoteCodexConfigPath);
         await reconcileRemoteCodexPlugins(host, remoteCodexConfigPath, remoteHome, {
           pluginPolicies: options.codexPluginPolicies,
