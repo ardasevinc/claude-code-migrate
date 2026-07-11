@@ -5,7 +5,8 @@ import type { CodexPluginPolicy } from "../types/index.ts";
 import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
 import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
-import { runCommand, runStreamingCommand, shellQuote } from "../utils/shell.ts";
+import { runInheritedProcess, runProcess } from "../utils/process.ts";
+import { shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import {
   adaptCodexConfigForHost,
@@ -22,6 +23,7 @@ import {
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 import { validateArchive } from "./archiver.ts";
 import { adaptCodexHooksForHost } from "./codex-hooks.ts";
+import { parseSshTarget } from "./ssh-target.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
 
@@ -30,7 +32,8 @@ async function runRemote(
   command: string,
   options: { quiet?: boolean; nothrow?: boolean } = {},
 ) {
-  return runCommand(`ssh ${shellQuote(host)} ${shellQuote(command)}`, options);
+  parseSshTarget(host);
+  return runProcess("ssh", [host, command], options);
 }
 
 export function parseRemoteHome(rawStdout: string): string {
@@ -361,19 +364,19 @@ export function resolvePushActions(input: {
 }
 
 export async function testConnection(host: string): Promise<boolean> {
-  const result = await runCommand(
-    `ssh -o BatchMode=yes -o ConnectTimeout=5 ${shellQuote(host)} "echo ok"`,
-    {
-      quiet: true,
-      nothrow: true,
-    },
+  parseSshTarget(host);
+  const result = await runProcess(
+    "ssh",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "echo ok"],
+    { nothrow: true },
   );
 
   return result.exitCode === 0 && result.stdout.trim() === "ok";
 }
 
 export async function getRemoteHome(host: string): Promise<string> {
-  const result = await runCommand(`ssh ${shellQuote(host)} 'echo $HOME'`, { quiet: true });
+  parseSshTarget(host);
+  const result = await runProcess("ssh", [host, "echo $HOME"]);
   return parseRemoteHome(result.stdout);
 }
 
@@ -382,6 +385,7 @@ export async function pushArchive(
   host: string,
   options: { codexPluginPolicies?: Record<string, CodexPluginPolicy> } = {},
 ): Promise<boolean> {
+  parseSshTarget(host);
   const remoteTempArchive = `/tmp/ccm-archive-${Date.now()}.tar.gz`;
   const remoteTempDir = `/tmp/ccm-extract-${Date.now()}`;
   const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
@@ -405,15 +409,15 @@ export async function pushArchive(
     log.info(`Uploading ${formatBytes(archiveSize)} archive to ${host}...`);
     const remoteSpec = `${host}:${remoteTempArchive}`;
     const hasLocalRsync =
-      (await runCommand("command -v rsync", { quiet: true, nothrow: true })).exitCode === 0;
+      (await runProcess("command", ["-v", "rsync"], { nothrow: true })).exitCode === 0;
     const hasRemoteRsync =
       (await runRemote(host, "command -v rsync", { quiet: true, nothrow: true })).exitCode === 0;
 
     if (hasLocalRsync && hasRemoteRsync) {
-      await runStreamingCommand(buildArchiveUploadCommand(archivePath, remoteSpec, true));
+      await runInheritedProcess("rsync", buildArchiveUploadArgs(archivePath, remoteSpec, true));
     } else {
       log.dim("  rsync unavailable; using scp without live progress");
-      await runStreamingCommand(buildArchiveUploadCommand(archivePath, remoteSpec, false));
+      await runInheritedProcess("scp", buildArchiveUploadArgs(archivePath, remoteSpec, false));
     }
 
     log.info("Extracting on remote...");
@@ -493,16 +497,16 @@ export async function pushArchive(
   }
 }
 
-export function buildArchiveUploadCommand(
+export function buildArchiveUploadArgs(
   archivePath: string,
   remoteSpec: string,
   useRsync: boolean,
-): string {
+): string[] {
   if (useRsync) {
-    return `rsync --partial --human-readable --info=progress2 ${shellQuote(archivePath)} ${shellQuote(remoteSpec)}`;
+    return ["--partial", "--human-readable", "--info=progress2", archivePath, remoteSpec];
   }
 
-  return `scp ${shellQuote(archivePath)} ${shellQuote(remoteSpec)}`;
+  return [archivePath, remoteSpec];
 }
 
 function formatBytes(bytes: number): string {

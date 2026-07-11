@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import type { FileEntry } from "../../src/types/index.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  buildArchiveUploadCommand,
+  buildArchiveUploadArgs,
   buildClaudeSharedSkillSymlinkCommand,
   buildRemoteManagedBackupCommand,
   buildRemoteHostCapabilityProbeCommand,
@@ -18,12 +18,18 @@ afterEach(() => {
 
 describe("ssh helpers", () => {
   it("uses rsync progress when available and falls back to scp", () => {
-    expect(buildArchiveUploadCommand("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", true)).toBe(
-      "rsync --partial --human-readable --info=progress2 '/tmp/archive.tar.gz' 'host:/tmp/archive.tar.gz'",
-    );
     expect(
-      buildArchiveUploadCommand("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", false),
-    ).toBe("scp '/tmp/archive.tar.gz' 'host:/tmp/archive.tar.gz'");
+      buildArchiveUploadArgs("/tmp/archive;touch nope", "host:/tmp/archive.tar.gz", true),
+    ).toEqual([
+      "--partial",
+      "--human-readable",
+      "--info=progress2",
+      "/tmp/archive;touch nope",
+      "host:/tmp/archive.tar.gz",
+    ]);
+    expect(
+      buildArchiveUploadArgs("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", false),
+    ).toEqual(["/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz"]);
   });
 
   it("parses remote home when absolute", () => {
