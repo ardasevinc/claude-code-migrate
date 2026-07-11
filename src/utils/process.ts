@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { registerInterruptCleanup } from "./interrupt-cleanup.ts";
+
+const INTERRUPT_GRACE_MS = 250;
 
 export interface ProcessOptions {
   cwd?: string;
@@ -65,6 +68,24 @@ async function executeProcess(
     let bufferedBytes = 0;
     let bufferError: string | undefined;
     let settled = false;
+    let childClosed = false;
+    let resolveChildClosed: () => void;
+    const childClosedPromise = new Promise<void>((resolve) => {
+      resolveChildClosed = resolve;
+    });
+    const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+      if (childClosed) return;
+
+      child.kill("SIGTERM");
+      const timedOut = await Promise.race([
+        childClosedPromise.then(() => false),
+        new Promise<true>((resolve) => setTimeout(() => resolve(true), INTERRUPT_GRACE_MS)),
+      ]);
+      if (timedOut && !childClosed) {
+        child.kill("SIGKILL");
+        await childClosedPromise;
+      }
+    });
 
     const capture = (chunks: Buffer[], chunk: Buffer) => {
       if (settled || bufferError) return;
@@ -94,9 +115,15 @@ async function executeProcess(
     };
 
     child.on("error", (error) => {
+      childClosed = true;
+      resolveChildClosed();
+      unregisterInterruptCleanup();
       finish({ stdout: "", stderr: "", exitCode: null, signal: null, error: error.message }, error);
     });
     child.on("close", (exitCode, signal) => {
+      childClosed = true;
+      resolveChildClosed();
+      unregisterInterruptCleanup();
       const result: ProcessResult = {
         stdout: Buffer.concat(stdout).toString(),
         stderr: Buffer.concat(stderr).toString(),

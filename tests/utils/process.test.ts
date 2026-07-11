@@ -1,3 +1,7 @@
+import { spawn } from "node:child_process";
+import { access, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ProcessError, runInheritedProcess, runProcess } from "../../src/utils/process.ts";
 
@@ -91,5 +95,35 @@ describe("process runner", () => {
     await expect(runProcess("ccm-command-that-does-not-exist")).rejects.toBeInstanceOf(
       ProcessError,
     );
+  });
+
+  it.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)("terminates an active child before exiting on %s", async (signal, expectedCode) => {
+    const root = await mkdtemp(join(tmpdir(), "ccm-process-interrupt-"));
+    const marker = join(root, "child-survived");
+
+    try {
+      const parent = spawn("bun", ["tests/fixtures/process-interrupt.ts", marker], {
+        cwd: process.cwd(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      await new Promise<void>((resolve, reject) => {
+        parent.stdout.once("data", () => resolve());
+        parent.once("error", reject);
+      });
+
+      parent.kill(signal);
+      const exitCode = await new Promise<number | null>((resolve) => {
+        parent.once("exit", (code) => resolve(code));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+      expect(exitCode).toBe(expectedCode);
+      await expect(access(marker)).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
