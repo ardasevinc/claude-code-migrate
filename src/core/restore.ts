@@ -188,6 +188,7 @@ export async function restoreArchive(
         ...PROVIDERS.codex.alwaysInclude,
         ...PROVIDERS.codex.includeIfExists,
         ".ccm",
+        ".tmp/plugins",
       ]);
       await copyDirectoryContents(join(tempDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
       const codexConfigPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "config.toml");

@@ -20,12 +20,24 @@ interface CodexConfig {
   mcp_servers?: Record<string, CodexMcpServerConfig>;
   mcpServers?: Record<string, CodexMcpServerConfig>;
   notify?: string[];
+  plugins?: Record<string, { enabled?: boolean }>;
 }
 
 export interface CodexLocalMarketplaceSource {
   name: string;
   rawSource: string;
   source: string;
+}
+
+export function getConfiguredCodexPluginNames(
+  rawConfig: string,
+  marketplaceName: string,
+): string[] {
+  const parsed = parse(rawConfig) as unknown as CodexConfig;
+  const suffix = `@${marketplaceName}`;
+  return Object.entries(parsed.plugins ?? {})
+    .filter(([id, state]) => id.endsWith(suffix) && state?.enabled !== false)
+    .map(([id]) => id.slice(0, -suffix.length));
 }
 
 export interface CodexMarketplaceSourceRewrite {

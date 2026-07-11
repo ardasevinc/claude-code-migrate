@@ -209,6 +209,41 @@ source = "${marketplaceDir}"
     );
   });
 
+  it("collects configured implicit curated plugin payloads without the full catalog", async () => {
+    const codexDir = join(rootDir, ".codex");
+    const curatedRoot = join(codexDir, ".tmp", "plugins");
+    await mkdir(join(curatedRoot, ".agents", "plugins"), { recursive: true });
+    await mkdir(join(curatedRoot, "plugins", "build-web-apps"), { recursive: true });
+    await mkdir(join(curatedRoot, "plugins", "unused"), { recursive: true });
+    await writeFixtureFile(join(curatedRoot, ".agents", "plugins", "marketplace.json"), "{}");
+    await writeFixtureFile(join(curatedRoot, "plugins", "build-web-apps", "SKILL.md"), "web");
+    await writeFixtureFile(join(curatedRoot, "plugins", "unused", "SKILL.md"), "unused");
+    await writeFixtureFile(
+      join(codexDir, "config.toml"),
+      '[plugins."build-web-apps@openai-curated"]\nenabled = true\n',
+    );
+
+    const files = await collectFiles({
+      providers: ["codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      paths: {
+        claudeDir: join(rootDir, ".claude"),
+        codexDir,
+        claudeMcpConfigPath: join(rootDir, ".claude.json"),
+        sharedAgentsDir: join(rootDir, ".agents"),
+        sharedSkillsDir: join(rootDir, ".agents", "skills"),
+        sharedLazySkillsDir: join(rootDir, ".agents", "lazy-skills"),
+        sharedSkillLockPath: join(rootDir, ".agents", ".skill-lock.json"),
+      },
+    });
+    const paths = files.map((file) => file.relativePath);
+
+    expect(paths).toContain("codex/.tmp/plugins/.agents/plugins/marketplace.json");
+    expect(paths).toContain("codex/.tmp/plugins/plugins/build-web-apps/SKILL.md");
+    expect(paths).not.toContain("codex/.tmp/plugins/plugins/unused/SKILL.md");
+  });
+
   it("collects claude, codex, and shared once for multi-provider pushes", async () => {
     const files = await collectFiles({
       providers: ["claude", "codex"],

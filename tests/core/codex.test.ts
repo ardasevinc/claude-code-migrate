@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   adaptCodexConfigForHost,
+  getConfiguredCodexPluginNames,
   getCodexLocalMarketplaceSources,
   rewriteCodexMarketplaceSources,
 } from "../../src/core/codex.ts";
 
 describe("codex helpers", () => {
+  it("lists enabled configured plugins for one marketplace", () => {
+    expect(
+      getConfiguredCodexPluginNames(
+        `
+[plugins."build-web-apps@openai-curated"]
+enabled = true
+[plugins."build-ios-apps@openai-curated"]
+enabled = false
+[plugins."sites@openai-bundled"]
+enabled = true
+`,
+        "openai-curated",
+      ),
+    ).toEqual(["build-web-apps"]);
+  });
+
   it("discovers local marketplace sources from codex config", () => {
     const sources = getCodexLocalMarketplaceSources(
       `

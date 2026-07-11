@@ -1,9 +1,9 @@
-import { lstat, readdir, readlink, realpath } from "node:fs/promises";
+import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { DEFAULT_COLLECTION_PATHS, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../config/providers.ts";
 import type { CollectionPaths, CollectorOptions, FileEntry, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
-import { discoverCodexLocalMarketplaceSources } from "./codex.ts";
+import { discoverCodexLocalMarketplaceSources, getConfiguredCodexPluginNames } from "./codex.ts";
 import { detectCodexMcpPathWarnings, extractMcpServers } from "./mcp.ts";
 
 interface CollectContext {
@@ -353,6 +353,21 @@ async function collectProviderFiles(
         basePath: marketplaceSource.source,
         paths,
       });
+    }
+
+    const rawConfig = await readFile(codexConfigPath, "utf8").catch(() => "");
+    const curatedRoot = join(basePath, ".tmp", "plugins");
+    const curatedArchivePrefix = join(providerName, ".tmp", "plugins");
+    if (rawConfig && (await isDirectory(curatedRoot))) {
+      const curatedContext: CollectContext = {
+        archivePrefix: curatedArchivePrefix,
+        basePath: curatedRoot,
+        paths,
+      };
+      await collectPath(join(curatedRoot, ".agents", "plugins"), entries, curatedContext);
+      for (const pluginName of getConfiguredCodexPluginNames(rawConfig, "openai-curated")) {
+        await collectPath(join(curatedRoot, "plugins", pluginName), entries, curatedContext);
+      }
     }
   }
 

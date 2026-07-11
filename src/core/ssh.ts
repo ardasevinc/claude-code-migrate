@@ -453,6 +453,7 @@ export async function pushArchive(
           ...PROVIDERS.codex.alwaysInclude,
           ...PROVIDERS.codex.includeIfExists,
           ".ccm",
+          ".tmp/plugins",
         ]);
         const previousRemoteCodexConfig = await readRemoteFileIfExists(host, remoteCodexConfigPath);
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
