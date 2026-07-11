@@ -1,5 +1,6 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { parse } from "smol-toml";
+import { CliError } from "../errors.ts";
 import type { CodexPluginPolicy, CodexPluginPolicyMode, Config } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
@@ -77,6 +78,83 @@ function normalizeConfig(raw: RawConfig): Config {
   };
 }
 
+function assertConfig(raw: unknown): asserts raw is RawConfig {
+  if (!isRecord(raw)) throw new Error("config root must be a table");
+  assertOptionalRecord(raw, "target", (target) => {
+    assertOptionalString(target, "type");
+    if (target.type !== undefined && target.type !== "ssh") {
+      throw new Error('target.type must be "ssh"');
+    }
+    assertOptionalString(target, "host");
+    assertOptionalString(target, "path");
+  });
+  assertOptionalRecord(raw, "include", (include) => {
+    assertOptionalBoolean(include, "settings_local");
+    assertOptionalBoolean(include, "mcp_config");
+  });
+  assertOptionalRecord(raw, "backup", (backup) => assertOptionalString(backup, "path"));
+  assertOptionalRecord(raw, "providers", (providers) => {
+    assertOptionalRecord(providers, "claude", (claude) => {
+      assertOptionalBoolean(claude, "enabled");
+      assertOptionalBoolean(claude, "settings_local");
+      assertOptionalBoolean(claude, "mcp_config");
+    });
+    assertOptionalRecord(providers, "codex", (codex) => {
+      assertOptionalBoolean(codex, "enabled");
+      assertOptionalRecord(codex, "plugin_policies", (policies) => {
+        for (const [pluginId, policy] of Object.entries(policies)) {
+          if (!isRecord(policy))
+            throw new Error(`providers.codex.plugin_policies.${pluginId} must be a table`);
+          assertOptionalString(policy, "mode");
+          if (
+            policy.mode !== undefined &&
+            !["auto", "always", "never", "preserve"].includes(policy.mode as string)
+          ) {
+            throw new Error(`providers.codex.plugin_policies.${pluginId}.mode is invalid`);
+          }
+          assertOptionalStringArray(policy, "os");
+          assertOptionalStringArray(policy, "commands");
+          assertOptionalBoolean(policy, "gui");
+        }
+      });
+    });
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertOptionalRecord(
+  record: Record<string, unknown>,
+  key: string,
+  validate: (value: Record<string, unknown>) => void,
+): void {
+  if (record[key] === undefined) return;
+  if (!isRecord(record[key])) throw new Error(`${key} must be a table`);
+  validate(record[key]);
+}
+
+function assertOptionalString(record: Record<string, unknown>, key: string): void {
+  if (record[key] !== undefined && typeof record[key] !== "string")
+    throw new Error(`${key} must be a string`);
+}
+
+function assertOptionalBoolean(record: Record<string, unknown>, key: string): void {
+  if (record[key] !== undefined && typeof record[key] !== "boolean")
+    throw new Error(`${key} must be a boolean`);
+}
+
+function assertOptionalStringArray(record: Record<string, unknown>, key: string): void {
+  const value = record[key];
+  if (
+    value !== undefined &&
+    (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+  ) {
+    throw new Error(`${key} must be an array of strings`);
+  }
+}
+
 function normalizeCodexPluginPolicies(
   rawPolicies: Record<string, RawCodexPluginPolicy> | undefined,
 ): Record<string, CodexPluginPolicy> {
@@ -116,18 +194,20 @@ function normalizeStringArray(value: string[] | undefined): string[] | undefined
 }
 
 export async function loadConfig(): Promise<Config> {
-  if (!(await exists(CONFIG_PATH))) {
-    return DEFAULT_CONFIG;
-  }
-
   try {
     const content = await readFile(CONFIG_PATH, "utf8");
-    const parsed = parse(content) as unknown as RawConfig;
+    const parsed: unknown = parse(content);
+    assertConfig(parsed);
     return normalizeConfig(parsed);
-  } catch {
-    log.warn(`Failed to parse config at ${CONFIG_PATH}, using defaults`);
-    return DEFAULT_CONFIG;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return DEFAULT_CONFIG;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CliError(`Failed to load config at ${CONFIG_PATH}: ${detail}`);
   }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 export async function initConfig(): Promise<boolean> {

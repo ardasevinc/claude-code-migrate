@@ -2,8 +2,8 @@ import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { resolveRestoreProvider } from "../core/arg-parser.ts";
 import { restoreArchive } from "../core/restore.ts";
+import { CliError } from "../errors.ts";
 import type { ProviderName, RestoreOptions } from "../types/index.ts";
-import { log } from "../utils/logger.ts";
 
 export async function restoreCommand(
   archiveArg: string,
@@ -13,8 +13,7 @@ export async function restoreCommand(
   const archivePath = resolve(archiveArg);
 
   if (!(await exists(archivePath))) {
-    log.error(`Archive not found: ${archivePath}`);
-    return;
+    throw new CliError(`Archive not found: ${archivePath}`);
   }
 
   let provider: ProviderName | undefined;
@@ -22,13 +21,12 @@ export async function restoreCommand(
   try {
     provider = resolveRestoreProvider(providerArg);
   } catch (error) {
-    log.error(error instanceof Error ? error.message : "Invalid provider");
-    return;
+    throw new CliError(error instanceof Error ? error.message : "Invalid provider");
   }
 
   const success = await restoreArchive(archivePath, provider, { dryRun: options.dryRun });
   if (!success) {
-    process.exit(1);
+    throw new CliError(`Failed to restore archive: ${archivePath}`);
   }
 }
 

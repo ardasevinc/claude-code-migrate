@@ -1,6 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
 import { loadConfig } from "../config/loader.ts";
 import { CODEX_DIR } from "../config/providers.ts";
 import { createArchive } from "../core/archiver.ts";
@@ -13,9 +13,10 @@ import {
   testConnection,
 } from "../core/ssh.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
+import { CliError } from "../errors.ts";
 import type { PushOptions } from "../types/index.ts";
-import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 
 export async function pushCommand(
@@ -37,17 +38,15 @@ export async function pushCommand(
     providers = resolved.providers;
     targetArg = resolved.target;
   } catch (error) {
-    log.error(error instanceof Error ? error.message : "Invalid arguments");
-    return;
+    throw new CliError(error instanceof Error ? error.message : "Invalid arguments");
   }
 
   const host = targetArg ?? config.target.host;
 
   if (host === "user@example.com") {
-    log.error(
+    throw new CliError(
       "No target configured. Run 'ccm config --init' and edit the config, or specify a target: ccm push user@host",
     );
-    return;
   }
 
   const files = await collectFiles({
@@ -58,8 +57,7 @@ export async function pushCommand(
   });
 
   if (files.length === 0) {
-    log.error("No files to push");
-    return;
+    throw new CliError("No files to push");
   }
 
   if (options.dryRun) {
@@ -82,8 +80,7 @@ export async function pushCommand(
   const connected = await testConnection(host);
 
   if (!connected) {
-    log.error(`Cannot connect to ${host}. Check your SSH configuration.`);
-    return;
+    throw new CliError(`Cannot connect to ${host}. Check your SSH configuration.`);
   }
 
   log.success("Connection established");
@@ -108,7 +105,7 @@ export async function pushCommand(
     });
 
     if (!success) {
-      process.exit(1);
+      throw new CliError(`Failed to push configuration to ${host}`);
     }
   } finally {
     await runCommand(`rm -f ${shellQuote(tempArchive)}`, { quiet: true, nothrow: true });

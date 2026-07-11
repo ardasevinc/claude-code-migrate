@@ -8,6 +8,8 @@ import { restoreCommand } from "./commands/restore.ts";
 export function createCli(): Command {
   const program = new Command();
 
+  program.exitOverride();
+
   program
     .name("ccm")
     .description("Migrate Claude Code and Codex configurations between machines")
