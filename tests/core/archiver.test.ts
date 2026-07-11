@@ -106,6 +106,23 @@ describe("archiver", () => {
     }
   });
 
+  it("rejects non-regular archive sources before staging", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-source-test-"));
+    try {
+      const sourceDir = join(rootDir, "source-dir");
+      await mkdir(sourceDir);
+      await expect(
+        createArchive(
+          [{ sourcePath: sourceDir, relativePath: "codex/not-a-file", isSymlink: false }],
+          join(rootDir, "backup.tar.gz"),
+        ),
+      ).rejects.toThrow("Archive source is not a regular file");
+      expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it("allows only one concurrent no-clobber publisher", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-concurrency-test-"));
     const archivePath = join(rootDir, "backup.tar.gz");

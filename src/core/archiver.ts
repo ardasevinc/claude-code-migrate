@@ -3,6 +3,7 @@ import {
   chmod,
   copyFile,
   link,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -46,6 +47,15 @@ export async function createArchive(
   options: CreateArchiveOptions = {},
 ): Promise<string> {
   validateArchiveFileEntries(files);
+  for (const file of files) {
+    if (file.mcpServersOnly !== undefined) continue;
+    const sourceStat = await lstat(file.sourcePath).catch(() => null);
+    if (!sourceStat?.isFile()) {
+      throw new BlockedError(
+        `Archive source is not a regular file: ${JSON.stringify(file.relativePath)}`,
+      );
+    }
+  }
   const archiveDir = dirname(outputPath);
   await mkdir(archiveDir, { recursive: true });
   const workspace = await mkdtemp(join(archiveDir, ".ccm-archive-"));
