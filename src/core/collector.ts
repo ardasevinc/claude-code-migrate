@@ -251,6 +251,36 @@ async function collectPath(
   pushEntry(entries, context, fullPath, relativePath, false);
 }
 
+async function collectFilteredCuratedMarketplace(
+  curatedRoot: string,
+  pluginNames: Set<string>,
+  entries: FileEntry[],
+  archivePrefix: string,
+): Promise<void> {
+  for (const filename of ["marketplace.json", "api_marketplace.json"]) {
+    const sourcePath = join(curatedRoot, ".agents", "plugins", filename);
+    const raw = await readFile(sourcePath, "utf8").catch(() => null);
+    if (!raw) continue;
+
+    try {
+      const marketplace = JSON.parse(raw) as { plugins?: Array<{ name?: string }> };
+      if (!Array.isArray(marketplace.plugins)) continue;
+
+      marketplace.plugins = marketplace.plugins.filter(
+        (plugin) => typeof plugin.name === "string" && pluginNames.has(plugin.name),
+      );
+      entries.push({
+        sourcePath,
+        relativePath: join(archivePrefix, ".agents", "plugins", filename),
+        isSymlink: false,
+        mcpServersOnly: `${JSON.stringify(marketplace, null, 2)}\n`,
+      });
+    } catch {
+      log.warn(`[codex] Invalid curated marketplace metadata, skipping: ${sourcePath}`);
+    }
+  }
+}
+
 function getProviderBasePath(providerName: ProviderName, paths: CollectionPaths): string {
   if (providerName === "claude") {
     return paths.claudeDir;
@@ -359,13 +389,21 @@ async function collectProviderFiles(
     const curatedRoot = join(basePath, ".tmp", "plugins");
     const curatedArchivePrefix = join(providerName, ".tmp", "plugins");
     if (rawConfig && (await isDirectory(curatedRoot))) {
+      const configuredPluginNames = new Set(
+        getConfiguredCodexPluginNames(rawConfig, "openai-curated"),
+      );
       const curatedContext: CollectContext = {
         archivePrefix: curatedArchivePrefix,
         basePath: curatedRoot,
         paths,
       };
-      await collectPath(join(curatedRoot, ".agents", "plugins"), entries, curatedContext);
-      for (const pluginName of getConfiguredCodexPluginNames(rawConfig, "openai-curated")) {
+      await collectFilteredCuratedMarketplace(
+        curatedRoot,
+        configuredPluginNames,
+        entries,
+        curatedArchivePrefix,
+      );
+      for (const pluginName of configuredPluginNames) {
         await collectPath(join(curatedRoot, "plugins", pluginName), entries, curatedContext);
       }
     }

@@ -215,7 +215,10 @@ source = "${marketplaceDir}"
     await mkdir(join(curatedRoot, ".agents", "plugins"), { recursive: true });
     await mkdir(join(curatedRoot, "plugins", "build-web-apps"), { recursive: true });
     await mkdir(join(curatedRoot, "plugins", "unused"), { recursive: true });
-    await writeFixtureFile(join(curatedRoot, ".agents", "plugins", "marketplace.json"), "{}");
+    await writeFixtureFile(
+      join(curatedRoot, ".agents", "plugins", "marketplace.json"),
+      JSON.stringify({ plugins: [{ name: "build-web-apps" }, { name: "unused" }] }),
+    );
     await writeFixtureFile(join(curatedRoot, "plugins", "build-web-apps", "SKILL.md"), "web");
     await writeFixtureFile(join(curatedRoot, "plugins", "unused", "SKILL.md"), "unused");
     await writeFixtureFile(
@@ -242,6 +245,12 @@ source = "${marketplaceDir}"
     expect(paths).toContain("codex/.tmp/plugins/.agents/plugins/marketplace.json");
     expect(paths).toContain("codex/.tmp/plugins/plugins/build-web-apps/SKILL.md");
     expect(paths).not.toContain("codex/.tmp/plugins/plugins/unused/SKILL.md");
+    const marketplace = files.find(
+      (file) => file.relativePath === "codex/.tmp/plugins/.agents/plugins/marketplace.json",
+    );
+    expect(JSON.parse(marketplace?.mcpServersOnly ?? "{}").plugins).toEqual([
+      { name: "build-web-apps" },
+    ]);
   });
 
   it("collects claude, codex, and shared once for multi-provider pushes", async () => {
