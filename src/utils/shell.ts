@@ -1,5 +1,5 @@
 import type { ExecException, ExecOptions } from "node:child_process";
-import { exec as execCallback } from "node:child_process";
+import { exec as execCallback, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const exec = promisify(execCallback);
@@ -67,6 +67,22 @@ export async function runCommand(
 
     return { stdout, stderr, exitCode };
   }
+}
+
+export async function runStreamingCommand(command: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, { shell: true, stdio: "inherit" });
+
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`Command failed (${code ?? signal ?? "unknown"}): ${command}`));
+    });
+  });
 }
 
 function toText(value: string | Buffer | undefined): string {

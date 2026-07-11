@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import type { FileEntry } from "../../src/types/index.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildArchiveUploadCommand,
   buildClaudeSharedSkillSymlinkCommand,
   buildRemoteHostCapabilityProbeCommand,
   buildRemoteCommandPathResolutionCommand,
@@ -15,6 +16,15 @@ afterEach(() => {
 });
 
 describe("ssh helpers", () => {
+  it("uses rsync progress when available and falls back to scp", () => {
+    expect(buildArchiveUploadCommand("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", true)).toBe(
+      "rsync --partial --human-readable --info=progress2 '/tmp/archive.tar.gz' 'host:/tmp/archive.tar.gz'",
+    );
+    expect(
+      buildArchiveUploadCommand("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", false),
+    ).toBe("scp '/tmp/archive.tar.gz' 'host:/tmp/archive.tar.gz'");
+  });
+
   it("parses remote home when absolute", () => {
     expect(parseRemoteHome("/home/arda\n")).toBe("/home/arda");
   });

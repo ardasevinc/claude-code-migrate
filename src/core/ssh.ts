@@ -1,8 +1,9 @@
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
 import type { CodexPluginPolicy } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
-import { runCommand, shellQuote } from "../utils/shell.ts";
+import { runCommand, runStreamingCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import {
   adaptCodexConfigForHost,
@@ -328,9 +329,20 @@ export async function pushArchive(
     const remoteAgentsDir = join(remoteHome, ".agents");
     const remoteMcpPath = join(remoteHome, ".claude.json");
 
-    log.info(`Uploading archive to ${host}...`);
+    const archiveSize = (await stat(archivePath)).size;
+    log.info(`Uploading ${formatBytes(archiveSize)} archive to ${host}...`);
     const remoteSpec = `${host}:${remoteTempArchive}`;
-    await runCommand(`scp ${shellQuote(archivePath)} ${shellQuote(remoteSpec)}`);
+    const hasLocalRsync =
+      (await runCommand("command -v rsync", { quiet: true, nothrow: true })).exitCode === 0;
+    const hasRemoteRsync =
+      (await runRemote(host, "command -v rsync", { quiet: true, nothrow: true })).exitCode === 0;
+
+    if (hasLocalRsync && hasRemoteRsync) {
+      await runStreamingCommand(buildArchiveUploadCommand(archivePath, remoteSpec, true));
+    } else {
+      log.dim("  rsync unavailable; using scp without live progress");
+      await runStreamingCommand(buildArchiveUploadCommand(archivePath, remoteSpec, false));
+    }
 
     log.info("Extracting on remote...");
     await runRemote(
@@ -396,6 +408,35 @@ export async function pushArchive(
       nothrow: true,
     });
   }
+}
+
+export function buildArchiveUploadCommand(
+  archivePath: string,
+  remoteSpec: string,
+  useRsync: boolean,
+): string {
+  if (useRsync) {
+    return `rsync --partial --human-readable --info=progress2 ${shellQuote(archivePath)} ${shellQuote(remoteSpec)}`;
+  }
+
+  return `scp ${shellQuote(archivePath)} ${shellQuote(remoteSpec)}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ["KiB", "MiB", "GiB"];
+  let value = bytes;
+  let unit = "B";
+  for (const candidate of units) {
+    value /= 1024;
+    unit = candidate;
+    if (value < 1024) break;
+  }
+
+  return `${value.toFixed(1)} ${unit}`;
 }
 
 export async function previewRemoteCodexPluginPolicy(
