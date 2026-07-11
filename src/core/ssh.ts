@@ -17,6 +17,7 @@ import {
   mergeCodexPluginPolicies,
 } from "./codex-plugin-policy.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
+import { validateArchive } from "./archiver.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
 
@@ -319,6 +320,7 @@ export async function pushArchive(
   const remoteTempDir = `/tmp/ccm-extract-${Date.now()}`;
 
   try {
+    await validateArchive(archivePath);
     const remoteHome = await getRemoteHome(host);
     const remoteClaudeDir = join(remoteHome, ".claude");
     const remoteCodexDir = join(remoteHome, ".codex");

@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import packageMetadata from "../package.json" with { type: "json" };
 import { backupCommand } from "./commands/backup.ts";
 import { configCommand } from "./commands/config.ts";
 import { pushCommand } from "./commands/push.ts";
@@ -10,7 +11,7 @@ export function createCli(): Command {
   program
     .name("ccm")
     .description("Migrate Claude Code and Codex configurations between machines")
-    .version("1.6.2");
+    .version(packageMetadata.version);
 
   program
     .command("config")

@@ -1,6 +1,7 @@
 import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import packageMetadata from "../../package.json" with { type: "json" };
 import { isProviderName } from "../config/providers.ts";
 import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
@@ -8,8 +9,6 @@ import { runCommand, shellQuote } from "../utils/shell.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
-const PACKAGE_VERSION = "1.6.0";
-
 function getManifestProviders(files: FileEntry[]): ProviderName[] {
   const providers = new Set<ProviderName>();
 
@@ -43,7 +42,7 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
     }
 
     const manifest: Manifest = {
-      version: PACKAGE_VERSION,
+      version: packageMetadata.version,
       timestamp: new Date().toISOString(),
       sourceHost: hostname(),
       claudeVersion: await getClaudeVersion(),
@@ -73,6 +72,7 @@ export async function extractArchive(
   destDir: string,
 ): Promise<Manifest | null> {
   try {
+    await validateArchive(archivePath);
     await mkdir(destDir, { recursive: true });
     await runCommand(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`);
 
@@ -88,6 +88,40 @@ export async function extractArchive(
   } catch (error) {
     log.error(`Failed to extract archive: ${error}`);
     return null;
+  }
+}
+
+export async function validateArchive(archivePath: string): Promise<void> {
+  const entriesResult = await runCommand(`tar -tzf ${shellQuote(archivePath)}`, { quiet: true });
+  const entries = entriesResult.stdout.split("\n").filter(Boolean);
+
+  validateArchiveEntryPaths(entries);
+
+  const typesResult = await runCommand(`tar -tvzf ${shellQuote(archivePath)}`, { quiet: true });
+  for (const line of typesResult.stdout.split("\n").filter(Boolean)) {
+    const type = line[0];
+    if (type !== "-" && type !== "d") {
+      throw new Error(`Unsafe archive entry type: ${type ?? "unknown"}`);
+    }
+  }
+}
+
+export function validateArchiveEntryPaths(entries: string[]): void {
+  if (entries.length === 0) {
+    throw new Error("Archive is empty");
+  }
+
+  for (const entry of entries) {
+    const normalized = entry.replace(/^\.\//, "");
+    if (normalized.length === 0) {
+      continue;
+    }
+
+    const segments = normalized.split("/");
+
+    if (normalized.startsWith("/") || segments.some((segment) => segment === "..")) {
+      throw new Error(`Unsafe archive path: ${entry}`);
+    }
   }
 }
 

@@ -1,8 +1,15 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createArchive, extractArchive } from "../../src/core/archiver.ts";
+import packageMetadata from "../../package.json" with { type: "json" };
+import {
+  createArchive,
+  extractArchive,
+  validateArchive,
+  validateArchiveEntryPaths,
+} from "../../src/core/archiver.ts";
+import { runCommand, shellQuote } from "../../src/utils/shell.ts";
 import type { FileEntry } from "../../src/types/index.ts";
 
 describe("archiver", () => {
@@ -44,6 +51,7 @@ describe("archiver", () => {
       await createArchive(files, archivePath);
       const manifest = await extractArchive(archivePath, extractDir);
 
+      expect(manifest?.version).toBe(packageMetadata.version);
       expect(manifest?.providers).toEqual(["claude", "codex"]);
       expect(await readFile(join(extractDir, "claude", "CLAUDE.md"), "utf8")).toBe("claude\n");
       expect(await readFile(join(extractDir, "codex", "AGENTS.md"), "utf8")).toBe("codex\n");
@@ -56,5 +64,35 @@ describe("archiver", () => {
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
+  });
+
+  it("rejects archives containing links", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-link-test-"));
+
+    try {
+      const sourceDir = join(rootDir, "source");
+      await mkdir(sourceDir);
+      await writeFile(join(sourceDir, "target"), "safe\n", "utf8");
+      await symlink("target", join(sourceDir, "link"));
+
+      const archivePath = join(rootDir, "unsafe.tar.gz");
+      await runCommand(
+        `tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} target link`,
+        { quiet: true },
+      );
+
+      await expect(validateArchive(archivePath)).rejects.toThrow("Unsafe archive entry type: l");
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects archive paths that escape the extraction root", () => {
+    expect(() => validateArchiveEntryPaths(["./", "../escape"])).toThrow(
+      "Unsafe archive path: ../escape",
+    );
+    expect(() => validateArchiveEntryPaths(["/absolute"])).toThrow(
+      "Unsafe archive path: /absolute",
+    );
   });
 });
