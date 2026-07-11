@@ -87,7 +87,7 @@ describe("CLI errors", () => {
 
     expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Restore failed:");
+    expect(result.stderr).toContain("Archive is invalid or unreadable");
     expect(result.stderr.trim().split("\n")).toHaveLength(1);
   });
 

@@ -14,10 +14,12 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import packageMetadata from "../../package.json" with { type: "json" };
 import { isProviderName } from "../config/providers.ts";
+import { BlockedError } from "../errors.ts";
 import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runProcess } from "../utils/process.ts";
+import { validateArchiveFileEntries } from "./archive-entries.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
@@ -43,6 +45,7 @@ export async function createArchive(
   outputPath: string,
   options: CreateArchiveOptions = {},
 ): Promise<string> {
+  validateArchiveFileEntries(files);
   const archiveDir = dirname(outputPath);
   await mkdir(archiveDir, { recursive: true });
   const workspace = await mkdtemp(join(archiveDir, ".ccm-archive-"));
@@ -92,7 +95,7 @@ export async function createArchive(
         await link(tempArchive, outputPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-          throw new Error(`Archive already exists: ${outputPath}`);
+          throw new BlockedError(`Archive already exists: ${outputPath}`);
         }
         throw error;
       }
@@ -106,10 +109,7 @@ export async function createArchive(
   }
 }
 
-export async function extractArchive(
-  archivePath: string,
-  destDir: string,
-): Promise<Manifest | null> {
+export async function extractArchive(archivePath: string, destDir: string): Promise<Manifest> {
   await validateArchive(archivePath);
   await mkdir(destDir, { recursive: true });
   await runProcess("tar", ["-xzf", archivePath, "-C", destDir]);
@@ -117,32 +117,40 @@ export async function extractArchive(
   const manifestPath = join(destDir, MANIFEST_FILENAME);
 
   if (await exists(manifestPath)) {
-    const raw = await readFile(manifestPath, "utf8");
-    const manifest = JSON.parse(raw) as Manifest;
-    return manifest;
+    try {
+      const raw = await readFile(manifestPath, "utf8");
+      return JSON.parse(raw) as Manifest;
+    } catch (error) {
+      throw new BlockedError("Archive manifest is invalid", { cause: error });
+    }
   }
 
-  return null;
+  throw new BlockedError("Archive manifest is missing");
 }
 
 export async function validateArchive(archivePath: string): Promise<void> {
-  const entriesResult = await runProcess("tar", ["-tzf", archivePath]);
-  const entries = entriesResult.stdout.split("\n").filter(Boolean);
+  try {
+    const entriesResult = await runProcess("tar", ["-tzf", archivePath]);
+    const entries = entriesResult.stdout.split("\n").filter(Boolean);
 
-  validateArchiveEntryPaths(entries);
+    validateArchiveEntryPaths(entries);
 
-  const typesResult = await runProcess("tar", ["-tvzf", archivePath]);
-  for (const line of typesResult.stdout.split("\n").filter(Boolean)) {
-    const type = line[0];
-    if (type !== "-" && type !== "d") {
-      throw new Error(`Unsafe archive entry type: ${type ?? "unknown"}`);
+    const typesResult = await runProcess("tar", ["-tvzf", archivePath]);
+    for (const line of typesResult.stdout.split("\n").filter(Boolean)) {
+      const type = line[0];
+      if (type !== "-" && type !== "d") {
+        throw new BlockedError(`Unsafe archive entry type: ${type ?? "unknown"}`);
+      }
     }
+  } catch (error) {
+    if (error instanceof BlockedError) throw error;
+    throw new BlockedError("Archive is invalid or unreadable", { cause: error });
   }
 }
 
 export function validateArchiveEntryPaths(entries: string[]): void {
   if (entries.length === 0) {
-    throw new Error("Archive is empty");
+    throw new BlockedError("Archive is empty");
   }
 
   for (const entry of entries) {
@@ -154,7 +162,7 @@ export function validateArchiveEntryPaths(entries: string[]): void {
     const segments = normalized.split("/");
 
     if (normalized.startsWith("/") || segments.some((segment) => segment === "..")) {
-      throw new Error(`Unsafe archive path: ${entry}`);
+      throw new BlockedError(`Unsafe archive path: ${entry}`);
     }
   }
 }

@@ -17,7 +17,7 @@ import {
   PROVIDERS,
   SHARED_MANAGED_ENTRIES,
 } from "../config/providers.ts";
-import { BlockedError, CliError } from "../errors.ts";
+import { CliError, ExecutionError } from "../errors.ts";
 import type { ProviderName } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { log } from "../utils/logger.ts";
@@ -140,9 +140,6 @@ export async function restoreArchive(
 
   try {
     const manifest = await extractArchive(archivePath, tempDir);
-    if (!manifest) {
-      throw new Error("Invalid archive or manifest missing");
-    }
 
     const availableProviders = manifest.providers.filter((p) => isProviderName(p));
 
@@ -283,7 +280,7 @@ export async function restoreArchive(
     return;
   } catch (error) {
     if (error instanceof CliError) throw error;
-    throw new BlockedError(
+    throw new ExecutionError(
       `Restore failed: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );

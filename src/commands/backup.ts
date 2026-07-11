@@ -4,7 +4,7 @@ import { loadConfig } from "../config/loader.ts";
 import { createArchive } from "../core/archiver.ts";
 import { getEnabledProviders, resolveBackupArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
-import { CliError, UsageError } from "../errors.ts";
+import { BlockedError, UsageError } from "../errors.ts";
 import type { BackupOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 
@@ -60,7 +60,7 @@ export async function backupCommand(
   });
 
   if (files.length === 0) {
-    throw new CliError("No files to backup");
+    throw new BlockedError("No files to backup");
   }
 
   if (options.dryRun) {

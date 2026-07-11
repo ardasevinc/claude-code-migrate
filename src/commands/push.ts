@@ -14,7 +14,7 @@ import {
 } from "../core/ssh.ts";
 import { parseSshTarget } from "../core/ssh-target.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
-import { CliError, ConnectivityError, UsageError } from "../errors.ts";
+import { BlockedError, ConnectivityError, UsageError } from "../errors.ts";
 import type { PushOptions } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { log } from "../utils/logger.ts";
@@ -67,7 +67,7 @@ export async function pushCommand(
   });
 
   if (files.length === 0) {
-    throw new CliError("No files to push");
+    throw new BlockedError("No files to push");
   }
 
   if (options.dryRun) {

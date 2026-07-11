@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
 import type { CodexPluginPolicy } from "../types/index.ts";
 import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
+import { CliError, ConnectivityError, ExecutionError } from "../errors.ts";
 import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runInheritedProcess, runProcess } from "../utils/process.ts";
@@ -409,13 +410,14 @@ export async function pushArchive(
   parseSshTarget(host);
   let remoteWorkspace: string | undefined;
   let unregisterInterruptCleanup: (() => void) | undefined;
+  let mutationStarted = false;
 
   try {
     await validateArchive(archivePath);
     const remoteHome = await getRemoteHome(host);
     const workspaceResult = await runRemote(
       host,
-      `umask 077; workspace=$(mktemp -d "\${TMPDIR:-/tmp}/ccm.XXXXXXXX") || exit 1; chmod 700 "$workspace"; printf '%s\\n' "$workspace"`,
+      `umask 077; workspace=$(mktemp -d "\${TMPDIR:-/tmp}/ccm.XXXXXXXX") || exit 1; chmod 700 "$workspace" || { rm -rf "$workspace"; exit 1; }; printf '%s\\n' "$workspace"`,
       { quiet: true },
     );
     remoteWorkspace = parseRemoteWorkspace(workspaceResult.stdout);
@@ -452,7 +454,7 @@ export async function pushArchive(
     const localArchiveHash = await sha256File(archivePath);
     const remoteHashResult = await runRemote(
       host,
-      `chmod 600 ${shellQuote(remoteTempArchive)}; if command -v sha256sum >/dev/null 2>&1; then sha256sum ${shellQuote(remoteTempArchive)} | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 ${shellQuote(remoteTempArchive)} | awk '{print $1}'; else exit 127; fi`,
+      `chmod 600 ${shellQuote(remoteTempArchive)} && if command -v sha256sum >/dev/null 2>&1; then sha256sum ${shellQuote(remoteTempArchive)} | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 ${shellQuote(remoteTempArchive)} | awk '{print $1}'; else exit 127; fi`,
       { quiet: true },
     );
     if (remoteHashResult.stdout.trim() !== localArchiveHash) {
@@ -473,6 +475,7 @@ export async function pushArchive(
     const hasCodex = await remoteDirectoryExists(host, remoteCodexExtract);
     const hasShared = await remoteDirectoryExists(host, remoteSharedExtract);
 
+    mutationStarted = true;
     for (const action of resolvePushActions({ hasClaude, hasCodex, hasShared })) {
       if (action === "claude") {
         log.info("Syncing Claude provider...");
@@ -524,7 +527,11 @@ export async function pushArchive(
 
     log.success(`Successfully pushed config to ${host}`);
   } catch (error) {
-    throw new Error(`Push failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof CliError) throw error;
+    const ErrorType = mutationStarted ? ExecutionError : ConnectivityError;
+    throw new ErrorType(`Push failed: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error,
+    });
   } finally {
     if (remoteWorkspace) {
       await runRemote(host, `rm -rf ${shellQuote(remoteWorkspace)}`, {
