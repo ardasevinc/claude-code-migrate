@@ -24,10 +24,7 @@ export async function restoreCommand(
     throw new CliError(error instanceof Error ? error.message : "Invalid provider");
   }
 
-  const success = await restoreArchive(archivePath, provider, { dryRun: options.dryRun });
-  if (!success) {
-    throw new CliError(`Failed to restore archive: ${archivePath}`);
-  }
+  await restoreArchive(archivePath, provider, { dryRun: options.dryRun });
 }
 
 async function exists(path: string): Promise<boolean> {

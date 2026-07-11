@@ -1,4 +1,14 @@
-import { cp, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -121,8 +131,8 @@ export async function restoreArchive(
   archivePath: string,
   provider: ProviderName | undefined,
   options: { dryRun?: boolean } = {},
-): Promise<boolean> {
-  const tempDir = join(tmpdir(), `ccm-restore-${Date.now()}`);
+): Promise<void> {
+  const tempDir = await mkdtemp(join(tmpdir(), "ccm-restore-"));
   const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -130,8 +140,7 @@ export async function restoreArchive(
   try {
     const manifest = await extractArchive(archivePath, tempDir);
     if (!manifest) {
-      log.error("Invalid archive or manifest missing");
-      return false;
+      throw new Error("Invalid archive or manifest missing");
     }
 
     const availableProviders = manifest.providers.filter((p) => isProviderName(p));
@@ -142,8 +151,7 @@ export async function restoreArchive(
       const expected = provider
         ? `Provider '${provider}' not found in archive`
         : "No providers in archive";
-      log.error(expected);
-      return false;
+      throw new Error(expected);
     }
 
     const needsShared = providersToRestore.some((name) => PROVIDERS[name].usesSharedSkills);
@@ -169,7 +177,7 @@ export async function restoreArchive(
         log.dim("  recreate claude shared-skill symlinks");
       }
 
-      return true;
+      return;
     }
 
     if (providersToRestore.includes("claude")) {
@@ -271,10 +279,9 @@ export async function restoreArchive(
       log.success("Recreated Claude shared skill symlinks");
     }
 
-    return true;
+    return;
   } catch (error) {
-    log.error(`Restore failed: ${error}`);
-    return false;
+    throw new Error(`Restore failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
     unregisterInterruptCleanup();

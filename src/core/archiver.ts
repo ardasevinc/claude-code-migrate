@@ -18,7 +18,6 @@ import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runProcess } from "../utils/process.ts";
-import { runCommand, shellQuote } from "../utils/shell.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
@@ -113,7 +112,7 @@ export async function extractArchive(
 ): Promise<Manifest | null> {
   await validateArchive(archivePath);
   await mkdir(destDir, { recursive: true });
-  await runCommand(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`);
+  await runProcess("tar", ["-xzf", archivePath, "-C", destDir]);
 
   const manifestPath = join(destDir, MANIFEST_FILENAME);
 
@@ -127,12 +126,12 @@ export async function extractArchive(
 }
 
 export async function validateArchive(archivePath: string): Promise<void> {
-  const entriesResult = await runCommand(`tar -tzf ${shellQuote(archivePath)}`, { quiet: true });
+  const entriesResult = await runProcess("tar", ["-tzf", archivePath]);
   const entries = entriesResult.stdout.split("\n").filter(Boolean);
 
   validateArchiveEntryPaths(entries);
 
-  const typesResult = await runCommand(`tar -tvzf ${shellQuote(archivePath)}`, { quiet: true });
+  const typesResult = await runProcess("tar", ["-tvzf", archivePath]);
   for (const line of typesResult.stdout.split("\n").filter(Boolean)) {
     const type = line[0];
     if (type !== "-" && type !== "d") {

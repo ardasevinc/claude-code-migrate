@@ -78,6 +78,19 @@ describe("CLI errors", () => {
     expect(result.stderr).toContain(`Archive not found: ${archive}`);
   });
 
+  it("reports an invalid archive exactly once on stderr", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
+    const archive = join(home, "invalid.tar.gz");
+    await writeFile(archive, "not an archive", "utf8");
+
+    const result = await runCli(["restore", archive], home);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Restore failed:");
+    expect(result.stderr.trim().split("\n")).toHaveLength(1);
+  });
+
   it("rejects a configured SSH option before collection or connection", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
     const configDir = join(home, ".config", "claude-code-migrate");
