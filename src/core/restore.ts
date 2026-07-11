@@ -21,7 +21,6 @@ import { CliError, ExecutionError } from "../errors.ts";
 import type { ProviderName } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { log } from "../utils/logger.ts";
-import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
 import { adaptCodexConfigForHost, normalizeLocalCodexMarketplaceSources } from "./codex.ts";
@@ -38,8 +37,10 @@ async function exists(path: string): Promise<boolean> {
 }
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
-  await runCommand(`mkdir -p ${shellQuote(targetDir)}`);
-  await runCommand(`cp -r ${shellQuote(sourceDir)}/. ${shellQuote(targetDir)}/`);
+  await mkdir(targetDir, { recursive: true });
+  for (const entry of await readdir(sourceDir)) {
+    await cp(join(sourceDir, entry), join(targetDir, entry), { recursive: true });
+  }
 }
 
 export async function backupLocalDirectoryIfExists(
@@ -66,7 +67,7 @@ export async function backupLocalDirectoryIfExists(
         await cp(source, target, { recursive: true });
       }
     } else {
-      await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
+      await cp(dirPath, backupDir, { recursive: true });
     }
     completed = true;
   } finally {
