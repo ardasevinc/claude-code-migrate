@@ -1,7 +1,12 @@
-import { lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { DEFAULT_COLLECTION_PATHS, isProviderName, PROVIDERS } from "../config/providers.ts";
+import {
+  DEFAULT_COLLECTION_PATHS,
+  isProviderName,
+  PROVIDERS,
+  SHARED_MANAGED_ENTRIES,
+} from "../config/providers.ts";
 import type { ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
@@ -25,13 +30,27 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
   await runCommand(`cp -r ${shellQuote(sourceDir)}/. ${shellQuote(targetDir)}/`);
 }
 
-export async function backupLocalDirectoryIfExists(dirPath: string): Promise<string | null> {
+export async function backupLocalDirectoryIfExists(
+  dirPath: string,
+  managedEntries?: string[],
+): Promise<string | null> {
   if (!(await exists(dirPath))) {
     return null;
   }
 
   const backupDir = `${dirPath}.backup-${Date.now()}`;
-  await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
+  if (managedEntries) {
+    await mkdir(backupDir, { recursive: true });
+    for (const entry of managedEntries) {
+      const source = join(dirPath, entry);
+      if (!(await exists(source))) continue;
+      const target = join(backupDir, entry);
+      await mkdir(dirname(target), { recursive: true });
+      await cp(source, target, { recursive: true });
+    }
+  } else {
+    await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
+  }
   log.dim(`  Backed up ${dirPath} -> ${backupDir}`);
   await pruneLocalBackupsIfParentExists(dirPath);
   return backupDir;
@@ -140,14 +159,22 @@ export async function restoreArchive(
     }
 
     if (providersToRestore.includes("claude")) {
-      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.claudeDir);
+      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.claudeDir, [
+        ...PROVIDERS.claude.alwaysInclude,
+        ...PROVIDERS.claude.includeIfExists,
+        "settings.local.json",
+      ]);
       await mergeLocalClaudeMcp(tempDir);
       await copyDirectoryContents(join(tempDir, "claude"), DEFAULT_COLLECTION_PATHS.claudeDir);
       log.success(`Restored Claude provider to ${DEFAULT_COLLECTION_PATHS.claudeDir}`);
     }
 
     if (providersToRestore.includes("codex")) {
-      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.codexDir);
+      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.codexDir, [
+        ...PROVIDERS.codex.alwaysInclude,
+        ...PROVIDERS.codex.includeIfExists,
+        ".ccm",
+      ]);
       await copyDirectoryContents(join(tempDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
       const codexConfigPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "config.toml");
       const codexHooksPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "hooks.json");
@@ -216,7 +243,10 @@ export async function restoreArchive(
     }
 
     if (needsShared && hasShared) {
-      await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.sharedAgentsDir);
+      await backupLocalDirectoryIfExists(
+        DEFAULT_COLLECTION_PATHS.sharedAgentsDir,
+        SHARED_MANAGED_ENTRIES,
+      );
       await copyDirectoryContents(sharedExtractPath, DEFAULT_COLLECTION_PATHS.sharedAgentsDir);
       log.success(`Restored shared agents assets to ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
     }

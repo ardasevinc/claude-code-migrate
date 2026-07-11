@@ -27,6 +27,7 @@ export const SHARED_LAZY_SKILLS_DIR = join(SHARED_AGENTS_DIR, "lazy-skills");
 export const SHARED_SKILL_LOCK_PATH = join(SHARED_AGENTS_DIR, ".skill-lock.json");
 
 export const SHARED_ARCHIVE_PREFIX = "shared/agents";
+export const SHARED_MANAGED_ENTRIES = ["skills", "lazy-skills", ".skill-lock.json"];
 
 export const DEFAULT_COLLECTION_PATHS: CollectionPaths = {
   claudeDir: CLAUDE_DIR,

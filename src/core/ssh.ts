@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
 import type { CodexPluginPolicy } from "../types/index.ts";
+import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
 import { log } from "../utils/logger.ts";
 import { runCommand, runStreamingCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
@@ -92,10 +93,15 @@ async function syncDirectory(host: string, sourceDir: string, targetDir: string)
   await runRemote(host, `cp -r ${shellQuote(sourceDir)}/. ${shellQuote(targetDir)}/`);
 }
 
-async function backupDirectoryIfExists(host: string, dirPath: string): Promise<void> {
+async function backupDirectoryIfExists(
+  host: string,
+  dirPath: string,
+  managedEntries: string[],
+): Promise<void> {
   const dir = shellQuote(dirPath);
   const pruneCommand = buildRemoteBackupPruneCommand(dirPath);
-  const command = `if [ -d ${dir} ]; then backup=${dir}.backup-$(date +%s%3N); cp -r ${dir} "$backup" && { ${pruneCommand}; }; fi`;
+  const entries = managedEntries.map(shellQuote).join(" ");
+  const command = `if [ -d ${dir} ]; then backup=${dir}.backup-$(date +%s%3N); mkdir -p "$backup"; for item in ${entries}; do source=${dir}/"$item"; [ -e "$source" ] || continue; target="$backup/$item"; mkdir -p "$(dirname "$target")"; cp -r "$source" "$target" || exit 1; done; ${pruneCommand}; fi`;
   const result = await runRemote(host, command, { quiet: true, nothrow: true });
 
   if (result.exitCode !== 0) {
@@ -410,7 +416,11 @@ export async function pushArchive(
     for (const action of resolvePushActions({ hasClaude, hasCodex, hasShared })) {
       if (action === "claude") {
         log.info("Syncing Claude provider...");
-        await backupDirectoryIfExists(host, remoteClaudeDir);
+        await backupDirectoryIfExists(host, remoteClaudeDir, [
+          ...PROVIDERS.claude.alwaysInclude,
+          ...PROVIDERS.claude.includeIfExists,
+          "settings.local.json",
+        ]);
 
         const incomingMcpPath = join(remoteClaudeExtract, ".mcp-config.json");
         if (await remotePathExists(host, incomingMcpPath)) {
@@ -422,7 +432,11 @@ export async function pushArchive(
 
       if (action === "codex") {
         log.info("Syncing Codex provider...");
-        await backupDirectoryIfExists(host, remoteCodexDir);
+        await backupDirectoryIfExists(host, remoteCodexDir, [
+          ...PROVIDERS.codex.alwaysInclude,
+          ...PROVIDERS.codex.includeIfExists,
+          ".ccm",
+        ]);
         const previousRemoteCodexConfig = await readRemoteFileIfExists(host, remoteCodexConfigPath);
         await syncDirectory(host, remoteCodexExtract, remoteCodexDir);
         await normalizeRemoteCodexMcpCommands(host, remoteCodexConfigPath, remoteHome);
@@ -437,7 +451,7 @@ export async function pushArchive(
 
       if (action === "shared") {
         log.info("Syncing shared agents assets...");
-        await backupDirectoryIfExists(host, remoteAgentsDir);
+        await backupDirectoryIfExists(host, remoteAgentsDir, SHARED_MANAGED_ENTRIES);
         await syncDirectory(host, remoteSharedExtract, remoteAgentsDir);
       }
 
