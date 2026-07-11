@@ -80,41 +80,57 @@ function normalizeConfig(raw: RawConfig): Config {
 
 function assertConfig(raw: unknown): asserts raw is RawConfig {
   if (!isRecord(raw)) throw new Error("config root must be a table");
+  assertKnownKeys(raw, "config", ["target", "include", "providers", "backup"]);
   assertOptionalRecord(raw, "target", (target) => {
-    assertOptionalString(target, "type");
+    assertKnownKeys(target, "target", ["type", "host", "path"]);
+    assertOptionalString(target, "type", "target.type");
     if (target.type !== undefined && target.type !== "ssh") {
       throw new Error('target.type must be "ssh"');
     }
-    assertOptionalString(target, "host");
-    assertOptionalString(target, "path");
+    assertOptionalNonemptyString(target, "host", "target.host");
+    assertOptionalNonemptyString(target, "path", "target.path");
   });
   assertOptionalRecord(raw, "include", (include) => {
-    assertOptionalBoolean(include, "settings_local");
-    assertOptionalBoolean(include, "mcp_config");
+    assertKnownKeys(include, "include", ["settings_local", "mcp_config"]);
+    assertOptionalBoolean(include, "settings_local", "include.settings_local");
+    assertOptionalBoolean(include, "mcp_config", "include.mcp_config");
   });
-  assertOptionalRecord(raw, "backup", (backup) => assertOptionalString(backup, "path"));
+  assertOptionalRecord(raw, "backup", (backup) => {
+    assertKnownKeys(backup, "backup", ["path"]);
+    assertOptionalNonemptyString(backup, "path", "backup.path");
+  });
   assertOptionalRecord(raw, "providers", (providers) => {
+    assertKnownKeys(providers, "providers", ["claude", "codex"]);
     assertOptionalRecord(providers, "claude", (claude) => {
-      assertOptionalBoolean(claude, "enabled");
-      assertOptionalBoolean(claude, "settings_local");
-      assertOptionalBoolean(claude, "mcp_config");
+      assertKnownKeys(claude, "providers.claude", ["enabled", "settings_local", "mcp_config"]);
+      assertOptionalBoolean(claude, "enabled", "providers.claude.enabled");
+      assertOptionalBoolean(claude, "settings_local", "providers.claude.settings_local");
+      assertOptionalBoolean(claude, "mcp_config", "providers.claude.mcp_config");
     });
     assertOptionalRecord(providers, "codex", (codex) => {
-      assertOptionalBoolean(codex, "enabled");
+      assertKnownKeys(codex, "providers.codex", ["enabled", "plugin_policies"]);
+      assertOptionalBoolean(codex, "enabled", "providers.codex.enabled");
       assertOptionalRecord(codex, "plugin_policies", (policies) => {
         for (const [pluginId, policy] of Object.entries(policies)) {
+          if (!pluginId.trim()) throw new Error("Codex plugin policy ID must not be empty");
           if (!isRecord(policy))
             throw new Error(`providers.codex.plugin_policies.${pluginId} must be a table`);
-          assertOptionalString(policy, "mode");
+          const policyPath = `providers.codex.plugin_policies.${pluginId}`;
+          assertKnownKeys(policy, policyPath, ["mode", "os", "commands", "gui"]);
+          assertOptionalString(policy, "mode", `${policyPath}.mode`);
           if (
             policy.mode !== undefined &&
             !["auto", "always", "never", "preserve"].includes(policy.mode as string)
           ) {
             throw new Error(`providers.codex.plugin_policies.${pluginId}.mode is invalid`);
           }
-          assertOptionalStringArray(policy, "os");
-          assertOptionalStringArray(policy, "commands");
-          assertOptionalBoolean(policy, "gui");
+          assertOptionalStringArray(policy, "os", `${policyPath}.os`, [
+            "darwin",
+            "linux",
+            "windows",
+          ]);
+          assertOptionalStringArray(policy, "commands", `${policyPath}.commands`);
+          assertOptionalBoolean(policy, "gui", `${policyPath}.gui`);
         }
       });
     });
@@ -135,24 +151,57 @@ function assertOptionalRecord(
   validate(record[key]);
 }
 
-function assertOptionalString(record: Record<string, unknown>, key: string): void {
+function assertOptionalString(record: Record<string, unknown>, key: string, path: string): void {
   if (record[key] !== undefined && typeof record[key] !== "string")
-    throw new Error(`${key} must be a string`);
+    throw new Error(`${path} must be a string`);
 }
 
-function assertOptionalBoolean(record: Record<string, unknown>, key: string): void {
+function assertOptionalNonemptyString(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+): void {
+  assertOptionalString(record, key, path);
+  if (typeof record[key] === "string" && !record[key].trim()) {
+    throw new Error(`${path} must not be empty`);
+  }
+}
+
+function assertOptionalBoolean(record: Record<string, unknown>, key: string, path: string): void {
   if (record[key] !== undefined && typeof record[key] !== "boolean")
-    throw new Error(`${key} must be a boolean`);
+    throw new Error(`${path} must be a boolean`);
 }
 
-function assertOptionalStringArray(record: Record<string, unknown>, key: string): void {
+function assertOptionalStringArray(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+  allowed?: string[],
+): void {
   const value = record[key];
   if (
     value !== undefined &&
-    (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    (!Array.isArray(value) ||
+      value.some(
+        (item) =>
+          typeof item !== "string" ||
+          !item.trim() ||
+          (allowed !== undefined && !allowed.includes(item)),
+      ))
   ) {
-    throw new Error(`${key} must be an array of strings`);
+    const constraint = allowed ? ` containing only ${allowed.join(", ")}` : " of nonempty strings";
+    throw new Error(`${path} must be an array${constraint}`);
   }
+}
+
+function assertKnownKeys(
+  record: Record<string, unknown>,
+  path: string,
+  allowedKeys: string[],
+): void {
+  const allowed = new Set(allowedKeys);
+  const unknown = Object.keys(record).find((key) => !allowed.has(key));
+  if (unknown) throw new Error(`${path}.${unknown} is not a recognized setting`);
 }
 
 function normalizeCodexPluginPolicies(

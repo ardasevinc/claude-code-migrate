@@ -51,6 +51,22 @@ describe("CLI errors", () => {
     expect(result.stderr).toContain('target.type must be "ssh"');
   });
 
+  it("rejects misspelled settings and empty policy requirements", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
+    const configDir = join(home, ".config", "claude-code-migrate");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, "config.toml"),
+      '[providers.codex.plugin_policies."example@market"]\nmode = "auto"\ncommmands = [" "]',
+      "utf8",
+    );
+
+    const result = await runCli(["config"], home);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("commmands is not a recognized setting");
+  });
+
   it("reports command failures on stderr with a nonzero exit", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
     const archive = join(home, "missing.tar.gz");
@@ -60,5 +76,22 @@ describe("CLI errors", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain(`Archive not found: ${archive}`);
+  });
+
+  it("rejects a configured SSH option before collection or connection", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
+    const configDir = join(home, ".config", "claude-code-migrate");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, "config.toml"),
+      '[target]\ntype = "ssh"\nhost = "-oProxyCommand=touch-pwned"\n',
+      "utf8",
+    );
+
+    const result = await runCli(["push", "--dry-run"], home);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Invalid SSH target");
   });
 });

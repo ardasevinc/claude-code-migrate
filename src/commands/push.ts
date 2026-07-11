@@ -6,6 +6,7 @@ import { CODEX_DIR } from "../config/providers.ts";
 import { createArchive } from "../core/archiver.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
+import { parseSshTarget } from "../core/ssh-target.ts";
 import {
   previewPush,
   previewRemoteCodexPluginPolicy,
@@ -47,6 +48,12 @@ export async function pushCommand(
     throw new CliError(
       "No target configured. Run 'ccm config --init' and edit the config, or specify a target: ccm push user@host",
     );
+  }
+
+  try {
+    parseSshTarget(host);
+  } catch (error) {
+    throw new CliError(error instanceof Error ? error.message : "Invalid SSH target");
   }
 
   const files = await collectFiles({

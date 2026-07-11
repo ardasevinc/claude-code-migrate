@@ -68,6 +68,25 @@ describe("process runner", () => {
     expect(result).toEqual({ stdout: "", stderr: "", exitCode: 0, signal: null });
   });
 
+  it("rejects captured output above the configured limit", async () => {
+    await expect(
+      runProcess(process.execPath, ["-e", "process.stdout.write('12345')"], { maxBuffer: 4 }),
+    ).rejects.toThrow("output exceeded 4 byte buffer limit");
+  });
+
+  it("reports buffer overflow when nothrow is enabled", async () => {
+    const result = await runProcess(process.execPath, ["-e", "process.stdout.write('12345')"], {
+      maxBuffer: 4,
+      nothrow: true,
+    });
+
+    expect(result).toMatchObject({
+      exitCode: null,
+      signal: null,
+      error: "output exceeded 4 byte buffer limit",
+    });
+  });
+
   it("uses ProcessError for spawn failures", async () => {
     await expect(runProcess("ccm-command-that-does-not-exist")).rejects.toBeInstanceOf(
       ProcessError,

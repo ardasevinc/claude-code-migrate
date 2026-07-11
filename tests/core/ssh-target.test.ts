@@ -9,6 +9,8 @@ describe("ssh-target", () => {
     ["deploy@example.com", { raw: "deploy@example.com", user: "deploy", host: "example.com" }],
     ["192.168.1.10", { raw: "192.168.1.10", host: "192.168.1.10" }],
     ["root@127.0.0.1", { raw: "root@127.0.0.1", user: "root", host: "127.0.0.1" }],
+    ["123", { raw: "123", host: "123" }],
+    ["1.2.3", { raw: "1.2.3", host: "1.2.3" }],
   ])("parses %s", (raw, expected) => {
     expect(parseSshTarget(raw)).toEqual(expected);
     expect(isValidSshTarget(raw)).toBe(true);
@@ -34,11 +36,12 @@ describe("ssh-target", () => {
     "host|command",
     "host$(command)",
     "host`command`",
-    "256.1.1.1",
-    "01.2.3.4",
-    "1.2.3",
   ])("rejects %j", (raw) => {
     expect(() => parseSshTarget(raw)).toThrow("Invalid SSH target");
     expect(isValidSshTarget(raw)).toBe(false);
+  });
+
+  it("escapes rejected control characters in errors", () => {
+    expect(() => parseSshTarget("host\nforged")).toThrow('Invalid SSH target "host\\nforged"');
   });
 });

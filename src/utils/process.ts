@@ -4,6 +4,7 @@ export interface ProcessOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   nothrow?: boolean;
+  maxBuffer?: number;
 }
 
 export interface ProcessResult {
@@ -11,6 +12,7 @@ export interface ProcessResult {
   stderr: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  error?: string;
 }
 
 export class ProcessError extends Error {
@@ -19,7 +21,9 @@ export class ProcessError extends Error {
 
   constructor(command: string, result: ProcessResult, cause?: unknown) {
     const status = result.signal ?? result.exitCode ?? "spawn error";
-    super(`Process failed (${status}): ${command}`, { cause });
+    const detailMessage = result.error ?? (cause instanceof Error ? cause.message : undefined);
+    const detail = detailMessage ? `: ${detailMessage}` : "";
+    super(`Process failed (${status}): ${command}${detail}`, { cause });
     this.name = "ProcessError";
     this.command = command;
     this.result = result;
@@ -57,10 +61,33 @@ async function executeProcess(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    const maxBuffer = options.maxBuffer ?? 20 * 1024 * 1024;
+    let bufferedBytes = 0;
     let settled = false;
 
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    const capture = (chunks: Buffer[], chunk: Buffer) => {
+      if (settled) return;
+      bufferedBytes += chunk.length;
+      if (bufferedBytes > maxBuffer) {
+        child.kill();
+        const error = `output exceeded ${maxBuffer} byte buffer limit`;
+        finish(
+          {
+            stdout: Buffer.concat(stdout).toString(),
+            stderr: Buffer.concat(stderr).toString(),
+            exitCode: null,
+            signal: null,
+            error,
+          },
+          new Error(error),
+        );
+        return;
+      }
+      chunks.push(chunk);
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk));
+    child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk));
 
     const finish = (result: ProcessResult, cause?: unknown) => {
       if (settled) return;
@@ -76,7 +103,7 @@ async function executeProcess(
     };
 
     child.on("error", (error) => {
-      finish({ stdout: "", stderr: "", exitCode: null, signal: null }, error);
+      finish({ stdout: "", stderr: "", exitCode: null, signal: null, error: error.message }, error);
     });
     child.on("close", (exitCode, signal) => {
       finish({
