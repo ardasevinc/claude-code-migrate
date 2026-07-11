@@ -403,6 +403,7 @@ async function collectProviderFiles(
         entries,
         curatedArchivePrefix,
       );
+      await collectPath(join(basePath, ".tmp", "plugins.sha"), entries, context);
       for (const pluginName of configuredPluginNames) {
         await collectPath(join(curatedRoot, "plugins", pluginName), entries, curatedContext);
       }

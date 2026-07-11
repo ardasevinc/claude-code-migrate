@@ -219,6 +219,7 @@ source = "${marketplaceDir}"
       join(curatedRoot, ".agents", "plugins", "marketplace.json"),
       JSON.stringify({ plugins: [{ name: "build-web-apps" }, { name: "unused" }] }),
     );
+    await writeFixtureFile(join(codexDir, ".tmp", "plugins.sha"), "abc123\n");
     await writeFixtureFile(join(curatedRoot, "plugins", "build-web-apps", "SKILL.md"), "web");
     await writeFixtureFile(join(curatedRoot, "plugins", "unused", "SKILL.md"), "unused");
     await writeFixtureFile(
@@ -243,6 +244,7 @@ source = "${marketplaceDir}"
     const paths = files.map((file) => file.relativePath);
 
     expect(paths).toContain("codex/.tmp/plugins/.agents/plugins/marketplace.json");
+    expect(paths).toContain("codex/.tmp/plugins.sha");
     expect(paths).toContain("codex/.tmp/plugins/plugins/build-web-apps/SKILL.md");
     expect(paths).not.toContain("codex/.tmp/plugins/plugins/unused/SKILL.md");
     const marketplace = files.find(
