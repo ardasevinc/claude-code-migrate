@@ -30,7 +30,7 @@ describe("CLI errors", () => {
 
     const result = await runCli(["config"], home);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Failed to load config at");
   });
@@ -47,7 +47,7 @@ describe("CLI errors", () => {
 
     const result = await runCli(["config"], home);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(3);
     expect(result.stderr).toContain('target.type must be "ssh"');
   });
 
@@ -63,7 +63,7 @@ describe("CLI errors", () => {
 
     const result = await runCli(["config"], home);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(3);
     expect(result.stderr).toContain("commmands is not a recognized setting");
   });
 
@@ -73,7 +73,7 @@ describe("CLI errors", () => {
 
     const result = await runCli(["restore", archive], home);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain(`Archive not found: ${archive}`);
   });
@@ -85,7 +85,7 @@ describe("CLI errors", () => {
 
     const result = await runCli(["restore", archive], home);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Restore failed:");
     expect(result.stderr.trim().split("\n")).toHaveLength(1);
@@ -103,8 +103,16 @@ describe("CLI errors", () => {
 
     const result = await runCli(["push", "--dry-run"], home);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Invalid SSH target");
+  });
+
+  it("maps Commander syntax failures to usage", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
+    const result = await runCli(["restore"], home);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("missing required argument");
   });
 });

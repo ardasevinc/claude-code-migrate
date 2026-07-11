@@ -251,7 +251,7 @@ export async function loadConfig(): Promise<Config> {
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return DEFAULT_CONFIG;
     const detail = error instanceof Error ? error.message : String(error);
-    throw new CliError(`Failed to load config at ${CONFIG_PATH}: ${detail}`);
+    throw new CliError(`Failed to load config at ${CONFIG_PATH}: ${detail}`, 3, { cause: error });
   }
 }
 

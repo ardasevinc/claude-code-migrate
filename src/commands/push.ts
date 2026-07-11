@@ -6,18 +6,18 @@ import { CODEX_DIR } from "../config/providers.ts";
 import { createArchive } from "../core/archiver.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
-import { parseSshTarget } from "../core/ssh-target.ts";
 import {
   previewPush,
   previewRemoteCodexPluginPolicy,
   pushArchive,
   testConnection,
 } from "../core/ssh.ts";
+import { parseSshTarget } from "../core/ssh-target.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
-import { CliError } from "../errors.ts";
+import { CliError, ConnectivityError, UsageError } from "../errors.ts";
 import type { PushOptions } from "../types/index.ts";
-import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { log } from "../utils/logger.ts";
 
 export async function pushCommand(
   arg1: string | undefined,
@@ -38,13 +38,15 @@ export async function pushCommand(
     providers = resolved.providers;
     targetArg = resolved.target;
   } catch (error) {
-    throw new CliError(error instanceof Error ? error.message : "Invalid arguments");
+    throw new UsageError(error instanceof Error ? error.message : "Invalid arguments", {
+      cause: error,
+    });
   }
 
   const host = targetArg ?? config.target.host;
 
   if (host === "user@example.com") {
-    throw new CliError(
+    throw new UsageError(
       "No target configured. Run 'ccm config --init' and edit the config, or specify a target: ccm push user@host",
     );
   }
@@ -52,7 +54,9 @@ export async function pushCommand(
   try {
     parseSshTarget(host);
   } catch (error) {
-    throw new CliError(error instanceof Error ? error.message : "Invalid SSH target");
+    throw new UsageError(error instanceof Error ? error.message : "Invalid SSH target", {
+      cause: error,
+    });
   }
 
   const files = await collectFiles({
@@ -86,7 +90,7 @@ export async function pushCommand(
   const connected = await testConnection(host);
 
   if (!connected) {
-    throw new CliError(`Cannot connect to ${host}. Check your SSH configuration.`);
+    throw new ConnectivityError(`Cannot connect to ${host}. Check your SSH configuration.`);
   }
 
   log.success("Connection established");

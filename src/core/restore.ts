@@ -17,9 +17,10 @@ import {
   PROVIDERS,
   SHARED_MANAGED_ENTRIES,
 } from "../config/providers.ts";
+import { BlockedError, CliError } from "../errors.ts";
 import type { ProviderName } from "../types/index.ts";
-import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { log } from "../utils/logger.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
@@ -281,7 +282,11 @@ export async function restoreArchive(
 
     return;
   } catch (error) {
-    throw new Error(`Restore failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof CliError) throw error;
+    throw new BlockedError(
+      `Restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
     unregisterInterruptCleanup();
