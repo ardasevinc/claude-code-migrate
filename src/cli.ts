@@ -28,6 +28,7 @@ export function createCli(): Command {
     .argument("[providerOrOutput]", "Provider name (claude|codex) or output path")
     .argument("[output]", "Output path when provider is specified")
     .option("--dry-run", "Preview files without creating archive", false)
+    .option("--force", "Replace an existing archive atomically", false)
     .action(backupCommand);
 
   program

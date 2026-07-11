@@ -1,4 +1,15 @@
-import { access, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import packageMetadata from "../../package.json" with { type: "json" };
@@ -6,6 +17,7 @@ import { isProviderName } from "../config/providers.ts";
 import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { runProcess } from "../utils/process.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
@@ -23,18 +35,26 @@ function getManifestProviders(files: FileEntry[]): ProviderName[] {
   return Array.from(providers);
 }
 
-export async function createArchive(files: FileEntry[], outputPath: string): Promise<string> {
-  const tempDir = join(dirname(outputPath), `.ccm-temp-${Date.now()}`);
+export interface CreateArchiveOptions {
+  force?: boolean;
+}
+
+export async function createArchive(
+  files: FileEntry[],
+  outputPath: string,
+  options: CreateArchiveOptions = {},
+): Promise<string> {
+  const archiveDir = dirname(outputPath);
+  await mkdir(archiveDir, { recursive: true });
+  const workspace = await mkdtemp(join(archiveDir, ".ccm-archive-"));
+  const tempDir = join(workspace, "contents");
+  const tempArchive = join(workspace, "archive.tar.gz");
   const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
-    await Promise.all([
-      rm(tempDir, { recursive: true, force: true }),
-      rm(outputPath, { force: true }),
-    ]);
+    await rm(workspace, { recursive: true, force: true });
   });
-  let completed = false;
 
   try {
-    await mkdir(tempDir, { recursive: true });
+    await mkdir(tempDir, { mode: 0o700 });
 
     for (const file of files) {
       const destPath = join(tempDir, file.relativePath);
@@ -61,19 +81,28 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
     const manifestPath = join(tempDir, MANIFEST_FILENAME);
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
 
-    const archiveDir = dirname(outputPath);
-
-    await mkdir(archiveDir, { recursive: true });
-    await runCommand(`tar -czf ${shellQuote(outputPath)} -C ${shellQuote(tempDir)} .`, {
+    await runProcess("tar", ["-czf", tempArchive, "-C", tempDir, "."], {
       env: { ...process.env, COPYFILE_DISABLE: "1" },
     });
+    await chmod(tempArchive, 0o600);
+
+    if (options.force) {
+      await rename(tempArchive, outputPath);
+    } else {
+      try {
+        await link(tempArchive, outputPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(`Archive already exists: ${outputPath}`);
+        }
+        throw error;
+      }
+    }
 
     log.success(`Created archive: ${outputPath}`);
-    completed = true;
     return outputPath;
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
-    if (!completed) await rm(outputPath, { force: true });
+    await rm(workspace, { recursive: true, force: true });
     unregisterInterruptCleanup();
   }
 }
@@ -82,24 +111,19 @@ export async function extractArchive(
   archivePath: string,
   destDir: string,
 ): Promise<Manifest | null> {
-  try {
-    await validateArchive(archivePath);
-    await mkdir(destDir, { recursive: true });
-    await runCommand(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`);
+  await validateArchive(archivePath);
+  await mkdir(destDir, { recursive: true });
+  await runCommand(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`);
 
-    const manifestPath = join(destDir, MANIFEST_FILENAME);
+  const manifestPath = join(destDir, MANIFEST_FILENAME);
 
-    if (await exists(manifestPath)) {
-      const raw = await readFile(manifestPath, "utf8");
-      const manifest = JSON.parse(raw) as Manifest;
-      return manifest;
-    }
-
-    return null;
-  } catch (error) {
-    log.error(`Failed to extract archive: ${error}`);
-    return null;
+  if (await exists(manifestPath)) {
+    const raw = await readFile(manifestPath, "utf8");
+    const manifest = JSON.parse(raw) as Manifest;
+    return manifest;
   }
+
+  return null;
 }
 
 export async function validateArchive(archivePath: string): Promise<void> {

@@ -75,6 +75,7 @@ export interface PushOptions {
 
 export interface BackupOptions {
   dryRun: boolean;
+  force: boolean;
 }
 
 export interface RestoreOptions {

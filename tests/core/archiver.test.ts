@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -13,6 +13,12 @@ import { runCommand, shellQuote } from "../../src/utils/shell.ts";
 import type { FileEntry } from "../../src/types/index.ts";
 
 describe("archiver", () => {
+  async function fixture(rootDir: string, contents = "new\n"): Promise<FileEntry[]> {
+    const sourcePath = join(rootDir, `source-${crypto.randomUUID()}`);
+    await writeFile(sourcePath, contents, "utf8");
+    return [{ sourcePath, relativePath: "codex/AGENTS.md", isSymlink: false }];
+  }
+
   it("creates a multi-provider archive with shared files once", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-test-"));
 
@@ -61,6 +67,56 @@ describe("archiver", () => {
           "utf8",
         ),
       ).toBe("shared\n");
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes archives privately and does not clobber existing output by default", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-publish-test-"));
+    const archivePath = join(rootDir, "backup.tar.gz");
+    try {
+      await writeFile(archivePath, "existing", "utf8");
+      await expect(createArchive(await fixture(rootDir), archivePath)).rejects.toThrow(
+        `Archive already exists: ${archivePath}`,
+      );
+      expect(await readFile(archivePath, "utf8")).toBe("existing");
+
+      await createArchive(await fixture(rootDir), archivePath, { force: true });
+      expect((await stat(archivePath)).mode & 0o777).toBe(0o600);
+      expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves existing output untouched when archive creation fails", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-failure-test-"));
+    const archivePath = join(rootDir, "backup.tar.gz");
+    try {
+      await writeFile(archivePath, "existing", "utf8");
+      const files: FileEntry[] = [
+        { sourcePath: join(rootDir, "missing"), relativePath: "codex/missing", isSymlink: false },
+      ];
+      await expect(createArchive(files, archivePath, { force: true })).rejects.toThrow();
+      expect(await readFile(archivePath, "utf8")).toBe("existing");
+      expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows only one concurrent no-clobber publisher", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-concurrency-test-"));
+    const archivePath = join(rootDir, "backup.tar.gz");
+    try {
+      const results = await Promise.allSettled([
+        createArchive(await fixture(rootDir, "first\n"), archivePath),
+        createArchive(await fixture(rootDir, "second\n"), archivePath),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      await expect(validateArchive(archivePath)).resolves.toBeUndefined();
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
