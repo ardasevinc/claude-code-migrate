@@ -9,6 +9,7 @@ import {
 } from "../config/providers.ts";
 import type { ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { extractArchive } from "./archiver.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
@@ -39,17 +40,27 @@ export async function backupLocalDirectoryIfExists(
   }
 
   const backupDir = `${dirPath}.backup-${Date.now()}`;
-  if (managedEntries) {
-    await mkdir(backupDir, { recursive: true });
-    for (const entry of managedEntries) {
-      const source = join(dirPath, entry);
-      if (!(await exists(source))) continue;
-      const target = join(backupDir, entry);
-      await mkdir(dirname(target), { recursive: true });
-      await cp(source, target, { recursive: true });
+  const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+    await rm(backupDir, { recursive: true, force: true });
+  });
+  let completed = false;
+  try {
+    if (managedEntries) {
+      await mkdir(backupDir, { recursive: true });
+      for (const entry of managedEntries) {
+        const source = join(dirPath, entry);
+        if (!(await exists(source))) continue;
+        const target = join(backupDir, entry);
+        await mkdir(dirname(target), { recursive: true });
+        await cp(source, target, { recursive: true });
+      }
+    } else {
+      await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
     }
-  } else {
-    await runCommand(`cp -r ${shellQuote(dirPath)} ${shellQuote(backupDir)}`, { quiet: true });
+    completed = true;
+  } finally {
+    if (!completed) await rm(backupDir, { recursive: true, force: true });
+    unregisterInterruptCleanup();
   }
   log.dim(`  Backed up ${dirPath} -> ${backupDir}`);
   await pruneLocalBackupsIfParentExists(dirPath);
@@ -112,6 +123,9 @@ export async function restoreArchive(
   options: { dryRun?: boolean } = {},
 ): Promise<boolean> {
   const tempDir = join(tmpdir(), `ccm-restore-${Date.now()}`);
+  const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
 
   try {
     const manifest = await extractArchive(archivePath, tempDir);
@@ -262,6 +276,7 @@ export async function restoreArchive(
     return false;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
+    unregisterInterruptCleanup();
   }
 }
 

@@ -15,6 +15,7 @@ import {
 import { checkVersionCompatibility } from "../core/version-checker.ts";
 import type { PushOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 
 export async function pushCommand(
@@ -95,9 +96,13 @@ export async function pushCommand(
   }
 
   const tempArchive = join(tmpdir(), `ccm-push-${Date.now()}.tar.gz`);
+  let unregisterInterruptCleanup: (() => void) | undefined;
 
   try {
     await createArchive(files, tempArchive);
+    unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+      await runCommand(`rm -f ${shellQuote(tempArchive)}`, { quiet: true, nothrow: true });
+    });
     const success = await pushArchive(tempArchive, host, {
       codexPluginPolicies: config.providers.codex.plugin_policies,
     });
@@ -107,5 +112,6 @@ export async function pushCommand(
     }
   } finally {
     await runCommand(`rm -f ${shellQuote(tempArchive)}`, { quiet: true, nothrow: true });
+    unregisterInterruptCleanup?.();
   }
 }

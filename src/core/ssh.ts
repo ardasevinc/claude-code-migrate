@@ -4,6 +4,7 @@ import type { FileEntry } from "../types/index.ts";
 import type { CodexPluginPolicy } from "../types/index.ts";
 import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
 import { log } from "../utils/logger.ts";
+import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runCommand, runStreamingCommand, shellQuote } from "../utils/shell.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import {
@@ -98,15 +99,25 @@ async function backupDirectoryIfExists(
   dirPath: string,
   managedEntries: string[],
 ): Promise<void> {
-  const dir = shellQuote(dirPath);
-  const pruneCommand = buildRemoteBackupPruneCommand(dirPath);
-  const entries = managedEntries.map(shellQuote).join(" ");
-  const command = `if [ -d ${dir} ]; then backup=${dir}.backup-$(date +%s%3N); mkdir -p "$backup"; for item in ${entries}; do source=${dir}/"$item"; [ -e "$source" ] || continue; target="$backup/$item"; mkdir -p "$(dirname "$target")"; cp -r "$source" "$target" || exit 1; done; ${pruneCommand}; fi`;
+  const backupPath = `${dirPath}.backup-${Date.now()}`;
+  const command = buildRemoteManagedBackupCommand(dirPath, backupPath, managedEntries);
   const result = await runRemote(host, command, { quiet: true, nothrow: true });
 
   if (result.exitCode !== 0) {
     log.warn(`Failed to back up or prune ${dirPath} on ${host}: ${result.stderr || result.stdout}`);
   }
+}
+
+export function buildRemoteManagedBackupCommand(
+  dirPath: string,
+  backupPath: string,
+  managedEntries: string[],
+): string {
+  const dir = shellQuote(dirPath);
+  const backup = shellQuote(backupPath);
+  const pruneCommand = buildRemoteBackupPruneCommand(dirPath);
+  const entries = managedEntries.map(shellQuote).join(" ");
+  return `if [ -d ${dir} ]; then backup=${backup}; cleanup_backup() { rm -rf "$backup"; }; trap cleanup_backup HUP INT TERM; mkdir -p "$backup" || exit 1; for item in ${entries}; do source=${dir}/"$item"; [ -e "$source" ] || continue; target="$backup/$item"; mkdir -p "$(dirname "$target")"; cp -r "$source" "$target" || { cleanup_backup; exit 1; }; done; trap - HUP INT TERM; ${pruneCommand}; fi`;
 }
 
 async function mergeClaudeMcpConfig(
@@ -373,6 +384,12 @@ export async function pushArchive(
 ): Promise<boolean> {
   const remoteTempArchive = `/tmp/ccm-archive-${Date.now()}.tar.gz`;
   const remoteTempDir = `/tmp/ccm-extract-${Date.now()}`;
+  const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+    await runRemote(host, `rm -rf ${shellQuote(remoteTempArchive)} ${shellQuote(remoteTempDir)}`, {
+      quiet: true,
+      nothrow: true,
+    });
+  });
 
   try {
     await validateArchive(archivePath);
@@ -471,6 +488,7 @@ export async function pushArchive(
       quiet: true,
       nothrow: true,
     });
+    unregisterInterruptCleanup();
   }
 }
 

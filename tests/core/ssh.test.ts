@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildArchiveUploadCommand,
   buildClaudeSharedSkillSymlinkCommand,
+  buildRemoteManagedBackupCommand,
   buildRemoteHostCapabilityProbeCommand,
   buildRemoteCommandPathResolutionCommand,
   parseRemoteHome,
@@ -64,6 +65,22 @@ describe("ssh helpers", () => {
       throw new Error(`shellcheck failed:\n${stderr}`);
     }
 
+    expect(result.status).toBe(0);
+  });
+
+  it("generates interrupt-safe managed backup shell syntax", () => {
+    const command = buildRemoteManagedBackupCommand(
+      "/home/arda/.codex",
+      "/home/arda/.codex.backup-1234",
+      ["config.toml", "hooks.json", ".ccm"],
+    );
+    const result = spawnSync("shellcheck", ["-s", "sh", "-"], { input: command });
+
+    if (result.status !== 0) {
+      throw new Error(`shellcheck failed:\n${result.stderr.toString()}`);
+    }
+
+    expect(command).toContain("trap cleanup_backup HUP INT TERM");
     expect(result.status).toBe(0);
   });
 

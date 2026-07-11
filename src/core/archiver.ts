@@ -5,6 +5,7 @@ import packageMetadata from "../../package.json" with { type: "json" };
 import { isProviderName } from "../config/providers.ts";
 import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
+import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { runCommand, shellQuote } from "../utils/shell.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
@@ -24,6 +25,13 @@ function getManifestProviders(files: FileEntry[]): ProviderName[] {
 
 export async function createArchive(files: FileEntry[], outputPath: string): Promise<string> {
   const tempDir = join(dirname(outputPath), `.ccm-temp-${Date.now()}`);
+  const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
+    await Promise.all([
+      rm(tempDir, { recursive: true, force: true }),
+      rm(outputPath, { force: true }),
+    ]);
+  });
+  let completed = false;
 
   try {
     await mkdir(tempDir, { recursive: true });
@@ -61,9 +69,12 @@ export async function createArchive(files: FileEntry[], outputPath: string): Pro
     });
 
     log.success(`Created archive: ${outputPath}`);
+    completed = true;
     return outputPath;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
+    if (!completed) await rm(outputPath, { force: true });
+    unregisterInterruptCleanup();
   }
 }
 
