@@ -261,6 +261,7 @@ function tomlSectionNamePattern(value: string): string {
 function isClearlyNonPortableCodexPath(path: string): boolean {
   return (
     path.startsWith("/Applications/Codex.app/") ||
+    path.startsWith("/Applications/ChatGPT.app/") ||
     path.startsWith("/Users/") ||
     path.includes("/Codex Computer Use.app/")
   );

@@ -58,7 +58,7 @@ notify = ["/Users/arda/.codex/computer-use/Codex Computer Use.app/Contents/MacOS
 command = "/home/arda/.bun/bin/exa-mcp-server"
 
 [mcp_servers.node_repl]
-command = "/Applications/Codex.app/Contents/Resources/cua_node/bin/node_repl"
+command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
 args = []
 
 [mcp_servers.node_repl.env]
@@ -74,7 +74,7 @@ trust_level = "trusted"
     expect(adapted.warnings).toEqual([]);
     expect(adapted.changes).toEqual([
       "notify: removed missing command /Users/arda/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/helper",
-      "node_repl: removed missing MCP command /Applications/Codex.app/Contents/Resources/cua_node/bin/node_repl",
+      "node_repl: removed missing MCP command /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
     ]);
     expect(adapted.content).not.toContain("notify =");
     expect(adapted.content).not.toContain("mcp_servers.node_repl");
