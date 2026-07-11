@@ -168,4 +168,23 @@ describe("archiver", () => {
       "Unsafe archive path: /absolute",
     );
   });
+
+  it("rejects a syntactically valid but malformed legacy manifest", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-manifest-test-"));
+    try {
+      const sourceDir = join(rootDir, "source");
+      const archivePath = join(rootDir, "malformed.tar.gz");
+      await mkdir(sourceDir);
+      await writeFile(join(sourceDir, ".ccm-manifest.json"), "{}", "utf8");
+      await runCommand(`tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`, {
+        quiet: true,
+      });
+
+      await expect(extractArchive(archivePath, join(rootDir, "extract"))).rejects.toThrow(
+        "Archive manifest is invalid",
+      );
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
 });

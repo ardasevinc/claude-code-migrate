@@ -129,13 +129,53 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
   if (await exists(manifestPath)) {
     try {
       const raw = await readFile(manifestPath, "utf8");
-      return JSON.parse(raw) as Manifest;
+      const parsed: unknown = JSON.parse(raw);
+      assertLegacyManifest(parsed);
+      return parsed;
     } catch (error) {
       throw new BlockedError("Archive manifest is invalid", { cause: error });
     }
   }
 
   throw new BlockedError("Archive manifest is missing");
+}
+
+function assertLegacyManifest(value: unknown): asserts value is Manifest {
+  if (!isRecord(value)) throw new Error("manifest must be an object");
+  if (typeof value.version !== "string" || typeof value.timestamp !== "string") {
+    throw new Error("manifest version and timestamp must be strings");
+  }
+  if (typeof value.sourceHost !== "string") throw new Error("manifest sourceHost must be a string");
+  if (value.claudeVersion !== null && typeof value.claudeVersion !== "string") {
+    throw new Error("manifest claudeVersion must be a string or null");
+  }
+  if (
+    !Array.isArray(value.providers) ||
+    value.providers.some((provider) => typeof provider !== "string" || !isProviderName(provider))
+  ) {
+    throw new Error("manifest providers are invalid");
+  }
+  if (!Array.isArray(value.files)) throw new Error("manifest files must be an array");
+
+  const files: FileEntry[] = value.files.map((file) => {
+    if (
+      !isRecord(file) ||
+      typeof file.sourcePath !== "string" ||
+      typeof file.relativePath !== "string" ||
+      typeof file.isSymlink !== "boolean" ||
+      (file.originalSymlinkTarget !== undefined &&
+        typeof file.originalSymlinkTarget !== "string") ||
+      (file.mcpServersOnly !== undefined && typeof file.mcpServersOnly !== "string")
+    ) {
+      throw new Error("manifest file entry is invalid");
+    }
+    return file as unknown as FileEntry;
+  });
+  validateArchiveFileEntries(files);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export async function validateArchive(archivePath: string): Promise<void> {

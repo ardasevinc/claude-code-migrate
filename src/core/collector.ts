@@ -388,7 +388,7 @@ async function collectProviderFiles(
       if (warnings.length > 0) {
         log.warn("[claude] MCP servers with paths that may not work on remote:");
         for (const warning of warnings) {
-          log.dim(`  ${warning}`);
+          log.warn(`  ${warning}`);
         }
       }
 
@@ -410,7 +410,7 @@ async function collectProviderFiles(
     if (warnings.length > 0) {
       log.warn("[codex] MCP servers with paths that may not work on remote:");
       for (const warning of warnings) {
-        log.dim(`  ${warning}`);
+        log.warn(`  ${warning}`);
       }
     }
 
