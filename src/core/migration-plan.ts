@@ -215,9 +215,10 @@ export function derivePlanStatus(
     return "blocked";
   return actions.some(
     (action) =>
-      action.disposition === "create" ||
-      action.disposition === "update" ||
-      action.disposition === "merge",
+      action.phase !== "materialize" &&
+      (action.disposition === "create" ||
+        action.disposition === "update" ||
+        action.disposition === "merge"),
   )
     ? "ready"
     : "noop";

@@ -12,7 +12,15 @@ export async function restoreCommand(
   archiveArg: string,
   providerArg: string | undefined,
   options: RestoreOptions,
-  context: RuntimeContext = createRuntimeContext(),
+): Promise<void> {
+  return restoreCommandWithContext(archiveArg, providerArg, options, createRuntimeContext());
+}
+
+export async function restoreCommandWithContext(
+  archiveArg: string,
+  providerArg: string | undefined,
+  options: RestoreOptions,
+  context: RuntimeContext,
 ): Promise<void> {
   if (options.json && !options.dryRun) throw new UsageError("--json currently requires --dry-run");
   const archivePath = resolve(archiveArg);

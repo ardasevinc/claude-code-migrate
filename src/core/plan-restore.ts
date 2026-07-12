@@ -17,6 +17,8 @@ import { dirname, join } from "node:path";
 import { isProviderName } from "../config/providers.ts";
 import type { RuntimeContext } from "../runtime/context.ts";
 import type { CollectionPaths, ProviderName } from "../types/index.ts";
+import { BlockedError, ExecutionError } from "../errors.ts";
+import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { scanArchive } from "./archive-reader.ts";
 import { backupLocalDirectoryIfExists } from "./restore.ts";
 import {
@@ -424,11 +426,18 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
         entries: canonicalInventory(group.entries).map((entry) => Object.freeze({ ...entry })),
       });
     } else if (action.operation === "symlink") {
+      const intended = new Set(observation.facts.sharedSkillNames);
       actionBindings.set(id, {
         kind: "symlink-view",
-        entries: canonicalInventory(staged.filter((entry) => entry.type === "symlink")).map(
-          (entry) => Object.freeze({ ...entry }),
-        ),
+        entries: canonicalInventory(
+          staged.filter(
+            (entry) =>
+              entry.type === "symlink" &&
+              entry.path.split("/").length === 3 &&
+              entry.path.startsWith("claude/skills/") &&
+              intended.has(entry.path.split("/")[2] as string),
+          ),
+        ).map((entry) => Object.freeze({ ...entry })),
       });
     }
   }
@@ -529,13 +538,21 @@ export async function executePlannedRestore(
   options: ExecutePlannedRestoreOptions = {},
 ): Promise<void> {
   const resource = resources.get(planned);
-  if (!resource) throw new Error("Restore plan is forged or no longer executable");
-  if (planned.plan.status === "blocked") throw new Error("Blocked restore plan cannot execute");
-  resources.delete(planned);
-  if (planned.plan.status === "noop") return;
+  if (!resource) throw new BlockedError("Restore plan is forged or no longer executable");
+  if (planned.plan.status === "blocked")
+    throw new BlockedError("Blocked restore plan cannot execute");
+  if (planned.plan.status === "noop") {
+    resources.delete(planned);
+    return;
+  }
 
   const temp = await mkdtemp(join(tmpdir(), "ccm-restore-"));
   const extraction = join(temp, "archive");
+  const unregisterInterruptCleanup = registerInterruptCleanup(() =>
+    rm(temp, { recursive: true, force: true }),
+  );
+  const ownedBackups: string[] = [];
+  let mutationStarted = false;
   try {
     const scan = await scanArchive(resource.archivePath, { extractTo: extraction });
     const observedInventory = canonicalInventory(
@@ -553,7 +570,7 @@ export async function executePlannedRestore(
       sourceFingerprint(scan.archive.archiveSha256, resource.providers, selected) !==
         planned.plan.sourceFingerprint
     )
-      throw new Error("Restore archive changed after planning");
+      throw new BlockedError("Restore archive changed after planning");
 
     if (resource.transformed.codexConfig)
       await writeFile(join(extraction, "codex/config.toml"), resource.transformed.codexConfig);
@@ -574,22 +591,69 @@ export async function executePlannedRestore(
       throw new Error("Sealed staged restore fingerprint does not match plan");
 
     await assertTargetUnchanged(resource);
-    const changed = planned.plan.actions.filter((action) => action.disposition !== "unchanged");
-    const scopes = new Set(changed.map((action) => action.scope));
-    if (scopes.has("claude")) await backupLocalDirectoryIfExists(resource.paths.claudeDir);
-    if (changed.some((action) => action.operation === "merge-json"))
-      await backupLocalDirectoryIfExists(resource.paths.claudeMcpConfigPath);
-    if (scopes.has("codex")) await backupLocalDirectoryIfExists(resource.paths.codexDir);
-    if (scopes.has("shared")) await backupLocalDirectoryIfExists(resource.paths.sharedAgentsDir);
+    const changed = planned.plan.actions.filter(
+      (action) => action.phase !== "materialize" && action.disposition !== "unchanged",
+    );
+    const managed = new Map<string, Set<string>>();
+    for (const action of changed) {
+      const binding = resource.actionBindings.get(action.id);
+      if (binding?.kind !== "overlay-group") continue;
+      const logical = binding.logicalGroup.split("/");
+      const root =
+        logical[0] === "claude"
+          ? resource.paths.claudeDir
+          : logical[0] === "codex"
+            ? resource.paths.codexDir
+            : resource.paths.sharedAgentsDir;
+      const relative =
+        logical[0] === "shared" ? logical.slice(2).join("/") : logical.slice(1).join("/");
+      const entries = managed.get(root) ?? new Set<string>();
+      entries.add(relative);
+      managed.set(root, entries);
+    }
+    for (const [root, entries] of managed) {
+      const backup = await backupLocalDirectoryIfExists(root, [...entries]);
+      if (backup) ownedBackups.push(backup);
+    }
+    if (changed.some((action) => action.operation === "merge-json")) {
+      const backup = await backupLocalDirectoryIfExists(resource.paths.claudeMcpConfigPath);
+      if (backup) ownedBackups.push(backup);
+    }
     await options.afterBackup?.();
-    await assertTargetUnchanged(resource);
+    try {
+      await assertTargetUnchanged(resource);
+    } catch (error) {
+      for (const backup of ownedBackups) await rm(backup, { recursive: true, force: true });
+      throw error;
+    }
+
+    const actionIndexes = new Map(planned.plan.actions.map((action, index) => [action.id, index]));
+    for (const action of planned.plan.actions)
+      if (!resource.actionBindings.has(action.id))
+        throw new Error(`Missing restore action binding: ${action.id}`);
+    for (const dependency of planned.plan.dependencies)
+      if (
+        dependency.required &&
+        (actionIndexes.get(dependency.dependsOnActionId) ?? Number.MAX_SAFE_INTEGER) >=
+          (actionIndexes.get(dependency.ownerActionId) ?? -1)
+      )
+        throw new Error(`Restore action dependency is out of order: ${dependency.id}`);
 
     const consumed = new Set<string>();
     for (const action of planned.plan.actions) {
+      for (const dependency of planned.plan.dependencies.filter(
+        (item) => item.ownerActionId === action.id && item.required,
+      ))
+        if (!consumed.has(dependency.dependsOnActionId))
+          throw new Error(`Restore action dependency was not consumed: ${dependency.id}`);
       const binding = resource.actionBindings.get(action.id);
       if (!binding) throw new Error(`Missing restore action binding: ${action.id}`);
       consumed.add(action.id);
       if (action.disposition === "unchanged" || binding.kind === "transform-stage") continue;
+      if (!mutationStarted) {
+        resources.delete(planned);
+        mutationStarted = true;
+      }
       if (binding.kind === "write-mcp") {
         await atomicWriteNoFollow(resource.paths.claudeMcpConfigPath, binding.bytes);
       } else if (binding.kind === "overlay-group") {
@@ -615,7 +679,30 @@ export async function executePlannedRestore(
       consumed.size !== planned.plan.actions.length
     )
       throw new Error("Restore action bindings were not consumed exactly once");
+    const actual = await observeLocalRestoreTarget({
+      context: resource.context,
+      paths: resource.paths,
+      selectedProviders: resource.providers,
+      incoming: resource.selectedInventory,
+      queries: resource.queries,
+    });
+    const actualFinal = [...actual.inventory];
+    if (resource.transformed.claudeMcp && actual.claudeMcp.bytes)
+      actualFinal.push(inventoryEntry("claude/.mcp-config.json", 0o644, actual.claudeMcp.bytes));
+    if (inventoryFingerprint(actualFinal) !== planned.plan.stagedPostFingerprint)
+      throw new Error("Restored target does not match planned post-state");
+  } catch (error) {
+    if (error instanceof BlockedError || error instanceof ExecutionError) throw error;
+    if (!mutationStarted)
+      throw new BlockedError(error instanceof Error ? error.message : String(error), {
+        cause: error,
+      });
+    throw new ExecutionError(
+      `Restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   } finally {
     await rm(temp, { recursive: true, force: true });
+    unregisterInterruptCleanup();
   }
 }
