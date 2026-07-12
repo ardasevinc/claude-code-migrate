@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   rm,
@@ -161,6 +162,35 @@ describe("archiver", () => {
         sha256: createHash("sha256").update('model = "test"\n').digest("hex"),
       });
       expect(manifest.files[1].mode).toBe(0o755);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("streams sparse payloads while building their manifest hash", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-stream-test-"));
+    try {
+      const sourcePath = join(rootDir, "large-sparse");
+      const handle = await open(sourcePath, "w");
+      await handle.truncate(64 * 1024 * 1024);
+      await handle.close();
+      const archivePath = join(rootDir, "backup.tar.gz");
+      await createArchive(
+        [{ sourcePath, relativePath: "codex/skills/large/SKILL.md", isSymlink: false }],
+        archivePath,
+        { providers: ["codex"] },
+      );
+
+      const manifest = await extractArchive(archivePath, join(rootDir, "extract"));
+      expect(manifest.files).toEqual([
+        expect.objectContaining({ path: "codex/skills/large/SKILL.md", size: 64 * 1024 * 1024 }),
+      ]);
+      const implementation = await readFile(
+        join(import.meta.dirname, "../../src/core/archiver.ts"),
+        "utf8",
+      );
+      expect(implementation).toContain("createReadStream(sourcePath)");
+      expect(implementation).not.toMatch(/readFile\((?:stagedPath|sourcePath)/);
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }

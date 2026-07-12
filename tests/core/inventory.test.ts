@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { chmod, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canonicalInventory,
@@ -21,6 +24,57 @@ const entry = (path: string, overrides: Partial<InventoryEntry> = {}): Inventory
 });
 
 describe("managed state inventory", () => {
+  it("streams sparse files and normalizes executable modes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ccm-inventory-"));
+    const sourcePath = join(root, "large-sparse");
+    try {
+      const handle = await open(sourcePath, "w");
+      await handle.truncate(64 * 1024 * 1024);
+      await handle.close();
+      await chmod(sourcePath, 0o711);
+      const [inventory] = await inventoryFromFileEntries([
+        { sourcePath, relativePath: "codex/.ccm/large-sparse", isSymlink: false },
+      ]);
+      expect(inventory).toMatchObject({ size: 64 * 1024 * 1024, mode: 0o755 });
+      const expected = createHash("sha256");
+      const zeroChunk = Buffer.alloc(1024 * 1024);
+      for (let index = 0; index < 64; index += 1) expected.update(zeroChunk);
+      expect(inventory?.sha256).toBe(expected.digest("hex"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("hashes many physical sources deterministically with bounded worker concurrency", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ccm-inventory-"));
+    try {
+      const files = await Promise.all(
+        Array.from({ length: 24 }, async (_, index) => {
+          const sourcePath = join(root, String(index));
+          await writeFile(sourcePath, `content-${index}`);
+          return {
+            sourcePath,
+            relativePath: `codex/rules/${String(index).padStart(2, "0")}.md`,
+            isSymlink: false,
+          };
+        }),
+      );
+      const forward = await inventoryFromFileEntries(files);
+      const reverse = await inventoryFromFileEntries([...files].reverse());
+      expect(forward).toEqual(reverse);
+
+      const implementation = await readFile(
+        new URL("../../src/core/inventory.ts", import.meta.url),
+        "utf8",
+      );
+      expect(implementation).toContain("createReadStream(sourcePath)");
+      expect(implementation).toContain("INVENTORY_HASH_CONCURRENCY");
+      expect(implementation).not.toMatch(/await readFile\(binding\.sourcePath\)/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("has an order- and source-root-independent tree fingerprint", async () => {
     const first = await inventoryFromFileEntries([
       {

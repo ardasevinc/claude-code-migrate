@@ -1,18 +1,9 @@
 import { createHash } from "node:crypto";
-import {
-  chmod,
-  copyFile,
-  link,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { chmod, link, lstat, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import packageMetadata from "../../package.json" with { type: "json" };
 import { BlockedError } from "../errors.ts";
 import type {
@@ -26,9 +17,51 @@ import { log } from "../utils/logger.ts";
 import { runProcess } from "../utils/process.ts";
 import { validateArchiveFileEntries } from "./archive-entries.ts";
 import { createArchiveManifestV2 } from "./archive-manifest.ts";
-import { extractVerifiedArchive, verifyArchive } from "./archive-reader.ts";
+import {
+  extractVerifiedArchive,
+  MAX_ARCHIVE_FILE_BYTES,
+  MAX_ARCHIVE_MANIFEST_BYTES,
+  verifyArchive,
+} from "./archive-reader.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
+
+async function stagePayloadFile(
+  sourcePath: string,
+  destPath: string,
+): Promise<{ size: number; mode: number; sha256: string }> {
+  const before = await stat(sourcePath, { bigint: true });
+  if (before.size > BigInt(MAX_ARCHIVE_FILE_BYTES)) {
+    throw new BlockedError(`Archive file size limit exceeded: ${JSON.stringify(sourcePath)}`);
+  }
+  const hash = createHash("sha256");
+  let size = 0;
+  const hasher = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      size += chunk.byteLength;
+      hash.update(chunk);
+      callback(null, chunk);
+    },
+  });
+  await pipeline(
+    createReadStream(sourcePath),
+    hasher,
+    createWriteStream(destPath, { mode: 0o600 }),
+  );
+  const after = await stat(sourcePath, { bigint: true });
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeNs !== after.mtimeNs ||
+    BigInt(size) !== after.size
+  ) {
+    throw new BlockedError(`Archive source changed while staging: ${JSON.stringify(sourcePath)}`);
+  }
+  const mode = Number(after.mode & 0o111n) === 0 ? 0o644 : 0o755;
+  await chmod(destPath, mode);
+  return { size, mode, sha256: hash.digest("hex") };
+}
 
 export interface CreateArchiveOptions {
   providers: ProviderName[];
@@ -63,6 +96,7 @@ export async function createArchive(
   try {
     await mkdir(tempDir, { mode: 0o700 });
 
+    const manifestFiles: ArchiveManifestV2File[] = [];
     for (const file of files) {
       const destPath = join(tempDir, file.relativePath);
       const destDir = dirname(destPath);
@@ -70,25 +104,25 @@ export async function createArchive(
       await mkdir(destDir, { recursive: true });
 
       if (file.mcpServersOnly !== undefined) {
+        const bytes = Buffer.from(file.mcpServersOnly, "utf8");
+        if (bytes.byteLength > MAX_ARCHIVE_FILE_BYTES) {
+          throw new BlockedError(
+            `Archive virtual file size limit exceeded: ${JSON.stringify(file.relativePath)}`,
+          );
+        }
         await writeFile(destPath, file.mcpServersOnly, "utf8");
+        await chmod(destPath, 0o644);
+        manifestFiles.push({
+          path: file.relativePath,
+          type: "file",
+          size: bytes.byteLength,
+          mode: 0o644,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        });
       } else {
-        await copyFile(file.sourcePath, destPath);
+        const staged = await stagePayloadFile(file.sourcePath, destPath);
+        manifestFiles.push({ path: file.relativePath, type: "file", ...staged });
       }
-      const stagedStat = await stat(destPath);
-      await chmod(destPath, stagedStat.mode & 0o111 ? 0o755 : 0o644);
-    }
-
-    const manifestFiles: ArchiveManifestV2File[] = [];
-    for (const file of files) {
-      const stagedPath = join(tempDir, file.relativePath);
-      const [bytes, stagedStat] = await Promise.all([readFile(stagedPath), stat(stagedPath)]);
-      manifestFiles.push({
-        path: file.relativePath,
-        type: "file",
-        size: bytes.byteLength,
-        mode: stagedStat.mode & 0o777,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-      });
     }
     manifestFiles.sort((a, b) => a.path.localeCompare(b.path, "en"));
     const manifest = createArchiveManifestV2({
@@ -99,7 +133,11 @@ export async function createArchive(
     });
 
     const manifestPath = join(tempDir, MANIFEST_FILENAME);
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), "utf8");
+    if (manifestBytes.byteLength > MAX_ARCHIVE_MANIFEST_BYTES) {
+      throw new BlockedError("Archive manifest size limit exceeded");
+    }
+    await writeFile(manifestPath, manifestBytes);
 
     await runProcess("tar", ["-czf", tempArchive, "-C", tempDir, "."], {
       env: { ...process.env, COPYFILE_DISABLE: "1" },

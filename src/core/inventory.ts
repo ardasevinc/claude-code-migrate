@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { lstat, stat } from "node:fs/promises";
 import type { FileEntry } from "../types/index.ts";
 import { validateArchiveFileEntries, validateCanonicalArchivePath } from "./archive-entries.ts";
 import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
@@ -89,30 +90,74 @@ export function canonicalInventory(entries: readonly InventoryEntry[]): readonly
   return sorted;
 }
 
+const INVENTORY_HASH_CONCURRENCY = 8;
+
+async function hashSourceFile(sourcePath: string): Promise<{
+  readonly mode: number;
+  readonly size: number;
+  readonly sha256: string;
+}> {
+  const [binding, before] = await Promise.all([
+    lstat(sourcePath, { bigint: true }),
+    stat(sourcePath, { bigint: true }),
+  ]);
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const chunk of createReadStream(sourcePath)) {
+    const bytes = chunk as Buffer;
+    size += bytes.byteLength;
+    hash.update(bytes);
+  }
+  const after = await stat(sourcePath, { bigint: true });
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeNs !== after.mtimeNs ||
+    BigInt(size) !== after.size
+  ) {
+    throw new Error(`Inventory source changed while hashing: ${sourcePath}`);
+  }
+  return { mode: Number(binding.mode), size, sha256: hash.digest("hex") };
+}
+
 export async function inventoryFromFileEntries(
   files: readonly FileEntry[],
 ): Promise<readonly InventoryEntry[]> {
   validateArchiveFileEntries([...files]);
-  const entries = await Promise.all(
-    files.map(async (file): Promise<InventoryEntry> => {
+  const entries = new Array<InventoryEntry>(files.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < files.length) {
+      const index = nextIndex++;
+      const file = files[index];
+      if (file === undefined) continue;
       const binding: InventoryBinding = {
         sourcePath: file.sourcePath,
         virtualContent: file.mcpServersOnly,
       };
-      const bytes =
+      const hashed =
         binding.virtualContent === undefined
-          ? await readFile(binding.sourcePath)
-          : Buffer.from(binding.virtualContent);
-      const mode =
-        binding.virtualContent === undefined ? (await lstat(binding.sourcePath)).mode : 0o644;
-      return {
+          ? await hashSourceFile(binding.sourcePath)
+          : (() => {
+              const bytes = Buffer.from(binding.virtualContent);
+              return {
+                mode: 0o644,
+                size: bytes.byteLength,
+                sha256: createHash("sha256").update(bytes).digest("hex"),
+              };
+            })();
+      entries[index] = {
         path: file.relativePath,
         type: "file",
-        mode: (mode & 0o111) === 0 ? 0o644 : 0o755,
-        size: bytes.byteLength,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
+        mode: (hashed.mode & 0o111) === 0 ? 0o644 : 0o755,
+        size: hashed.size,
+        sha256: hashed.sha256,
       };
-    }),
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(INVENTORY_HASH_CONCURRENCY, files.length) }, worker),
   );
   return canonicalInventory(entries);
 }
