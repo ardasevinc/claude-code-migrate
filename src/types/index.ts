@@ -129,4 +129,6 @@ export interface BackupOptions {
 
 export interface RestoreOptions {
   dryRun: boolean;
+  json?: boolean;
+  verbose?: boolean;
 }

@@ -67,6 +67,8 @@ export function createCli(): Command {
     .argument("<archive>", "Path to archive")
     .argument("[provider]", "Optional provider (claude|codex)")
     .option("--dry-run", "Preview restore actions without writing files", false)
+    .option("--json", "Print the restore plan as one JSON object (dry-run only)", false)
+    .option("--verbose", "Show planned restore actions", false)
     .action(restoreCommand);
 
   return program;

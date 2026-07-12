@@ -1,8 +1,24 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { isProviderName } from "../config/providers.ts";
 import type { RuntimeContext } from "../runtime/context.ts";
 import type { CollectionPaths, ProviderName } from "../types/index.ts";
 import { scanArchive } from "./archive-reader.ts";
+import { backupLocalDirectoryIfExists } from "./restore.ts";
 import {
   canonicalInventory,
   groupManagedTopLevelEntries,
@@ -52,6 +68,9 @@ type RestoreActionBinding =
   | { readonly kind: "symlink-view"; readonly entries: readonly InventoryEntry[] };
 
 interface RestorePlanResources {
+  readonly context: RuntimeContext;
+  readonly providers: readonly ProviderName[];
+  readonly queries: ReturnType<typeof deriveRestoreObservationQueries>;
   readonly archivePath: string;
   readonly paths: CollectionPaths;
   readonly transformed: RestoreTransformInputs;
@@ -415,6 +434,9 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
   }
   resources.set(planned, {
     archivePath: input.archivePath,
+    context: input.context,
+    providers,
+    queries: deriveRestoreObservationQueries(captured),
     paths: { ...input.paths },
     transformed: {
       claudeMcp: transformed.claudeMcp && Buffer.from(transformed.claudeMcp),
@@ -429,4 +451,171 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
     actionBindings,
   });
   return planned;
+}
+
+export interface ExecutePlannedRestoreOptions {
+  /** Test seam for proving the second target drift check. */
+  readonly afterBackup?: () => Promise<void>;
+}
+
+function sourceFingerprint(
+  archiveSha256: string,
+  providers: readonly ProviderName[],
+  inventory: readonly InventoryEntry[],
+) {
+  return fingerprint("restore-source-v1", {
+    archiveSha256,
+    providers,
+    inventory: inventoryFingerprint(inventory),
+  });
+}
+
+function livePath(paths: CollectionPaths, logical: string): string {
+  const parts = logical.split("/");
+  if (parts[0] === "claude") return join(paths.claudeDir, ...parts.slice(1));
+  if (parts[0] === "codex") return join(paths.codexDir, ...parts.slice(1));
+  if (parts[0] === "shared" && parts[1] === "agents")
+    return join(paths.sharedAgentsDir, ...parts.slice(2));
+  throw new Error(`Unsupported restore path: ${logical}`);
+}
+
+async function atomicWriteNoFollow(path: string, bytes: Uint8Array): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    const stat = await import("node:fs/promises").then(({ lstat }) => lstat(path));
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new Error("Restore target must be a regular non-symlink file");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const temporary = join(
+    dirname(path),
+    `.${path.split("/").at(-1)}.ccm-${crypto.randomUUID()}.tmp`,
+  );
+  let committed = false;
+  try {
+    const handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600,
+    );
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+    committed = true;
+  } finally {
+    if (!committed) await rm(temporary, { force: true });
+  }
+}
+
+async function assertTargetUnchanged(resource: RestorePlanResources): Promise<void> {
+  const observed = await observeLocalRestoreTarget({
+    context: resource.context,
+    paths: resource.paths,
+    selectedProviders: resource.providers,
+    incoming: resource.selectedInventory,
+    queries: resource.queries,
+  });
+  if (observed.targetFingerprint !== resource.observation.targetFingerprint)
+    throw new Error("Restore target changed after planning");
+}
+
+export async function executePlannedRestore(
+  planned: PlannedRestore,
+  options: ExecutePlannedRestoreOptions = {},
+): Promise<void> {
+  const resource = resources.get(planned);
+  if (!resource) throw new Error("Restore plan is forged or no longer executable");
+  if (planned.plan.status === "blocked") throw new Error("Blocked restore plan cannot execute");
+  resources.delete(planned);
+  if (planned.plan.status === "noop") return;
+
+  const temp = await mkdtemp(join(tmpdir(), "ccm-restore-"));
+  const extraction = join(temp, "archive");
+  try {
+    const scan = await scanArchive(resource.archivePath, { extractTo: extraction });
+    const observedInventory = canonicalInventory(
+      scan.observedFiles.map((file) => ({
+        path: file.path,
+        type: "file" as const,
+        mode: (file.mode & 0o111) === 0 ? (0o644 as const) : (0o755 as const),
+        size: file.size,
+        sha256: file.sha256,
+      })),
+    );
+    const selected = canonicalInventory(selectedInventory(observedInventory, resource.providers));
+    if (
+      scan.archive.archiveSha256 !== resource.archiveSha256 ||
+      sourceFingerprint(scan.archive.archiveSha256, resource.providers, selected) !==
+        planned.plan.sourceFingerprint
+    )
+      throw new Error("Restore archive changed after planning");
+
+    if (resource.transformed.codexConfig)
+      await writeFile(join(extraction, "codex/config.toml"), resource.transformed.codexConfig);
+    if (resource.transformed.codexHooks)
+      await writeFile(join(extraction, "codex/hooks.json"), resource.transformed.codexHooks);
+    const stagedScan = await Promise.all(
+      resource.stagedIncoming.map(async (entry) => {
+        const bytes =
+          entry.path === "claude/.mcp-config.json" && resource.transformed.claudeMcp
+            ? resource.transformed.claudeMcp
+            : await readFile(join(extraction, entry.path));
+        return inventoryEntry(entry.path, entry.mode, bytes);
+      }),
+    );
+    if (inventoryFingerprint(stagedScan) !== inventoryFingerprint(resource.stagedIncoming))
+      throw new Error("Staged restore inventory does not match plan");
+    if (inventoryFingerprint(resource.stagedFinal) !== planned.plan.stagedPostFingerprint)
+      throw new Error("Sealed staged restore fingerprint does not match plan");
+
+    await assertTargetUnchanged(resource);
+    const changed = planned.plan.actions.filter((action) => action.disposition !== "unchanged");
+    const scopes = new Set(changed.map((action) => action.scope));
+    if (scopes.has("claude")) await backupLocalDirectoryIfExists(resource.paths.claudeDir);
+    if (changed.some((action) => action.operation === "merge-json"))
+      await backupLocalDirectoryIfExists(resource.paths.claudeMcpConfigPath);
+    if (scopes.has("codex")) await backupLocalDirectoryIfExists(resource.paths.codexDir);
+    if (scopes.has("shared")) await backupLocalDirectoryIfExists(resource.paths.sharedAgentsDir);
+    await options.afterBackup?.();
+    await assertTargetUnchanged(resource);
+
+    const consumed = new Set<string>();
+    for (const action of planned.plan.actions) {
+      const binding = resource.actionBindings.get(action.id);
+      if (!binding) throw new Error(`Missing restore action binding: ${action.id}`);
+      consumed.add(action.id);
+      if (action.disposition === "unchanged" || binding.kind === "transform-stage") continue;
+      if (binding.kind === "write-mcp") {
+        await atomicWriteNoFollow(resource.paths.claudeMcpConfigPath, binding.bytes);
+      } else if (binding.kind === "overlay-group") {
+        for (const entry of binding.entries) {
+          const source = join(extraction, entry.path);
+          const target = livePath(resource.paths, entry.path);
+          await mkdir(dirname(target), { recursive: true });
+          await cp(source, target, { recursive: true, force: true });
+          await chmod(target, entry.mode);
+        }
+      } else if (binding.kind === "symlink-view") {
+        for (const entry of binding.entries) {
+          const target = livePath(resource.paths, entry.path);
+          await rm(target, { recursive: true, force: true });
+          await mkdir(dirname(target), { recursive: true });
+          const name = entry.path.split("/").at(-1) as string;
+          await symlink(join(resource.paths.sharedSkillsDir, name), target);
+        }
+      }
+    }
+    if (
+      consumed.size !== resource.actionBindings.size ||
+      consumed.size !== planned.plan.actions.length
+    )
+      throw new Error("Restore action bindings were not consumed exactly once");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
 }
