@@ -443,8 +443,9 @@ async function acceptRecoveredJournal(
   supplied: TransactionJournal,
 ): Promise<TransactionJournal> {
   const journal = await readTransactionJournal(context, supplied.id);
-  if (journal.state !== "recovery_required")
+  if (journal.state !== "committing" && journal.state !== "recovery_required")
     throw new BlockedError(`Transaction is not awaiting recovery: ${journal.id}`);
+  const targetParents = new Set<string>();
   for (const member of journal.members) {
     if (
       member.targetRef === undefined ||
@@ -468,7 +469,9 @@ async function acceptRecoveredJournal(
         : rollback.fingerprint !== member.preimageFingerprint
     )
       throw new BlockedError("Transaction rollback material does not match its planned pre-state");
+    targetParents.add(dirname(paths.target));
   }
+  for (const parent of targetParents) await syncDirectory(parent);
   return transitionAndPublish(context, journal, "committed", {
     terminalErrorCode: null,
     members: journal.members.map((member) => ({ ...member, state: "committed" as const })),
@@ -480,6 +483,7 @@ async function assertRollbackRecoverable(
   journal: TransactionJournal,
 ): Promise<void> {
   for (const member of journal.members) {
+    if (member.state === "untouched") continue;
     if (
       member.targetRef === undefined ||
       member.originalKind === undefined ||
@@ -688,6 +692,7 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
         if (member.originalKind === "absent") {
           await options.beforeAbsentRename?.(paths.target);
           await renameNoReplace(paths.stage, paths.target);
+          await options.afterBoundary?.(`renamed:commit-unsynced:${member.id}`, journal);
           await syncDirectory(dirname(paths.stage));
           if (dirname(paths.target) !== dirname(paths.stage))
             await syncDirectory(dirname(paths.target));
@@ -697,6 +702,7 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
         await options.afterBoundary?.(`renamed:rollback:${member.id}`, journal);
         await runStep(async () => {
           await renameNoReplace(paths.stage, paths.target);
+          await options.afterBoundary?.(`renamed:commit-unsynced:${member.id}`, journal);
           await syncDirectory(dirname(paths.stage));
           if (dirname(paths.target) !== dirname(paths.stage))
             await syncDirectory(dirname(paths.target));
@@ -770,8 +776,14 @@ export async function recoverLocalTransaction(options: {
     const journal = await readTransactionJournal(options.context, options.transactionId);
     if (journal.kind !== "restore")
       throw new BlockedError("Only local restore journals can be recovered locally");
-    if (journal.state !== "recovery_required")
-      throw new BlockedError(`Transaction is not awaiting recovery: ${journal.id}`);
+    const recoverable =
+      options.mode === "rollback"
+        ? journal.state === "committing" ||
+          journal.state === "rolling_back" ||
+          journal.state === "recovery_required"
+        : journal.state === "committing" || journal.state === "recovery_required";
+    if (!recoverable)
+      throw new BlockedError(`Transaction cannot be ${options.mode}ed from ${journal.state}`);
     for (const member of journal.members) {
       const root = roots.get(member.rootCode);
       if (!root || member.rootBinding === undefined)
