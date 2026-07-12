@@ -12,7 +12,7 @@ export function registerInterruptCleanup(cleanup: () => Promise<void>): () => vo
 export async function cleanupInterruptResources(): Promise<void> {
   const pending = [...cleanups.values()].reverse();
   cleanups.clear();
-  await Promise.allSettled(pending.map((cleanup) => cleanup()));
+  for (const cleanup of pending) await Promise.allSettled([cleanup()]);
 }
 
 function installSignalHandlers(): void {
