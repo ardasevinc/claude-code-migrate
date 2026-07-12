@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { type FileHandle, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { BlockedError, ExecutionError } from "../errors.ts";
 import type { RuntimeContext } from "../runtime/context.ts";
+import type { CollectionPaths } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { fingerprintLocalPath } from "./local-transaction-fingerprint.ts";
 import {
@@ -31,6 +33,31 @@ import {
 
 export interface LocalTransactionRootBinding extends LocalTransactionRoot {
   readonly allowWholeExisting?: boolean;
+}
+
+export type LocalTransactionRecoveryMode = "rollback" | "accept";
+
+export function localTransactionRootsForPaths(
+  paths: Pick<
+    CollectionPaths,
+    "claudeDir" | "codexDir" | "sharedAgentsDir" | "claudeMcpConfigPath"
+  >,
+): LocalTransactionRootBinding[] {
+  return [
+    { code: "claude-home", path: paths.claudeDir },
+    { code: "codex-home", path: paths.codexDir },
+    { code: "shared-agents", path: paths.sharedAgentsDir },
+    { code: "claude-mcp", path: paths.claudeMcpConfigPath, allowWholeExisting: true },
+  ];
+}
+
+export function defaultLocalTransactionRoots(home: string): LocalTransactionRootBinding[] {
+  return localTransactionRootsForPaths({
+    claudeDir: join(home, ".claude"),
+    codexDir: join(home, ".codex"),
+    sharedAgentsDir: join(home, ".agents"),
+    claudeMcpConfigPath: join(home, ".claude.json"),
+  });
 }
 
 export interface LocalTransactionMemberInput {
@@ -145,6 +172,13 @@ async function rootMap(
     }
   }
   return mapped;
+}
+
+function rootBinding(path: string): string {
+  return `root_${createHash("sha256")
+    .update("ccm:local-transaction-root-v1\0")
+    .update(resolve(path).normalize("NFC"))
+    .digest("hex")}`;
 }
 
 async function chooseBackupRefs(
@@ -403,6 +437,82 @@ async function abortPreparedJournal(
   });
 }
 
+async function acceptRecoveredJournal(
+  context: RuntimeContext,
+  roots: ReadonlyMap<string, LocalTransactionRootBinding>,
+  supplied: TransactionJournal,
+): Promise<TransactionJournal> {
+  const journal = await readTransactionJournal(context, supplied.id);
+  if (journal.state !== "recovery_required")
+    throw new BlockedError(`Transaction is not awaiting recovery: ${journal.id}`);
+  for (const member of journal.members) {
+    if (
+      member.targetRef === undefined ||
+      member.originalKind === undefined ||
+      member.preimageFingerprint === undefined ||
+      member.postimageFingerprint === undefined ||
+      member.backupRef === undefined ||
+      (member.state !== "snapshotted" && member.state !== "committed")
+    )
+      throw new BlockedError("Transaction lacks the metadata required for acceptance");
+    const paths = resolveTransactionMemberPaths(roots, journal.id, member);
+    const [target, rollback] = await Promise.all([
+      fingerprintLocalPath(paths.target),
+      fingerprintLocalPath(paths.rollback),
+    ]);
+    if (target.fingerprint !== member.postimageFingerprint)
+      throw new BlockedError("Transaction target does not match its planned post-state");
+    if (
+      member.originalKind === "absent"
+        ? rollback.kind !== "absent"
+        : rollback.fingerprint !== member.preimageFingerprint
+    )
+      throw new BlockedError("Transaction rollback material does not match its planned pre-state");
+  }
+  return transitionAndPublish(context, journal, "committed", {
+    terminalErrorCode: null,
+    members: journal.members.map((member) => ({ ...member, state: "committed" as const })),
+  });
+}
+
+async function assertRollbackRecoverable(
+  roots: ReadonlyMap<string, LocalTransactionRootBinding>,
+  journal: TransactionJournal,
+): Promise<void> {
+  for (const member of journal.members) {
+    if (
+      member.targetRef === undefined ||
+      member.originalKind === undefined ||
+      member.preimageFingerprint === undefined ||
+      member.postimageFingerprint === undefined
+    )
+      throw new BlockedError("Transaction lacks the metadata required for rollback");
+    const paths = resolveTransactionMemberPaths(roots, journal.id, member);
+    const [target, rollback] = await Promise.all([
+      fingerprintLocalPath(paths.target),
+      fingerprintLocalPath(paths.rollback),
+    ]);
+    if (member.originalKind === "absent") {
+      if (
+        rollback.kind !== "absent" ||
+        (target.kind !== "absent" && target.fingerprint !== member.postimageFingerprint)
+      )
+        throw new BlockedError("Transaction filesystem state is ambiguous; rollback refused");
+      continue;
+    }
+    if (rollback.kind === "absent") {
+      if (target.fingerprint !== member.preimageFingerprint)
+        throw new BlockedError("Transaction filesystem state is ambiguous; rollback refused");
+      continue;
+    }
+    if (
+      rollback.fingerprint !== member.preimageFingerprint ||
+      (target.kind !== "absent" && target.fingerprint !== member.postimageFingerprint)
+    )
+      throw new BlockedError("Transaction filesystem state is ambiguous; rollback refused");
+  }
+}
+
 async function maintainExistingJournals(
   context: RuntimeContext,
   roots: ReadonlyMap<string, LocalTransactionRootBinding>,
@@ -442,7 +552,11 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
     kind: "restore",
     planId: options.planId,
     now: options.context.now(),
-    members: options.members.map(({ id, rootCode }) => ({ id, rootCode })),
+    members: options.members.map(({ id, rootCode }) => {
+      const root = roots.get(rootCode);
+      if (!root) throw new BlockedError(`Unknown local transaction root: ${rootCode}`);
+      return { id, rootCode, rootBinding: rootBinding(root.path) };
+    }),
   });
   journal = await publishReconciled(options.context, undefined, journal);
   let interrupted = false;
@@ -492,6 +606,7 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
       const provisional: TransactionMember = {
         id: input.id,
         rootCode: input.rootCode,
+        rootBinding: journal.members[index]?.rootBinding,
         state: "snapshotted",
         stageRef,
         rollbackRef,
@@ -631,4 +746,38 @@ export async function executeLocalTransaction(
   if (new Set(options.members.map((member) => member.id)).size !== options.members.length)
     throw new Error("Local transaction member ids must be unique");
   return withTransactionMutationLock(options.context, () => executeLocked(options));
+}
+
+export async function recoverLocalTransaction(options: {
+  readonly context: RuntimeContext;
+  readonly transactionId: string;
+  readonly mode: LocalTransactionRecoveryMode;
+  readonly roots?: readonly LocalTransactionRootBinding[];
+}): Promise<TransactionJournal> {
+  if (options.mode !== "rollback" && options.mode !== "accept")
+    throw new BlockedError("Unknown local transaction recovery mode");
+  return withTransactionMutationLock(options.context, async () => {
+    const roots = await rootMap(
+      options.roots ?? defaultLocalTransactionRoots(options.context.home),
+    );
+    const journal = await readTransactionJournal(options.context, options.transactionId);
+    if (journal.kind !== "restore")
+      throw new BlockedError("Only local restore journals can be recovered locally");
+    if (journal.state !== "recovery_required")
+      throw new BlockedError(`Transaction is not awaiting recovery: ${journal.id}`);
+    for (const member of journal.members) {
+      const root = roots.get(member.rootCode);
+      if (!root || member.rootBinding === undefined)
+        throw new BlockedError("Transaction lacks a sealed local root binding");
+      if (member.rootBinding !== rootBinding(root.path))
+        throw new BlockedError(`Transaction root changed since preparation: ${member.rootCode}`);
+    }
+    if (options.mode === "rollback") await assertRollbackRecoverable(roots, journal);
+    const terminal =
+      options.mode === "rollback"
+        ? await rollbackJournal(options.context, roots, journal)
+        : await acceptRecoveredJournal(options.context, roots, journal);
+    await finalizeTerminalJournal(options.context, roots, terminal);
+    return terminal;
+  });
 }

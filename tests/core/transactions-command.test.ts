@@ -2,12 +2,16 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { transactionsCommandWithContext } from "../../src/commands/transactions.ts";
+import {
+  recoverCommandWithContext,
+  transactionsCommandWithContext,
+} from "../../src/commands/transactions.ts";
 import {
   createTransactionJournal,
   publishTransactionJournal,
   transitionTransactionJournal,
 } from "../../src/core/transaction-journal.ts";
+import { UsageError } from "../../src/errors.ts";
 import { createRuntimeContext } from "../../src/runtime/context.ts";
 
 afterEach(() => vi.restoreAllMocks());
@@ -78,6 +82,27 @@ describe("transactions command", () => {
       vi.spyOn(console, "log").mockImplementation((value) => lines.push(String(value)));
       await transactionsCommandWithContext({}, state.context);
       expect(lines).toEqual(["No CCM transactions."]);
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires one explicit recovery mode and a canonical transaction ID", async () => {
+    const state = await fixture();
+    try {
+      await expect(
+        recoverCommandWithContext("not-a-transaction", { rollback: true }, state.context),
+      ).rejects.toBeInstanceOf(UsageError);
+      await expect(
+        recoverCommandWithContext(`txn_${"a".repeat(32)}`, {}, state.context),
+      ).rejects.toBeInstanceOf(UsageError);
+      await expect(
+        recoverCommandWithContext(
+          `txn_${"a".repeat(32)}`,
+          { rollback: true, accept: true },
+          state.context,
+        ),
+      ).rejects.toBeInstanceOf(UsageError);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }

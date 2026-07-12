@@ -37,6 +37,7 @@ export interface TransactionMember {
   readonly id: string;
   readonly state: TransactionMemberState;
   readonly rootCode: string;
+  readonly rootBinding?: string;
   readonly stageRef?: string;
   readonly rollbackRef?: string;
   readonly targetRef?: string;
@@ -76,6 +77,7 @@ const JOURNAL_ID = /^txn_[a-f0-9]{32}$/;
 const SYMBOL = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const PLAN_ID = /^plan_[a-zA-Z0-9._-]{1,128}$/;
 const FINGERPRINT = /^fp_[a-f0-9]{64}$/;
+const ROOT_BINDING = /^root_[a-f0-9]{64}$/;
 const BACKUP_REF = /^(0|[1-9][0-9]{0,19})$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const WRITER_LOCK = ".writer.lock";
@@ -144,6 +146,7 @@ function validateMemberShape(value: unknown, index: number): TransactionMember {
       "id",
       "state",
       "rootCode",
+      "rootBinding",
       "stageRef",
       "rollbackRef",
       "targetRef",
@@ -163,6 +166,12 @@ function validateMemberShape(value: unknown, index: number): TransactionMember {
     state !== "untouched"
   )
     throw new Error(`${label} state is invalid`);
+  const rootBinding = member.rootBinding;
+  if (
+    rootBinding !== undefined &&
+    (typeof rootBinding !== "string" || !ROOT_BINDING.test(rootBinding))
+  )
+    throw new Error(`${label} rootBinding is invalid`);
   const stageRef =
     member.stageRef === undefined ? undefined : symbol(member.stageRef, `${label} stageRef`);
   const rollbackRef =
@@ -233,6 +242,7 @@ function validateMemberShape(value: unknown, index: number): TransactionMember {
     id: symbol(member.id, `${label} id`),
     state,
     rootCode: symbol(member.rootCode, `${label} rootCode`),
+    ...(rootBinding === undefined ? {} : { rootBinding }),
     ...(stageRef === undefined ? {} : { stageRef }),
     ...(rollbackRef === undefined ? {} : { rollbackRef }),
     ...(targetRef === undefined ? {} : { targetRef }),
@@ -370,7 +380,11 @@ export function createTransactionJournal(input: {
   readonly kind: "restore" | "push";
   readonly planId: string;
   readonly now: Date;
-  readonly members: readonly { readonly id: string; readonly rootCode: string }[];
+  readonly members: readonly {
+    readonly id: string;
+    readonly rootCode: string;
+    readonly rootBinding?: string;
+  }[];
 }): TransactionJournal {
   const at = input.now.toISOString();
   return parseTransactionJournal(
@@ -407,7 +421,11 @@ export function transitionTransactionJournal(
   for (let index = 0; index < members.length; index += 1) {
     const before = journal.members[index] as TransactionMember;
     const after = members[index] as TransactionMember;
-    if (after.id !== before.id || after.rootCode !== before.rootCode)
+    if (
+      after.id !== before.id ||
+      after.rootCode !== before.rootCode ||
+      after.rootBinding !== before.rootBinding
+    )
       throw new Error("Transaction member identity cannot change");
     if (!MEMBER_TRANSITIONS[before.state].includes(after.state))
       throw new Error(`Invalid transaction member transition: ${before.state} -> ${after.state}`);
@@ -461,6 +479,7 @@ function assertJournalSuccessor(existing: TransactionJournal, candidate: Transac
     if (
       after.id !== before.id ||
       after.rootCode !== before.rootCode ||
+      after.rootBinding !== before.rootBinding ||
       !MEMBER_TRANSITIONS[before.state].includes(after.state) ||
       (before.stageRef !== undefined && after.stageRef !== before.stageRef) ||
       (before.rollbackRef !== undefined && after.rollbackRef !== before.rollbackRef)
@@ -765,7 +784,13 @@ export async function listTransactionJournals(
   const names = (await readdir(directory)).filter((name) => name.endsWith(".json")).sort();
   if (names.length > MAX_JOURNALS) throw new Error("Too many transaction journals");
   const journals: TransactionJournal[] = [];
-  for (const name of names) journals.push(await readJournalAt(directory, name));
+  for (const name of names) {
+    try {
+      journals.push(await readJournalAt(directory, name));
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+    }
+  }
   return journals;
 }
 

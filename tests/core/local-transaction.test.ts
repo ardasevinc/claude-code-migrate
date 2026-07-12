@@ -5,6 +5,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -12,7 +13,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { executeLocalTransaction } from "../../src/core/local-transaction.ts";
+import {
+  executeLocalTransaction,
+  recoverLocalTransaction,
+} from "../../src/core/local-transaction.ts";
 import { fingerprintLocalPath } from "../../src/core/local-transaction-fingerprint.ts";
 import {
   ensureTransactionWorkspace,
@@ -243,6 +247,141 @@ describe("local transactions", () => {
       ).rejects.toThrow("requires recovery");
       expect(await readFile(target, "utf8")).toBe("external\n");
       expect((await listTransactionJournals(state.context))[0]?.state).toBe("recovery_required");
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "rollback",
+    "accept",
+  ] as const)("%s resolves only an exact journaled recovery state", async (mode) => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      await writeFile(target, "old\n");
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_recovery_command",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "restored\n"),
+            },
+          ],
+          verify: async () => {},
+          afterBoundary: async (boundary) => {
+            if (boundary === "renamed:rollback:codex-agents")
+              await writeFile(target, "external\n", { flag: "wx" });
+          },
+        }),
+      ).rejects.toThrow("requires recovery");
+      const pending = (await listTransactionJournals(state.context))[0];
+      if (!pending) throw new Error("missing recovery fixture journal");
+
+      await expect(
+        recoverLocalTransaction({
+          context: state.context,
+          transactionId: pending.id,
+          mode,
+          roots: state.roots,
+        }),
+      ).rejects.toBeInstanceOf(BlockedError);
+      expect(await readFile(target, "utf8")).toBe("external\n");
+
+      if (mode === "rollback") await rm(target);
+      else await writeFile(target, "restored\n");
+      const terminal = await recoverLocalTransaction({
+        context: state.context,
+        transactionId: pending.id,
+        mode,
+        roots: state.roots,
+      });
+      expect(terminal.state).toBe(mode === "rollback" ? "rolled_back" : "committed");
+      expect(await readFile(target, "utf8")).toBe(mode === "rollback" ? "old\n" : "restored\n");
+      expect(await listTransactionJournals(state.context)).toEqual([]);
+      if (mode === "accept") {
+        const backup = (await readdir(state.home)).find((name) =>
+          name.startsWith(".codex.backup-"),
+        );
+        expect(await readFile(join(state.home, backup as string, "AGENTS.md"), "utf8")).toBe(
+          "old\n",
+        );
+      }
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds recovery to the canonical root established during preparation", async () => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      await writeFile(target, "old\n");
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_root_binding",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "restored\n"),
+            },
+          ],
+          verify: async () => {},
+          afterBoundary: async (boundary) => {
+            if (boundary === "renamed:rollback:codex-agents")
+              await writeFile(target, "external\n", { flag: "wx" });
+          },
+        }),
+      ).rejects.toThrow("requires recovery");
+      const pending = (await listTransactionJournals(state.context))[0];
+      if (!pending) throw new Error("missing recovery fixture journal");
+      const displaced = join(state.home, ".codex-displaced");
+      const other = join(state.home, ".codex-other");
+      await rename(codex, displaced);
+      await mkdir(other);
+      await writeFile(join(other, "AGENTS.md"), "restored\n");
+      await symlink(".codex-other", codex);
+
+      await expect(
+        recoverLocalTransaction({
+          context: state.context,
+          transactionId: pending.id,
+          mode: "rollback",
+          roots: state.roots,
+        }),
+      ).rejects.toThrow("root changed since preparation");
+      expect(await readFile(join(other, "AGENTS.md"), "utf8")).toBe("restored\n");
+      expect((await listTransactionJournals(state.context))[0]?.state).toBe("recovery_required");
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unknown recovery modes at the runtime API boundary", async () => {
+    const state = await fixture();
+    try {
+      await expect(
+        recoverLocalTransaction({
+          context: state.context,
+          transactionId: `txn_${"a".repeat(32)}`,
+          mode: "typo" as never,
+          roots: state.roots,
+        }),
+      ).rejects.toBeInstanceOf(BlockedError);
+      expect(await listTransactionJournals(state.context)).toEqual([]);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }

@@ -32,6 +32,7 @@ import {
   executeLocalTransaction,
   type LocalTransactionMemberInput,
   type LocalTransactionRootBinding,
+  localTransactionRootsForPaths,
 } from "./local-transaction.ts";
 import {
   createMigrationPlan,
@@ -605,12 +606,7 @@ async function buildRestoreTransactionMembers(
   extraction: string,
   afterStageClone?: (stagePath: string, logicalBase: string) => Promise<void>,
 ): Promise<{ roots: LocalTransactionRootBinding[]; members: LocalTransactionMemberInput[] }> {
-  const roots: LocalTransactionRootBinding[] = [
-    { code: "claude-home", path: resource.paths.claudeDir },
-    { code: "codex-home", path: resource.paths.codexDir },
-    { code: "shared-agents", path: resource.paths.sharedAgentsDir },
-    { code: "claude-mcp", path: resource.paths.claudeMcpConfigPath, allowWholeExisting: true },
-  ];
+  const roots: LocalTransactionRootBinding[] = localTransactionRootsForPaths(resource.paths);
   const absentRoots = new Set<string>();
   for (const root of roots) if (!(await pathExists(root.path))) absentRoots.add(root.code);
   const specs = new Map<string, RestoreTransactionMember>();

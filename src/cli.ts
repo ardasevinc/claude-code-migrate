@@ -5,7 +5,7 @@ import { backupCommand } from "./commands/backup.ts";
 import { configCommand } from "./commands/config.ts";
 import { pushCommand } from "./commands/push.ts";
 import { restoreCommand } from "./commands/restore.ts";
-import { transactionsCommand } from "./commands/transactions.ts";
+import { recoverCommand, transactionsCommand } from "./commands/transactions.ts";
 
 export function createCli(): Command {
   const program = new Command();
@@ -69,6 +69,15 @@ export function createCli(): Command {
     .description("List durable local CCM transactions")
     .option("--json", "Print one JSON object", false)
     .action(transactionsCommand);
+
+  program
+    .command("recover")
+    .description("Resolve a durable local CCM transaction")
+    .argument("<transaction>", "Canonical transaction ID")
+    .option("--rollback", "Restore the journaled pre-state", false)
+    .option("--accept", "Accept only the exact journaled post-state", false)
+    .option("--json", "Print one JSON object", false)
+    .action(recoverCommand);
 
   program
     .command("restore")
