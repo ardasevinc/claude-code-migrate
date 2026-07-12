@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FileEntry, ProviderName } from "../types/index.ts";
@@ -39,6 +39,7 @@ export interface StagePushArchiveInput {
 export interface StagedPushArchive {
   readonly archivePath: string;
   readonly archiveSha256: string;
+  readonly archiveSize: number;
   cleanup(): Promise<void>;
 }
 
@@ -120,6 +121,7 @@ export async function stagePushArchive(input: StagePushArchiveInput): Promise<St
     return Object.freeze({
       archivePath,
       archiveSha256: digest,
+      archiveSize: (await lstat(archivePath)).size,
       cleanup: async () => {
         unregister();
         await cleanup();

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
+import { ExecutionError } from "../errors.ts";
 import type { CodexPluginPolicy, FileEntry, ProviderName } from "../types/index.ts";
 import { projectCodexMarketplaceAvailability } from "./codex-marketplace-projection.ts";
 import {
@@ -63,6 +64,7 @@ interface PushPlanResources {
   readonly actionBindings: ReadonlyMap<string, PushActionBinding>;
   readonly beforeRequest: PushExecutionObservationRequest;
   readonly finalRequest: PushExecutionObservationRequest;
+  readonly filesystemPostFingerprint: PlanFingerprint;
   readonly sources: SealedPushSourceBindings;
   readonly transformedBytes: ReadonlyMap<string, Uint8Array>;
   readonly decisionFiles: readonly FileEntry[];
@@ -89,14 +91,32 @@ export type PushActionBinding =
   | { readonly kind: "plugin-add"; readonly pluginId: string; readonly codexCommand: string };
 
 export interface PushExecutionAdapter {
-  observe(request: PushExecutionObservationRequest): Promise<PushTargetObservation>;
+  observe(
+    request: PushExecutionObservationRequest,
+    options?: { readonly mutationStarted?: boolean },
+  ): Promise<PushTargetObservation>;
   prepare(input: {
     readonly archivePath: string;
     readonly archiveSha256: string;
+    readonly archiveSize: number;
+    readonly stagedInventory: readonly InventoryEntry[];
+    readonly observationRequest: PushExecutionObservationRequest;
+    readonly observation: PushTargetObservation;
+    readonly actions: readonly {
+      readonly action: MigrationAction;
+      readonly binding: PushActionBinding;
+    }[];
   }): Promise<PushExecutionSession>;
 }
 export interface PushExecutionSession {
   apply(action: MigrationAction, binding: PushActionBinding): Promise<void>;
+  commit(): Promise<void>;
+  applyEffect(action: MigrationAction, binding: PushActionBinding): Promise<void>;
+  acknowledgeFailedEffects(): Promise<void>;
+  abort(): Promise<void>;
+  verifyCommit(): Promise<void>;
+  verifyRollback(): Promise<void>;
+  isCommitted(): boolean;
   cleanup(): Promise<void>;
 }
 
@@ -495,6 +515,18 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
           };
         })()
       : pluginList;
+  const filesystemPostFingerprint = pushStateFingerprint({
+    capabilities: input.observation.capabilities,
+    inventory: stagedFinal,
+    facts: {
+      ...input.observation.facts,
+      captures: projectedCaptures,
+      marketplacePayloads: projectedMarkets,
+      sharedSkillNames: syncSharedSkills
+        ? [...new Set([...input.observation.facts.sharedSkillNames, ...incomingSharedNames])].sort()
+        : input.observation.facts.sharedSkillNames,
+    },
+  });
   const stagedPostFingerprint = pushStateFingerprint({
     capabilities: input.observation.capabilities,
     inventory: stagedFinal,
@@ -650,6 +682,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     actionBindings,
     beforeRequest,
     finalRequest,
+    filesystemPostFingerprint,
     sources: sealPushSourceBindings(files),
     transformedBytes,
     decisionFiles,
@@ -711,7 +744,10 @@ export async function executePlannedPush(
           providers: planned.plan.providers,
         });
   let session: PushExecutionSession | undefined;
-  let primaryError: unknown;
+  const failures: unknown[] = [];
+  let committed = false;
+  let completed = false;
+  let mutationStarted = false;
   try {
     const observed = await adapter.observe(resource.beforeRequest);
     if (
@@ -727,13 +763,28 @@ export async function executePlannedPush(
     );
     if (changedRemote) {
       if (!staged) throw new Error("Changed push plan has no staged archive");
+      const changedActions = planned.plan.actions.flatMap((action) => {
+        if (
+          action.phase === "materialize" ||
+          action.disposition === "unchanged" ||
+          action.disposition === "preserve"
+        )
+          return [];
+        const binding = resource.actionBindings.get(action.id);
+        if (!binding) throw new Error(`Missing push action binding: ${action.id}`);
+        return [{ action, binding }];
+      });
       session = await adapter.prepare({
         archivePath: staged.archivePath,
         archiveSha256: staged.archiveSha256,
+        archiveSize: staged.archiveSize,
+        stagedInventory: resource.stagedIncoming,
+        observationRequest: resource.beforeRequest,
+        observation: observed,
+        actions: changedActions,
       });
     }
     const consumed = new Set<string>();
-    let mutationStarted = false;
     for (const action of planned.plan.actions) {
       for (const dependency of planned.plan.dependencies.filter(
         (item) => item.required && item.ownerActionId === action.id,
@@ -755,32 +806,105 @@ export async function executePlannedPush(
         mutationStarted = true;
       }
       if (!session) throw new Error("Push execution session was not prepared");
-      await session.apply(action, binding);
+      if (binding.kind !== "plugin-add") await session.apply(action, binding);
       consumed.add(action.id);
     }
     if (consumed.size !== resource.actionBindings.size)
       throw new Error("Push action bindings were not consumed exactly once");
-    const final = await adapter.observe(resource.finalRequest);
+    const effectActions = planned.plan.actions.filter(
+      (action) => resource.actionBindings.get(action.id)?.kind === "plugin-add",
+    );
+    const filesystemFinal = await adapter.observe(resource.finalRequest, { mutationStarted: true });
+    if (
+      filesystemFinal.requestIdentity !== resource.finalRequest.requestIdentity ||
+      pushStateFingerprint(filesystemFinal) !== resource.filesystemPostFingerprint
+    )
+      throw new ExecutionError("Push filesystem target does not match the planned post-state");
+    await session?.commit();
+    committed = session !== undefined;
+    for (const action of effectActions) {
+      const binding = resource.actionBindings.get(action.id);
+      if (binding?.kind === "plugin-add") {
+        try {
+          await session?.applyEffect(action, binding);
+        } catch (error) {
+          throw new ExecutionError("committed_with_failed_effects", { cause: error });
+        }
+      }
+    }
+    const final = await adapter.observe(resource.finalRequest, { mutationStarted: true });
     if (
       final.requestIdentity !== resource.finalRequest.requestIdentity ||
       pushStateFingerprint(final) !== planned.plan.stagedPostFingerprint
     )
-      throw new Error("Push target does not match the planned post-state");
+      throw new ExecutionError("Push target does not match the planned post-state");
+    await session?.verifyCommit();
     resources.delete(planned);
+    completed = true;
   } catch (error) {
-    primaryError = error;
+    failures.push(error);
+    committed ||= session?.isCommitted() === true;
+    if (committed) {
+      const message =
+        error instanceof ExecutionError && error.message === "committed_with_failed_effects"
+          ? "committed_with_failed_effects"
+          : error instanceof ExecutionError && error.message.includes("retention_cleanup_pending")
+            ? "committed_with_retention_cleanup_pending"
+            : "committed_verification_failed";
+      failures[0] = new ExecutionError(message, { cause: error });
+      if (message === "committed_with_failed_effects" && session) {
+        try {
+          await session.acknowledgeFailedEffects();
+          await session.verifyCommit();
+          await session.cleanup();
+        } catch (recoveryError) {
+          failures.push(recoveryError);
+        }
+      }
+      session = undefined;
+    } else if (session) {
+      if (mutationStarted && !(failures[0] instanceof ExecutionError))
+        failures[0] = new ExecutionError("Push execution failed after mutation started", {
+          cause: error,
+        });
+      try {
+        await session.abort();
+      } catch (recoveryError) {
+        failures.push(recoveryError);
+        session = undefined;
+      }
+      if (session) {
+        try {
+          const restored = await adapter.observe(resource.beforeRequest, { mutationStarted: true });
+          if (
+            restored.requestIdentity !== resource.beforeRequest.requestIdentity ||
+            pushStateFingerprint(restored) !== planned.plan.targetFingerprint
+          )
+            throw new ExecutionError("Rollback did not restore the planned target state");
+          await session.verifyRollback();
+        } catch (recoveryError) {
+          failures.push(recoveryError);
+          session = undefined;
+        }
+      }
+    }
   }
-  let cleanupError: unknown;
-  try {
-    await session?.cleanup();
-  } catch (error) {
-    cleanupError = error;
+  if (session) {
+    try {
+      await session.cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
   }
   try {
     await staged?.cleanup();
   } catch (error) {
-    cleanupError ??= error;
+    failures.push(error);
   }
-  if (primaryError) throw primaryError;
-  if (cleanupError) throw cleanupError;
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new ExecutionError("Push failed with recovery or cleanup errors", {
+      cause: new AggregateError(failures),
+    });
+  if (!completed) throw new ExecutionError("Push did not reach a terminal outcome");
 }

@@ -24,7 +24,7 @@ import time
 
 VERSION = 1
 SAFE_NAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+@-")
-TERMINAL = ("committed", "aborted", "cancelled")
+TERMINAL = ("committed", "committed_with_failed_effects", "aborted", "cancelled")
 ACTIVE_WORKSPACE_FD = None
 ACTIVE_CHILD = None
 BACKUP_KEEP = 5
@@ -1265,6 +1265,9 @@ def prepare(req, workspace_fd):
     if (canonical(manifest) != manifest_bytes or not isinstance(actions, list) or
             len(actions) > MAX_ACTIONS):
         fail("invalid transaction manifest")
+    effects = manifest.get("effects", [])
+    if not isinstance(effects, list) or len(actions) + len(effects) > MAX_ACTIONS:
+        fail("invalid transaction effects")
     token = manifest.get("token")
     home = manifest.get("home")
     if not isinstance(token, str) or len(token) != 64 or any(c not in "0123456789abcdef" for c in token):
@@ -1288,7 +1291,6 @@ def prepare(req, workspace_fd):
         os.mkdir("backups", 0o700, dir_fd=workspace_fd)
         backups_fd = descend(workspace_fd, ["backups"])
         seen = set()
-        target_keys = set()
         pinned_commands = {}
         for index, action in enumerate(actions):
             action_id = action.get("id") if isinstance(action, dict) else None
@@ -1301,32 +1303,33 @@ def prepare(req, workspace_fd):
                 parts = [".claude.json"]
             elif action.get("kind") in ("overlay-group", "symlink-view"):
                 parts = live_parts(logical)
-            elif action.get("kind") == "plugin-add":
-                parts = []
             else:
                 fail("invalid action kind")
             if parts:
-                key = tuple(parts)
-                if key in target_keys:
-                    fail("duplicate live action target")
-                target_keys.add(key)
                 source_name = "%06d" % index
                 records.append({"parts": parts, "source": source_name, "type": snapshot(home_fd, parts, backups_fd, source_name), "retained": None})
-            else:
-                plugin = action.get("pluginId")
-                command = action.get("codexCommand")
-                if not isinstance(plugin, str) or not plugin or "\x00" in plugin:
-                    fail("invalid plugin id")
-                if not isinstance(command, str) or not command.startswith("/"):
-                    fail("invalid Codex command")
-                pinned = pinned_commands.get(command)
-                if pinned is None:
-                    pinned = pin_executable(home_fd, token, index, command)
-                    pinned_commands[command] = pinned
-                records.append({"parts": [], "source": "", "type": "plugin", "retained": None,
-                                "original": command, "pinned": pinned["pinned"],
-                                "pinnedPath": home + "/" + transaction_state_name(token) + "/" + pinned["pinned"],
-                                "sha256": pinned["sha256"]})
+        effect_records = []
+        for offset, effect in enumerate(effects):
+            effect_id = effect.get("id") if isinstance(effect, dict) else None
+            if (not isinstance(effect, dict) or effect.get("kind") != "plugin-add" or
+                    not isinstance(effect_id, str) or not effect_id or
+                    len(effect_id.encode("utf-8")) > 1024 or effect_id in seen):
+                fail("invalid or duplicate effect")
+            seen.add(effect_id)
+            plugin = effect.get("pluginId")
+            command = effect.get("codexCommand")
+            if not isinstance(plugin, str) or not plugin or "\x00" in plugin:
+                fail("invalid plugin id")
+            if not isinstance(command, str) or not command.startswith("/"):
+                fail("invalid Codex command")
+            pinned = pinned_commands.get(command)
+            if pinned is None:
+                pinned = pin_executable(home_fd, token, len(actions) + offset, command)
+                pinned_commands[command] = pinned
+            effect_records.append({"id": effect_id, "pluginId": plugin, "original": command,
+                                   "pinned": pinned["pinned"],
+                                   "pinnedPath": home + "/" + transaction_state_name(token) + "/" + pinned["pinned"],
+                                   "sha256": pinned["sha256"], "status": "pending"})
         for record in records:
             if record["parts"]:
                 record["retained"] = install_retained_backup(home_fd, record["parts"], backups_fd, record["source"], record["type"])
@@ -1335,7 +1338,9 @@ def prepare(req, workspace_fd):
                  "workspaceIdentity": [workspace_stat.st_dev, workspace_stat.st_ino],
                  "helperSha256": req["helperSha256"], "pythonPath": req["pythonPath"],
                  "manifest": manifest, "extractInventory": extract_inventory, "records": records,
-                 "next": 0, "inflight": None, "plugins": []}
+                 "next": 0, "inflight": None, "effectNext": 0, "effectInflight": None,
+                 "effectRecords": effect_records, "retentionPending": [], "terminalError": None,
+                 "verified": None, "effectsAcknowledged": False}
         save_state(workspace_fd, state, secret)
     except Exception:
         old_active_fd = ACTIVE_WORKSPACE_FD
@@ -1387,7 +1392,8 @@ def assert_session(req, workspace_fd):
         current_home = os.fstat(home_fd)
         if [current_home.st_dev, current_home.st_ino] != state["homeIdentity"]:
             fail("transaction HOME changed")
-        assert_lock(home_fd, state["token"], allow_absent=state["status"] in TERMINAL)
+        assert_lock(home_fd, state["token"],
+                    allow_absent=state.get("verified") is not None and not state.get("retentionPending"))
     finally:
         os.close(home_fd)
     return state, secret
@@ -1462,20 +1468,6 @@ def apply(req, workspace_fd):
                         raise
             finally:
                 os.close(target)
-        elif kind == "plugin-add":
-            plugin = action.get("pluginId")
-            if not isinstance(plugin, str) or not plugin or "\x00" in plugin:
-                fail("invalid Codex command")
-            # Record compensating work before starting the external mutation.
-            # A failed/terminated add is allowed to make remove a no-op.
-            plugin_record = {**state["records"][index], "id": plugin, "remove": "pending"}
-            state["plugins"].append(plugin_record)
-            save_state(workspace_fd, state, secret)
-            process = start_pinned_plugin(home_fd, state["token"], plugin_record,
-                                          ["plugin", "add", plugin, "--json"])
-            wait_plugin(process)
-            if process.returncode:
-                fail("Codex plugin add failed")
         state["next"] = index + 1
         state["inflight"] = None
         save_state(workspace_fd, state, secret)
@@ -1488,22 +1480,6 @@ def rollback(workspace_fd, state, secret, status):
     home_fd = open_home(state["home"])
     assert_lock(home_fd, state["token"])
     try:
-        for plugin in reversed(state["plugins"]):
-            if plugin.get("remove") == "complete":
-                continue
-            if not plugin_is_installed(home_fd, state["token"], plugin, plugin["id"]):
-                plugin["remove"] = "complete"
-                save_state(workspace_fd, state, secret)
-                continue
-            plugin["remove"] = "removing"
-            save_state(workspace_fd, state, secret)
-            process = start_pinned_plugin(home_fd, state["token"], plugin,
-                                          ["plugin", "remove", plugin["id"], "--json"])
-            wait_plugin(process, cancellable=False)
-            if plugin_is_installed(home_fd, state["token"], plugin, plugin["id"]):
-                fail("Codex plugin remove failed; retained backups preserved")
-            plugin["remove"] = "complete"
-            save_state(workspace_fd, state, secret)
         count = state["next"] + (1 if state.get("inflight") is not None else 0)
         backups_fd = descend(workspace_fd, ["backups"])
         try:
@@ -1512,14 +1488,82 @@ def rollback(workspace_fd, state, secret, status):
                     restore_snapshot(home_fd, record["parts"], backups_fd, record["source"], record["type"])
         finally:
             os.close(backups_fd)
-        for record in reversed(state["records"]):
-            remove_retained(home_fd, record)
         state["status"] = status
         save_state(workspace_fd, state, secret)
-        release_lock(home_fd, state["token"])
     finally:
         os.close(home_fd)
     return {"status": status}
+
+
+def clean_terminal_retention(workspace_fd, state, secret, prune):
+    home_fd = open_home(state["home"])
+    try:
+        pending = list(state.get("retentionPending", []))
+        for index in pending:
+            if prune:
+                prune_retained(home_fd, state["records"][index])
+            else:
+                remove_retained(home_fd, state["records"][index])
+            state["retentionPending"].remove(index)
+            save_state(workspace_fd, state, secret)
+    finally:
+        os.close(home_fd)
+
+
+def terminal_result(workspace_fd, state, secret):
+    try:
+        clean_terminal_retention(workspace_fd, state, secret, state["verified"] == "commit")
+        home_fd = open_home(state["home"])
+        try:
+            release_lock(home_fd, state["token"])
+        finally:
+            os.close(home_fd)
+        return {"status": state["status"], "verified": state["verified"]}
+    except Exception as error:
+        return {"status": state["status"], "retentionPending": True,
+                "message": str(error) or error.__class__.__name__}
+
+
+def apply_effect(req, workspace_fd):
+    state, secret = assert_session(req, workspace_fd)
+    if state["status"] != "committed":
+        fail("effects require a committed transaction")
+    index = state["effectNext"]
+    effects = state["manifest"].get("effects", [])
+    if index >= len(effects):
+        fail("all effects already applied")
+    effect = effects[index]
+    if req.get("actionId") != effect["id"]:
+        fail("effect is out of order")
+    record = state["effectRecords"][index]
+    home_fd = open_home(state["home"])
+    try:
+        if state.get("effectInflight") is not None and plugin_is_installed(
+                home_fd, state["token"], record, record["pluginId"]):
+            record["status"] = "complete"
+            state["effectNext"] = index + 1
+            state["effectInflight"] = None
+            save_state(workspace_fd, state, secret)
+            return {"status": "committed", "appliedEffect": state["effectNext"]}
+        state["effectInflight"] = effect["id"]
+        record["status"] = "running"
+        save_state(workspace_fd, state, secret)
+        process = start_pinned_plugin(home_fd, state["token"], record,
+                                      ["plugin", "add", record["pluginId"], "--json"])
+        wait_plugin(process)
+        if process.returncode:
+            record["status"] = "failed"
+            state["terminalError"] = "Codex plugin add failed (%s)" % process.returncode
+            save_state(workspace_fd, state, secret)
+            fail("committed_with_failed_effects: Codex plugin add failed (%s)" % process.returncode)
+        record["status"] = "complete"
+        state["effectNext"] = index + 1
+        state["effectInflight"] = None
+        state["terminalError"] = None
+        save_state(workspace_fd, state, secret)
+    finally:
+        os.close(home_fd)
+    return {"status": "committed", "appliedEffect": state["effectNext"]}
 
 
 def finish(req, op, workspace_fd):
@@ -1530,24 +1574,12 @@ def finish(req, op, workspace_fd):
             os.fsync(workspace_fd)
         except FileNotFoundError:
             pass
-        home_fd = open_home(state["home"])
-        try:
-            release_lock(home_fd, state["token"])
-        finally:
-            os.close(home_fd)
-        return {"status": state["status"]}
+        return {"status": state["status"], "verified": state.get("verified")}
     if op == "commit":
         if state["next"] != len(state["manifest"]["actions"]):
             fail("cannot commit incomplete transaction")
-        home_fd = open_home(state["home"])
-        try:
-            for record in state["records"]:
-                prune_retained(home_fd, record)
-            state["status"] = "committed"
-            save_state(workspace_fd, state, secret)
-            release_lock(home_fd, state["token"])
-        finally:
-            os.close(home_fd)
+        state["status"] = "committed"
+        save_state(workspace_fd, state, secret)
         return {"status": "committed"}
     if op == "cancel":
         try: os.unlink("cancel", dir_fd=workspace_fd)
@@ -1555,11 +1587,49 @@ def finish(req, op, workspace_fd):
     return rollback(workspace_fd, state, secret, "cancelled" if op == "cancel" else "aborted")
 
 
+def acknowledge_failed_effects(req, workspace_fd):
+    state, secret = assert_session(req, workspace_fd)
+    if state["status"] == "committed_with_failed_effects" and state.get("effectsAcknowledged"):
+        return {"status": state["status"], "failedEffects": True}
+    if state["status"] != "committed" or not state.get("terminalError"):
+        fail("transaction has no failed effects to acknowledge")
+    if not any(record.get("status") == "failed" for record in state.get("effectRecords", [])):
+        fail("failed effect receipt is absent")
+    state["status"] = "committed_with_failed_effects"
+    state["effectsAcknowledged"] = True
+    save_state(workspace_fd, state, secret)
+    return {"status": state["status"], "failedEffects": True}
+
+
+def verify_terminal(req, workspace_fd, verification):
+    state, secret = assert_session(req, workspace_fd)
+    expected = (("committed", "committed_with_failed_effects") if verification == "commit"
+                else ("aborted", "cancelled"))
+    if ((isinstance(expected, tuple) and state["status"] not in expected) or
+            (isinstance(expected, str) and state["status"] != expected)):
+        fail("verification does not match transaction outcome")
+    if (verification == "commit" and
+            state.get("effectNext", 0) != len(state["manifest"].get("effects", [])) and
+            not (state["status"] == "committed_with_failed_effects" and state.get("effectsAcknowledged"))):
+        fail("cannot verify incomplete effects")
+    if state.get("verified") not in (None, verification):
+        fail("transaction has a different verification acknowledgement")
+    if state.get("verified") is None:
+        state["verified"] = verification
+        state["retentionPending"] = list(range(len(state["records"])))
+        save_state(workspace_fd, state, secret)
+    return terminal_result(workspace_fd, state, secret)
+
+
 def cleanup(req, workspace_fd):
     workspace = req.get("workspace")
     state, _secret = assert_session(req, workspace_fd)
     if state["status"] not in TERMINAL:
         fail("cleanup requires a terminal transaction")
+    if state.get("verified") is None:
+        fail("cleanup requires verified terminal state")
+    if state.get("retentionPending"):
+        fail("terminal retention cleanup is incomplete")
     home_fd = open_home(state["home"])
     try:
         cleanup_tombstone(home_fd, state["token"], workspace, state["workspaceIdentity"], _secret)
@@ -1569,6 +1639,22 @@ def cleanup(req, workspace_fd):
     finally:
         os.close(home_fd)
     return {"status": "cleaned"}
+
+
+def discard(req, workspace_fd):
+    try:
+        os.stat("state.json", dir_fd=workspace_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        fail("prepared transaction cannot be discarded")
+    raw = read_fd_file(workspace_fd, "manifest.json", MAX_MANIFEST_BYTES)
+    manifest = json.loads(raw.decode("utf-8"))
+    if (canonical(manifest) != raw or manifest.get("token") != req.get("token") or
+            manifest.get("home") != req.get("home")):
+        fail("discard authentication mismatch")
+    remove_workspace(req.get("workspace"), workspace_fd)
+    return {"status": "discarded"}
 
 
 def main():
@@ -1620,11 +1706,22 @@ def main():
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         if op == "prepare": result = prepare(req, workspace_fd)
         elif op == "apply": result = apply(req, workspace_fd)
+        elif op == "apply-effect": result = apply_effect(req, workspace_fd)
+        elif op == "acknowledge-failed-effects": result = acknowledge_failed_effects(req, workspace_fd)
+        elif op == "verify-commit": result = verify_terminal(req, workspace_fd, "commit")
+        elif op == "verify-rollback": result = verify_terminal(req, workspace_fd, "rollback")
         elif op in ("commit", "cancel", "abort"): result = finish(req, op, workspace_fd)
         elif op == "cleanup": result = cleanup(req, workspace_fd)
+        elif op == "discard": result = discard(req, workspace_fd)
         elif op == "status":
             state, _secret = assert_session(req, workspace_fd)
-            result = {"status": state["status"], "applied": state["next"]}
+            result = {"status": state["status"], "applied": state["next"],
+                      "appliedEffect": state.get("effectNext", 0),
+                      "effectInflight": state.get("effectInflight"),
+                      "terminalError": state.get("terminalError"),
+                      "failedEffects": state.get("effectsAcknowledged", False),
+                      "verified": state.get("verified"),
+                      "retentionPending": bool(state.get("retentionPending"))}
         else: fail("unknown operation")
     finally:
         os.close(lock_fd)

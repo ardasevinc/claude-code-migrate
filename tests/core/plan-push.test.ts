@@ -165,10 +165,21 @@ describe("push migration planning", () => {
             bindingOrder.push(binding.kind);
             if (binding.kind === "write-claude-mcp") throw new Error("stop after MCP write");
           },
+          commit: async () => {},
+          applyEffect: async () => {},
+          acknowledgeFailedEffects: async () => {},
+          abort: async () => {},
+          isCommitted: () => false,
+          verifyCommit: async () => {},
+          verifyRollback: async () => {},
           cleanup: async () => {},
         }),
       }),
-    ).rejects.toThrow("stop after MCP write");
+    ).rejects.toMatchObject({
+      name: "ExecutionError",
+      message: "Push execution failed after mutation started",
+      cause: expect.objectContaining({ message: "stop after MCP write" }),
+    });
     expect(bindingOrder.indexOf("overlay-group")).toBeGreaterThanOrEqual(0);
     expect(bindingOrder.indexOf("write-claude-mcp")).toBeGreaterThan(
       bindingOrder.indexOf("overlay-group"),
@@ -275,6 +286,13 @@ describe("push migration planning", () => {
       observe: async (request) => {
         observations += 1;
         if (observations === 1) return { ...target, requestIdentity: request.requestIdentity };
+        if (observations === 2)
+          return {
+            ...target,
+            inventory: [finalEntry],
+            facts: { ...target.facts, captures: new Map([["codex-config", config]]) },
+            requestIdentity: request.requestIdentity,
+          };
         return {
           ...target,
           inventory: [finalEntry],
@@ -294,12 +312,81 @@ describe("push migration planning", () => {
         apply: async (_action, binding) => {
           if (binding.kind === "plugin-add") pluginBindings.push(binding);
         },
+        commit: async () => {},
+        applyEffect: async (_action, binding) => {
+          if (binding.kind === "plugin-add") pluginBindings.push(binding);
+        },
+        acknowledgeFailedEffects: async () => {},
+        abort: async () => {},
+        isCommitted: () => false,
+        verifyCommit: async () => {},
+        verifyRollback: async () => {},
         cleanup: async () => {},
       }),
     });
     expect(pluginBindings).toEqual([
       { kind: "plugin-add", pluginId: "demo@market", codexCommand: "/usr/local/bin/codex" },
     ]);
+
+    const failed = await planPush({
+      files: [
+        {
+          sourcePath: "/unused/config",
+          relativePath: "codex/config.toml",
+          isSymlink: false,
+          mcpServersOnly: config.toString(),
+        },
+      ],
+      host: "target",
+      providers: ["codex"],
+      observation: target,
+    });
+    let committed = false;
+    let aborts = 0;
+    let failedAcknowledgements = 0;
+    let cleanups = 0;
+    let failureObservations = 0;
+    await expect(
+      executePlannedPush(failed, {
+        observe: async (request) => {
+          failureObservations += 1;
+          return failureObservations === 1
+            ? { ...target, requestIdentity: request.requestIdentity }
+            : {
+                ...target,
+                inventory: [finalEntry],
+                facts: { ...target.facts, captures: new Map([["codex-config", config]]) },
+                requestIdentity: request.requestIdentity,
+              };
+        },
+        prepare: async () => ({
+          apply: async () => {},
+          commit: async () => {
+            committed = true;
+          },
+          applyEffect: async () => {
+            throw new Error("effect failed");
+          },
+          acknowledgeFailedEffects: async () => {
+            failedAcknowledgements += 1;
+          },
+          abort: async () => {
+            aborts += 1;
+          },
+          isCommitted: () => committed,
+          verifyCommit: async () => {},
+          verifyRollback: async () => {},
+          cleanup: async () => {
+            cleanups += 1;
+          },
+        }),
+      }),
+    ).rejects.toMatchObject({ name: "ExecutionError", message: "committed_with_failed_effects" });
+    expect({ aborts, cleanups, failedAcknowledgements }).toEqual({
+      aborts: 0,
+      cleanups: 1,
+      failedAcknowledgements: 1,
+    });
   });
 
   it("executes sealed bindings exactly once and rejects forged plans", async () => {
@@ -341,12 +428,19 @@ describe("push migration planning", () => {
         apply: async (action: (typeof planned.plan.actions)[number], binding: { kind: string }) => {
           calls.push(`${action.id}:${binding.kind}`);
         },
+        commit: async () => {},
+        applyEffect: async () => {},
+        acknowledgeFailedEffects: async () => {},
+        abort: async () => {},
+        isCommitted: () => false,
+        verifyCommit: async () => {},
+        verifyRollback: async () => {},
         cleanup: async () => {},
       }),
     };
     await executePlannedPush(planned, adapter);
     expect(calls).toEqual([]);
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(JSON.stringify(requests)).toContain("shared/agents/skills");
     await expect(executePlannedPush(planned, adapter)).rejects.toThrow("already consumed");
     await expect(executePlannedPush({ plan: planned.plan }, adapter)).rejects.toThrow("forged");
@@ -383,6 +477,13 @@ describe("push migration planning", () => {
           apply: async () => {
             throw new Error("apply failed");
           },
+          commit: async () => {},
+          applyEffect: async () => {},
+          acknowledgeFailedEffects: async () => {},
+          abort: async () => {},
+          isCommitted: () => false,
+          verifyCommit: async () => {},
+          verifyRollback: async () => {},
           cleanup: async () => {
             throw new Error("remote cleanup failed");
           },
@@ -393,7 +494,9 @@ describe("push migration planning", () => {
     await expect(executePlannedPush(planned, adapter)).rejects.toThrow("upload failed");
     expect(preparations).toBe(2);
     failPreparation = false;
-    await expect(executePlannedPush(planned, adapter)).rejects.toThrow("apply failed");
+    await expect(executePlannedPush(planned, adapter)).rejects.toThrow(
+      "Push failed with recovery or cleanup errors",
+    );
     expect(await lstat(stagedPath as string).catch(() => null)).toBeNull();
     await expect(executePlannedPush(planned, adapter)).rejects.toThrow("already consumed");
   });

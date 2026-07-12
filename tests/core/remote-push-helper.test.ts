@@ -92,8 +92,9 @@ async function fixture(actions: Action[], entries: Record<string, string> = {}) 
   const archivePath = join(workspace, "archive.tar.gz");
   const archiveSha256 = await archive(archivePath, entries);
   const manifest = {
-    actions,
+    actions: actions.filter((action) => action.kind !== "plugin-add"),
     archiveSha256,
+    effects: actions.filter((action) => action.kind === "plugin-add"),
     home,
     token: "a".repeat(64),
   };
@@ -449,6 +450,11 @@ describe("remote push helper", () => {
     expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "aborted" } });
     expect(await readFile(target, "utf8")).toBe("old\n");
     expect((await lstat(target)).mode & 0o777).toBe(0o640);
+    expect(await lstat(join(dirname(target), sibling as string)).catch(() => null)).not.toBeNull();
+    expect(invoke(session(f, "verify-rollback"))).toMatchObject({
+      code: 0,
+      body: { status: "aborted", verified: "rollback" },
+    });
     expect(await lstat(join(dirname(target), sibling as string)).catch(() => null)).toBeNull();
     expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "aborted" } });
     expect(invoke(session(f, "cleanup"))).toMatchObject({ code: 0, body: { status: "cleaned" } });
@@ -548,6 +554,15 @@ describe("remote push helper", () => {
     expect(await readFile(join(parent, "config.toml.backup-43"), "utf8")).toBe("old\n");
     expect(invoke(session(f, "apply", { actionId: action.id })).code).toBe(0);
     expect(invoke(session(f, "commit"))).toMatchObject({ code: 0, body: { status: "committed" } });
+    expect(
+      (await readdir(parent)).filter(
+        (name) => /^config\.toml\.backup-\d+$/.test(name) && name !== "config.toml.backup-0",
+      ),
+    ).toHaveLength(8);
+    expect(invoke(session(f, "verify-commit"))).toMatchObject({
+      code: 0,
+      body: { status: "committed", verified: "commit" },
+    });
     const names = await readdir(parent);
     expect(
       names.filter(
@@ -586,13 +601,12 @@ describe("remote push helper", () => {
       body: { status: "committed" },
     });
     expect(await lstat(join(terminal.workspace, "cancel")).catch(() => null)).toBeNull();
-    await writeFile(join(terminal.home, ".ccm-push.lock"), "c".repeat(64), { mode: 0o600 });
-    expect(invoke(session(terminal, "cleanup"))).toMatchObject({
-      code: 64,
-      body: { message: "transaction does not own lock" },
+    expect(await readFile(join(terminal.home, ".ccm-push.lock"), "utf8")).toBe(terminal.token);
+    expect(invoke(session(terminal, "verify-commit"))).toMatchObject({
+      code: 0,
+      body: { status: "committed", verified: "commit" },
     });
-    expect(await readFile(join(terminal.home, ".ccm-push.lock"), "utf8")).toBe("c".repeat(64));
-    await rm(join(terminal.home, ".ccm-push.lock"));
+    expect(await lstat(join(terminal.home, ".ccm-push.lock")).catch(() => null)).toBeNull();
     expect(invoke(session(terminal, "cleanup"))).toMatchObject({ code: 0 });
     expect(await lstat(transactionState).catch(() => null)).toBeNull();
   });
@@ -730,309 +744,127 @@ describe("remote push helper", () => {
     });
   });
 
-  it("serializes operations, exposes inflight state, cancels plugin work, and compensates it", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-helper-")));
+  it("commits reversible state before effects and never rolls committed files back", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-effect-command-")));
     roots.push(root);
-    const commandPath = join(root, "fake-codex.py");
-    const log = join(root, "plugin.log");
-    const installed = join(root, "installed");
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3
-import json,os,sys,time
-op=sys.argv[2]
-if op=="list":
-    print(json.dumps({"installed":[{"pluginId":"demo@test","installed":True}] if os.path.exists(${JSON.stringify(installed)}) else [],"available":[]})); sys.exit()
-with open(${JSON.stringify(log)},"a") as f: f.write(op+"\\n")
-if op=="add": open(${JSON.stringify(installed)},"w").close(); time.sleep(10)
-if op=="remove":
-    try: os.unlink(${JSON.stringify(installed)})
-    except FileNotFoundError: pass
-`,
-    );
+    const marker = join(root, "added");
+    const commandPath = join(root, "codex");
+    await writeFile(commandPath, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`);
     await chmod(commandPath, 0o755);
     const command = await realpath(commandPath);
+    const f = await fixture(
+      [
+        { id: "write", kind: "overlay-group", logicalGroup: "codex/config.toml" },
+        { codexCommand: command, id: "effect", kind: "plugin-add", pluginId: "demo@test" },
+      ],
+      { "codex/config.toml": "new" },
+    );
+    await mkdir(join(f.home, ".codex"), { recursive: true });
+    await writeFile(join(f.home, ".codex", "config.toml"), "old");
+    expect(invoke(f.prepare).code).toBe(0);
+    expect(invoke(session(f, "apply", { actionId: "write" })).code).toBe(0);
+    expect(invoke(session(f, "commit"))).toMatchObject({ code: 0, body: { status: "committed" } });
+    expect(await readFile(join(f.home, ".codex", "config.toml"), "utf8")).toBe("new");
+    const competing = await fixture([], {});
+    const competingManifestPath = join(competing.workspace, "manifest.json");
+    const competingManifest = JSON.parse(await readFile(competingManifestPath, "utf8"));
+    competingManifest.home = f.home;
+    competingManifest.token = "b".repeat(64);
+    const competingBytes = canonical(competingManifest);
+    await writeFile(competingManifestPath, competingBytes);
+    competing.prepare.home = f.home;
+    competing.prepare.manifestSha256 = sha(competingBytes);
+    competing.home = f.home;
+    competing.token = competingManifest.token;
+    expect(invoke(competing.prepare)).toMatchObject({
+      code: 64,
+      body: { message: "another push transaction holds the lock" },
+    });
+    expect(invoke(session(f, "apply-effect", { actionId: "effect" }))).toMatchObject({
+      code: 0,
+      body: { appliedEffect: 1, status: "committed" },
+    });
+    expect(await readFile(marker, "utf8")).toBe("");
+    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "committed" } });
+    expect(await readFile(join(f.home, ".codex", "config.toml"), "utf8")).toBe("new");
+    expect(invoke(session(f, "verify-commit"))).toMatchObject({
+      code: 0,
+      body: { status: "committed", verified: "commit" },
+    });
+    expect(invoke(competing.prepare)).toMatchObject({ code: 0, body: { status: "prepared" } });
+    expect(invoke(session(competing, "abort"))).toMatchObject({ code: 0 });
+    expect(invoke(session(competing, "verify-rollback"))).toMatchObject({ code: 0 });
+    expect(invoke(session(competing, "cleanup"))).toMatchObject({ code: 0 });
+    expect(invoke(session(f, "cleanup"))).toMatchObject({ code: 0, body: { status: "cleaned" } });
+  });
+
+  it("requires explicit failed-effect acknowledgement before verified cleanup", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-effect-failure-")));
+    roots.push(root);
+    const commandPath = join(root, "codex");
+    await writeFile(commandPath, "#!/bin/sh\nexit 7\n");
+    await chmod(commandPath, 0o755);
     const f = await fixture([
-      { codexCommand: command, id: "plugin", kind: "plugin-add", pluginId: "demo@test" },
+      {
+        codexCommand: await realpath(commandPath),
+        id: "failed-effect",
+        kind: "plugin-add",
+        pluginId: "demo@test",
+      },
     ]);
     expect(invoke(f.prepare).code).toBe(0);
-    const payload = Buffer.from(
-      canonical(runtimeRequest(session(f, "apply", { actionId: "plugin" }))),
-    ).toString("base64");
-    const child = spawn(python, launchArgs(payload), {
-      stdio: ["ignore", "pipe", "pipe"],
+    expect(invoke(session(f, "commit")).code).toBe(0);
+    expect(invoke(session(f, "apply-effect", { actionId: "failed-effect" }))).toMatchObject({
+      code: 64,
+      body: { error: "blocked", message: expect.stringContaining("committed_with_failed_effects") },
     });
-    await waitFor(log);
     const state = JSON.parse(await readFile(join(f.workspace, "state.json"), "utf8")).payload;
-    expect(state).toMatchObject({ inflight: "plugin", next: 0 });
-    const cancelled = invoke(session(f, "cancel"));
-    expect(cancelled).toMatchObject({ code: 0, body: { status: "cancelled" } });
-    const exit = await new Promise<number | null>((resolve) => child.on("close", resolve));
-    expect(exit).not.toBe(0);
-    expect(await readFile(log, "utf8")).toBe("add\nremove\n");
+    expect(state).toMatchObject({
+      status: "committed",
+      terminalError: expect.stringContaining("Codex plugin add failed"),
+      effectRecords: [{ id: "failed-effect", status: "failed" }],
+    });
+    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "committed" } });
+    expect(invoke(session(f, "acknowledge-failed-effects"))).toMatchObject({
+      code: 0,
+      body: { status: "committed_with_failed_effects", failedEffects: true },
+    });
+    expect(invoke(session(f, "verify-commit"))).toMatchObject({
+      code: 0,
+      body: { status: "committed_with_failed_effects", verified: "commit" },
+    });
+    expect(invoke(session(f, "cleanup"))).toMatchObject({ code: 0 });
     expect(await lstat(join(f.home, ".ccm-push.lock")).catch(() => null)).toBeNull();
   });
 
-  it("executes the protected pinned plugin bytes after an in-place command overwrite", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-pinned-")));
-    roots.push(root);
-    const commandPath = join(root, "fake-codex.py");
-    const installed = join(root, "installed");
-    const hostile = join(root, "hostile");
-    const safeCommand = `#!/usr/bin/env python3
-import json,os,sys
-if sys.argv[2]=="list": print(json.dumps({"installed":[{"pluginId":"pinned","installed":True}] if os.path.exists(${JSON.stringify(installed)}) else [],"available":[]}))
-elif sys.argv[2]=="add": open(${JSON.stringify(installed)},"w").close()
-elif sys.argv[2]=="remove": os.unlink(${JSON.stringify(installed)})
-`;
-    await writeFile(commandPath, safeCommand);
-    await chmod(commandPath, 0o755);
-    const command = await realpath(commandPath);
-    const f = await fixture([
-      { codexCommand: command, id: "pinned-add", kind: "plugin-add", pluginId: "pinned" },
-    ]);
-    expect(invoke(f.prepare).code).toBe(0);
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3\nopen(${JSON.stringify(hostile)},"w").close()\n`,
-      { mode: 0o755 },
-    );
-    expect(invoke(session(f, "apply", { actionId: "pinned-add" }))).toMatchObject({ code: 0 });
-    expect(await lstat(hostile).catch(() => null)).toBeNull();
-    expect(await lstat(installed)).not.toBeNull();
-    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0 });
-    expect(await lstat(installed).catch(() => null)).toBeNull();
-
-    await writeFile(commandPath, safeCommand, { mode: 0o755 });
-    const redirected = await fixture([
-      { codexCommand: command, id: "redirect-add", kind: "plugin-add", pluginId: "pinned" },
-    ]);
-    expect(invoke(redirected.prepare).code).toBe(0);
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3\nopen(${JSON.stringify(hostile)},"w").close()\n`,
-      { mode: 0o755 },
-    );
-    const statePath = join(redirected.workspace, "state.json");
-    const forged = JSON.parse(await readFile(statePath, "utf8"));
-    forged.payload.records[0].pinnedPath = commandPath;
-    forged.sha256 = createHmac("sha256", redirected.token)
-      .update(canonical(forged.payload))
-      .digest("hex");
-    await writeFile(statePath, canonical(forged));
-    expect(invoke(session(redirected, "apply", { actionId: "redirect-add" }))).toMatchObject({
-      code: 64,
-      body: { message: "invalid transaction state" },
-    });
-    expect(await lstat(hostile).catch(() => null)).toBeNull();
-  });
-
-  it("rejects malformed or runtime-oversized Codex plugin list output", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-list-schema-")));
-    roots.push(root);
-    const commandPath = join(root, "fake-codex.py");
-    const installed = join(root, "installed");
-    const mode = join(root, "mode");
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3
-import json,os,sys
-op=sys.argv[2]
-if op=="list":
-    mode=open(${JSON.stringify(mode)}).read()
-    if mode=="malformed": print(json.dumps({"installed":[{"pluginId":"schema","installed":False}],"available":[{"pluginId":"schema","installed":False}],"extra":[]}))
-    elif mode=="huge": sys.stdout.write("x"*(5*1024*1024))
-    else: print(json.dumps({"installed":[{"pluginId":"schema","installed":True}] if os.path.exists(${JSON.stringify(installed)}) else [],"available":[]}))
-elif op=="add": open(${JSON.stringify(installed)},"w").close()
-elif op=="remove": os.unlink(${JSON.stringify(installed)})
-`,
-    );
-    await chmod(commandPath, 0o755);
-    await writeFile(mode, "malformed");
-    const command = await realpath(commandPath);
-    const f = await fixture([
-      { codexCommand: command, id: "schema-add", kind: "plugin-add", pluginId: "schema" },
-    ]);
-    expect(invoke(f.prepare).code).toBe(0);
-    expect(invoke(session(f, "apply", { actionId: "schema-add" })).code).toBe(0);
-    expect(invoke(session(f, "abort"))).toMatchObject({
-      code: 64,
-      body: { message: "invalid Codex plugin reconciliation output" },
-    });
-    await writeFile(mode, "huge");
-    expect(invoke(session(f, "abort"))).toMatchObject({
-      code: 64,
-      body: { message: "Codex plugin reconciliation output exceeds limit" },
-    });
-    await writeFile(mode, "normal");
-    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0 });
-  });
-
-  it("kills a plugin-list descendant that keeps stdout open after its parent exits", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-list-daemon-")));
-    roots.push(root);
-    const commandPath = join(root, "fake-codex.py");
-    const installed = join(root, "installed");
-    const daemonMode = join(root, "daemon-mode");
-    const orphan = join(root, "orphan");
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3
-import json,os,subprocess,sys
-op=sys.argv[2]
-if op=="list":
-    if os.path.exists(${JSON.stringify(daemonMode)}):
-        subprocess.Popen([sys.executable,"-c",${JSON.stringify(`import time;time.sleep(2);open(${JSON.stringify(orphan)},"w").close()`)}],stdout=sys.stdout)
-    print(json.dumps({"installed":[{"pluginId":"daemon","installed":True}] if os.path.exists(${JSON.stringify(installed)}) else [],"available":[]}))
-elif op=="add": open(${JSON.stringify(installed)},"w").close()
-elif op=="remove": os.unlink(${JSON.stringify(installed)})
-`,
-    );
-    await chmod(commandPath, 0o755);
-    const command = await realpath(commandPath);
-    const f = await fixture([
-      { codexCommand: command, id: "daemon-add", kind: "plugin-add", pluginId: "daemon" },
-    ]);
-    expect(invoke(f.prepare).code).toBe(0);
-    expect(invoke(session(f, "apply", { actionId: "daemon-add" })).code).toBe(0);
-    await writeFile(daemonMode, "1");
-    expect(invoke(session(f, "abort"))).toMatchObject({
-      code: 64,
-      body: { message: "Codex plugin reconciliation pipe remained open" },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    expect(await lstat(orphan).catch(() => null)).toBeNull();
-    await rm(daemonMode);
-    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0 });
-  });
-
-  it("persists per-plugin compensation progress across rollback retries", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-progress-")));
-    roots.push(root);
-    const commandPath = join(root, "fake-codex.py");
-    const log = join(root, "plugin.log");
-    const failed = join(root, "failed-once");
-    const installedFirst = join(root, "installed-first");
-    const installedSecond = join(root, "installed-second");
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3
-import json,os,sys
-op=sys.argv[2]; plugin=sys.argv[3]
-paths={"first":${JSON.stringify(installedFirst)},"second":${JSON.stringify(installedSecond)}}
-if op=="list":
-    print(json.dumps({"installed":[{"pluginId":p,"installed":True} for p,path in paths.items() if os.path.exists(path)],"available":[]})); sys.exit()
-with open(${JSON.stringify(log)},"a") as f: f.write(op+":"+plugin+"\\n")
-if op=="add": open(paths[plugin],"w").close()
-if op=="remove" and plugin=="first" and not os.path.exists(${JSON.stringify(failed)}):
-    open(${JSON.stringify(failed)},"w").close(); sys.exit(9)
-if op=="remove": os.unlink(paths[plugin])
-`,
-    );
-    await chmod(commandPath, 0o755);
-    const command = await realpath(commandPath);
-    const f = await fixture([
-      { codexCommand: command, id: "first-add", kind: "plugin-add", pluginId: "first" },
-      { codexCommand: command, id: "second-add", kind: "plugin-add", pluginId: "second" },
-    ]);
-    expect(invoke(f.prepare).code).toBe(0);
-    const preparedState = JSON.parse(
-      await readFile(join(f.workspace, "state.json"), "utf8"),
-    ).payload;
-    expect(preparedState.records[0].pinned).toBe(preparedState.records[1].pinned);
-    expect(
-      (await readdir(join(f.home, `.ccm-push-state-${f.token}`))).filter((name) =>
-        name.startsWith("plugin-"),
-      ),
-    ).toHaveLength(1);
-    expect(invoke(session(f, "apply", { actionId: "first-add" })).code).toBe(0);
-    expect(invoke(session(f, "apply", { actionId: "second-add" })).code).toBe(0);
-    expect(invoke(session(f, "abort"))).toMatchObject({
-      code: 64,
-      body: { message: "Codex plugin remove failed; retained backups preserved" },
-    });
-    const firstState = JSON.parse(await readFile(join(f.workspace, "state.json"), "utf8")).payload;
-    expect(firstState.plugins).toMatchObject([
-      { id: "first", original: command, remove: "removing" },
-      { id: "second", original: command, remove: "complete" },
-    ]);
-    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "aborted" } });
-    const lines = (await readFile(log, "utf8")).trim().split("\n");
-    expect(lines.filter((line) => line === "remove:second")).toHaveLength(1);
-    expect(lines.filter((line) => line === "remove:first")).toHaveLength(2);
-  });
-
-  it("reconciles an already-absent plugin after crashing between remove success and state save", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-crash-window-")));
-    roots.push(root);
-    const commandPath = join(root, "fake-codex.py");
-    const installed = join(root, "installed");
-    const absentQuery = join(root, "absent-query");
-    const removes = join(root, "removes");
-    await writeFile(
-      commandPath,
-      `#!/usr/bin/env python3
-import json,os,sys,time
-op=sys.argv[2]
-if op=="list":
-    present=os.path.exists(${JSON.stringify(installed)})
-    if not present: open(${JSON.stringify(absentQuery)},"w").close(); time.sleep(0.3)
-    print(json.dumps({"installed":[{"pluginId":"crashy","installed":True}] if present else [],"available":[]}))
-elif op=="add": open(${JSON.stringify(installed)},"w").close()
-elif op=="remove":
-    if not os.path.exists(${JSON.stringify(installed)}): sys.exit(17)
-    os.unlink(${JSON.stringify(installed)})
-    with open(${JSON.stringify(removes)},"a") as f: f.write("remove\\n")
-`,
-    );
-    await chmod(commandPath, 0o755);
-    const command = await realpath(commandPath);
-    const f = await fixture([
-      { codexCommand: command, id: "crashy-add", kind: "plugin-add", pluginId: "crashy" },
-    ]);
-    expect(invoke(f.prepare).code).toBe(0);
-    expect(invoke(session(f, "apply", { actionId: "crashy-add" })).code).toBe(0);
-    const payload = Buffer.from(canonical(runtimeRequest(session(f, "abort")))).toString("base64");
-    const child = spawn(python, launchArgs(payload), { stdio: ["ignore", "pipe", "pipe"] });
-    await waitFor(absentQuery);
-    child.kill("SIGKILL");
-    await new Promise<number | null>((resolve) => child.on("close", resolve));
-    const interrupted = JSON.parse(await readFile(join(f.workspace, "state.json"), "utf8")).payload;
-    expect(interrupted.plugins[0]).toMatchObject({ remove: "removing" });
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "aborted" } });
-    expect(await readFile(removes, "utf8")).toBe("remove\n");
-  });
-
-  it("kills the plugin process group on SIGTERM without orphaned late mutation", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-plugin-signal-")));
+  it("kills an interrupted post-commit effect process group without rolling back files", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-effect-signal-")));
     roots.push(root);
     const commandPath = join(root, "fake-codex.py");
     const started = join(root, "started");
     const orphan = join(root, "orphan");
-    const installed = join(root, "installed");
     await writeFile(
       commandPath,
       `#!/usr/bin/env python3
-import json,os,subprocess,sys,time
-if sys.argv[2]=="list":
-    print(json.dumps({"installed":[{"pluginId":"signal","installed":True}] if os.path.exists(${JSON.stringify(installed)}) else [],"available":[]})); sys.exit()
-if sys.argv[2]=="add":
-    open(${JSON.stringify(installed)},"w").close()
-    open(${JSON.stringify(started)},"w").close()
-    subprocess.Popen([sys.executable,"-c",${JSON.stringify(`import time;time.sleep(0.5);open(${JSON.stringify(orphan)},"w").close()`)}])
-    time.sleep(10)
-if sys.argv[2]=="remove": os.unlink(${JSON.stringify(installed)})
+import subprocess,sys,time
+open(${JSON.stringify(started)},"w").close()
+subprocess.Popen([sys.executable,"-c",${JSON.stringify(`import time;time.sleep(0.5);open(${JSON.stringify(orphan)},"w").close()`)}])
+time.sleep(10)
 `,
     );
     await chmod(commandPath, 0o755);
-    const command = await realpath(commandPath);
     const f = await fixture([
-      { codexCommand: command, id: "signal-add", kind: "plugin-add", pluginId: "signal" },
+      {
+        codexCommand: await realpath(commandPath),
+        id: "signal-effect",
+        kind: "plugin-add",
+        pluginId: "signal@test",
+      },
     ]);
     expect(invoke(f.prepare).code).toBe(0);
+    expect(invoke(session(f, "commit")).code).toBe(0);
     const payload = Buffer.from(
-      canonical(runtimeRequest(session(f, "apply", { actionId: "signal-add" }))),
+      canonical(runtimeRequest(session(f, "apply-effect", { actionId: "signal-effect" }))),
     ).toString("base64");
     const child = spawn(python, launchArgs(payload), { stdio: ["ignore", "pipe", "pipe"] });
     await waitFor(started);
@@ -1041,7 +873,9 @@ if sys.argv[2]=="remove": os.unlink(${JSON.stringify(installed)})
     expect(exit).not.toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(await lstat(orphan).catch(() => null)).toBeNull();
-    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "aborted" } });
+    const state = JSON.parse(await readFile(join(f.workspace, "state.json"), "utf8")).payload;
+    expect(state).toMatchObject({ status: "committed", effectInflight: "signal-effect" });
+    expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "committed" } });
   });
 
   it("holds one HOME lock across workspaces", async () => {
