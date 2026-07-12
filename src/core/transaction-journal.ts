@@ -78,8 +78,9 @@ const FINGERPRINT = /^fp_[a-f0-9]{64}$/;
 const BACKUP_REF = /^(0|[1-9][0-9]{0,19})$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const WRITER_LOCK = ".writer.lock";
+const MUTATION_LOCK = ".mutation.lock";
 const TRANSITIONS: Readonly<Record<TransactionState, readonly TransactionState[]>> = {
-  planning: ["preparing", "recovery_required"],
+  planning: ["preparing", "rolling_back", "recovery_required"],
   preparing: ["prepared", "rolling_back", "recovery_required"],
   prepared: ["committing", "rolling_back", "recovery_required"],
   committing: ["committed", "rolling_back", "recovery_required"],
@@ -765,4 +766,12 @@ export async function listTransactionJournals(
 
 export function isIncompleteTransaction(journal: TransactionJournal): boolean {
   return journal.state !== "committed" && journal.state !== "rolled_back";
+}
+
+export async function withTransactionMutationLock<T>(
+  context: RuntimeContext,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const directory = await ensureJournalDirectory(context);
+  return withAdvisoryFileLock(join(directory, MUTATION_LOCK), callback);
 }
