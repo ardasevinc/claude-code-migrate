@@ -267,8 +267,44 @@ describe("push migration planning", () => {
       ],
       host: "target",
       providers: ["codex"],
+      configuredPolicyIds: ["demo@market"],
       observation: target,
     });
+    expect(
+      planned.plan.actions.find((action) => action.operation === "external-effect")
+        ?.policyProvenance,
+    ).toContain("plugin-policy.config");
+    const profiled = await planPush({
+      files: [
+        {
+          sourcePath: "/unused/config",
+          relativePath: "codex/config.toml",
+          isSymlink: false,
+          mcpServersOnly: config.toString(),
+        },
+      ],
+      host: "target",
+      providers: ["codex"],
+      policyOverrides: { "demo@market": { mode: "always" } },
+      profile: {
+        name: "devbox",
+        host: "target",
+        configDir: "/unused",
+        definition: {
+          host: "target",
+          codex: { plugin_policies: { "demo@market": { mode: "always" } } },
+        },
+        assets: [],
+        effectCodes: new Map(),
+        warnings: [],
+        pluginPolicies: { "demo@market": { mode: "always" } },
+      },
+      observation: target,
+    });
+    expect(
+      profiled.plan.actions.find((action) => action.operation === "external-effect")
+        ?.policyProvenance,
+    ).toContain("profile.devbox.plugin-policy");
     const finalEntry = {
       path: "codex/config.toml",
       type: "file" as const,

@@ -1,9 +1,89 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createFakeMachine, readCommandLog, runCcm } from "./harness/index.ts";
 
 describe("planned remote push", () => {
+  it("applies an explicit host-bound profile and exposes only symbolic provenance", async () => {
+    const machine = await createFakeMachine("ccm-planned-push-profile-");
+    try {
+      const canonicalHome = await realpath(machine.home);
+      const configDir = join(canonicalHome, ".config/claude-code-migrate");
+      await mkdir(join(configDir, "profiles/devbox"), { recursive: true });
+      await Promise.all([
+        writeFile(join(configDir, "profiles/devbox/AGENTS.md"), "devbox instructions\n"),
+        writeFile(
+          join(configDir, "config.toml"),
+          `[providers.codex]\n enabled = true\n\n[profiles.devbox]\nhost = "operator@example.test"\nagents_md = "profiles/devbox/AGENTS.md"\n\n[profiles.devbox.codex.config]\nunset = ["/model"]\n\n[profiles.devbox.codex.config.set]\nmodel_reasoning_effort = "high"\nnotify = ["target-notifier"]\n`,
+        ),
+      ]);
+
+      const dryRun = await runCcm(
+        ["push", "codex", "--profile", "devbox", "--dry-run", "--json"],
+        machine,
+        { env: { HOME: canonicalHome } },
+      );
+      expect(dryRun.exitCode, dryRun.stderr).toBe(0);
+      const plan = JSON.parse(dryRun.stdout) as {
+        profile?: string;
+        actions: Array<{ policyProvenance: string[] }>;
+      };
+      expect(plan.profile).toBe("devbox");
+      expect(plan.actions.flatMap((action) => action.policyProvenance)).toEqual(
+        expect.arrayContaining([
+          "profile.devbox.codex-instructions",
+          "profile.devbox.codex-config",
+        ]),
+      );
+      expect(dryRun.stdout).not.toContain("profiles/devbox/AGENTS.md");
+      expect(dryRun.stdout).not.toContain("model_reasoning_effort");
+
+      const live = await runCcm(["push", "codex", "--profile", "devbox"], machine, {
+        env: { HOME: canonicalHome },
+      });
+      expect(live.exitCode, live.stderr).toBe(0);
+      expect(await readFile(join(machine.remoteHome, ".codex/AGENTS.md"), "utf8")).toBe(
+        "devbox instructions\n",
+      );
+      const remoteConfig = await readFile(join(machine.remoteHome, ".codex/config.toml"), "utf8");
+      expect(remoteConfig).toContain('model_reasoning_effort = "high"');
+      expect(remoteConfig).toContain('notify = [ "target-notifier" ]');
+    } finally {
+      await machine.dispose();
+    }
+  }, 30_000);
+
+  it("rejects unknown or target-ambiguous profiles before SSH", async () => {
+    const machine = await createFakeMachine("ccm-planned-push-profile-invalid-");
+    try {
+      const configDir = join(machine.home, ".config/claude-code-migrate");
+      await mkdir(configDir, { recursive: true });
+      await writeFile(
+        join(configDir, "config.toml"),
+        '[profiles.devbox]\nhost = "operator@example.test"\n',
+      );
+      for (const args of [
+        ["push", "codex", "--profile", "missing"],
+        ["push", "codex", "other@example.test", "--profile", "devbox"],
+      ]) {
+        const result = await runCcm(args, machine);
+        expect(result.exitCode).toBe(2);
+      }
+      await mkdir(join(machine.home, ".codex"), { recursive: true });
+      await writeFile(join(machine.home, ".codex/config.toml"), "this is [not toml");
+      await writeFile(
+        join(configDir, "config.toml"),
+        '[profiles.devbox]\nhost = "operator@example.test"\n[profiles.devbox.codex.config.set]\nmodel = "target"\n',
+      );
+      const malformed = await runCcm(["push", "codex", "--profile", "devbox"], machine);
+      expect(malformed.exitCode).toBe(3);
+      expect(malformed.stderr).toContain("Cannot apply profile devbox");
+      expect(await readCommandLog(machine)).toEqual([]);
+    } finally {
+      await machine.dispose();
+    }
+  });
+
   it("executes the transfer plan without replacing unmanaged remote state", async () => {
     const machine = await createFakeMachine("ccm-planned-push-");
     try {

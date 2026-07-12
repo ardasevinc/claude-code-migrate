@@ -40,12 +40,19 @@ import {
   stagePushArchive,
   type SealedPushSourceBindings,
 } from "./push-staging.ts";
+import {
+  applyResolvedCodexProfile,
+  type ResolvedPushProfile,
+  verifyPushProfileAssets,
+} from "./push-profile.ts";
 
 export interface PlanPushInput {
   readonly files: readonly FileEntry[];
   readonly host: string;
   readonly providers: readonly ProviderName[];
   readonly policyOverrides?: Readonly<Record<string, CodexPluginPolicy>>;
+  readonly configuredPolicyIds?: readonly string[];
+  readonly profile?: ResolvedPushProfile;
   readonly observation: PushTargetObservation;
   readonly preparedRequest: PreparedPushObservationRequest;
   readonly createdAt?: string;
@@ -69,6 +76,7 @@ interface PushPlanResources {
   readonly transformedBytes: ReadonlyMap<string, Uint8Array>;
   readonly decisionFiles: readonly FileEntry[];
   readonly decisionHashes: ReadonlyMap<string, string>;
+  readonly profile?: ResolvedPushProfile;
 }
 
 export interface PushExecutionObservationRequest {
@@ -166,6 +174,7 @@ function replaceTransformed(
 function groupAction(
   group: { readonly path: string; readonly entries: readonly InventoryEntry[] },
   target: readonly InventoryEntry[],
+  profileEffects?: ReadonlyMap<string, string>,
 ): MigrationActionInput {
   const before = target.filter(
     (entry) => entry.path === group.path || entry.path.startsWith(`${group.path}/`),
@@ -188,11 +197,20 @@ function groupAction(
     beforeFingerprint: inventoryFingerprint(before),
     afterFingerprint: inventoryFingerprint(overlay.map((item) => item.entry)),
     reversibility: "reversible",
-    policyProvenance: ["no-delete-overlay.default"],
+    policyProvenance: [
+      "no-delete-overlay.default",
+      ...new Set(
+        group.entries
+          .map((entry) => profileEffects?.get(entry.path))
+          .filter((code): code is string => code !== undefined),
+      ),
+    ],
   };
 }
 
 export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
+  if (input.profile && input.profile.host !== input.host)
+    throw new Error("Push profile host does not match the planned target");
   const recomputedRequest = await preparePushObservationRequest({
     host: input.host,
     files: input.files,
@@ -300,9 +318,13 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     ...input.observation,
     facts: { ...input.observation.facts, marketplacePayloads: projectedMarkets },
   };
-  const transformed = await transformPushInputs(captures, transformObservation, {
+  const automaticTransforms = await transformPushInputs(captures, transformObservation, {
     ...(input.policyOverrides ?? {}),
   });
+  const transformed = {
+    ...automaticTransforms,
+    codexConfig: applyResolvedCodexProfile(automaticTransforms.codexConfig, input.profile),
+  };
   const pluginList = input.observation.facts.codexPluginList;
   const installedPlugins = new Set(pluginList.installed);
   const availablePlugins = new Set(
@@ -314,6 +336,11 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       !installedPlugins.has(pluginId) &&
       availablePlugins.has(pluginId),
   );
+  const configuredPolicyIds = new Set(input.configuredPolicyIds ?? []);
+  const profilePolicyIds = new Set(Object.keys(input.profile?.pluginPolicies ?? {}));
+  const profilePluginPolicyCode = input.profile
+    ? `profile.${input.profile.name}.plugin-policy`
+    : undefined;
   const pluginWarnings = [
     ...(transformed.pluginDesires.length > 0 && pluginList.status !== "ok"
       ? [`plugin-list-${pluginList.status}`]
@@ -379,7 +406,16 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
         stagedIncoming.filter((entry) => entry.path.startsWith("codex/")),
       ),
       reversibility: "reversible",
-      policyProvenance: ["host-adaptation.default", "plugin-policy.runtime", "trust-reset.default"],
+      policyProvenance: [
+        "host-adaptation.default",
+        "plugin-policy.runtime",
+        "trust-reset.default",
+        ...(configuredPolicyIds.size > 0 ? ["plugin-policy.config"] : []),
+        ...(profilePolicyIds.size > 0 && profilePluginPolicyCode ? [profilePluginPolicyCode] : []),
+        ...(input.profile?.effectCodes.get("codex/config.toml")
+          ? [input.profile.effectCodes.get("codex/config.toml") as string]
+          : []),
+      ],
     });
   if (transformed.claudeMcp) {
     const after = stagedIncoming.filter((entry) => entry.path === mergePath);
@@ -423,7 +459,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     for (const group of groupManagedTopLevelEntries(overlayIncoming).filter((group) =>
       scope === "shared" ? group.path.startsWith("shared/") : group.path.startsWith(`${scope}/`),
     ))
-      actions.push(groupAction(group, input.observation.inventory));
+      actions.push(groupAction(group, input.observation.inventory, input.profile?.effectCodes));
 
   if (sharedNames.size > 0)
     actions.push({
@@ -454,7 +490,14 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       sourceRef: opaqueRef("plugin-source", pluginId),
       targetRef: opaqueRef("plugin-target", pluginId),
       reversibility: "compensatable",
-      policyProvenance: ["plugin-install.runtime"],
+      policyProvenance: [
+        "plugin-install.runtime",
+        ...(profilePolicyIds.has(pluginId) && profilePluginPolicyCode
+          ? [profilePluginPolicyCode]
+          : configuredPolicyIds.has(pluginId)
+            ? ["plugin-policy.config"]
+            : ["plugin-policy.default"]),
+      ],
     });
 
   const phaseRank = { materialize: 0, commit: 1, "post-commit": 2 } as const;
@@ -550,6 +593,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
   const plan = createMigrationPlan({
     kind: "push",
     providers,
+    profile: input.profile?.name,
     executionModel: "remote-staged-overlay",
     sourceEndpointRef: endpoint("push-source", sourceFingerprint),
     targetEndpointRef: endpoint("push-target", `${input.host}\0${observedFingerprint}`),
@@ -600,16 +644,36 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     ],
     actions,
     dependencies,
-    warnings: [...transformed.warnings, ...pluginWarnings].map((warning) => ({
-      code: warningCode(warning),
-    })),
+    warnings: [...transformed.warnings, ...pluginWarnings, ...(input.profile?.warnings ?? [])].map(
+      (warning) => ({
+        code: warningCode(warning),
+      }),
+    ),
     policies: [
       { code: "deletion", valueCode: "none", provenance: "default" },
       {
         code: "plugin-policy",
-        valueCode: Object.keys(input.policyOverrides ?? {}).length > 0 ? "overridden" : "builtin",
-        provenance: Object.keys(input.policyOverrides ?? {}).length > 0 ? "profile" : "default",
+        valueCode: configuredPolicyIds.size > 0 ? "configured" : "builtin",
+        provenance: configuredPolicyIds.size > 0 ? "config" : "default",
       },
+      ...(profilePolicyIds.size > 0
+        ? [
+            {
+              code: "profile-plugin-policy",
+              valueCode: input.profile?.name as string,
+              provenance: "profile" as const,
+            },
+          ]
+        : []),
+      ...(input.profile
+        ? [
+            {
+              code: "host-profile",
+              valueCode: input.profile.name,
+              provenance: "profile" as const,
+            },
+          ]
+        : []),
     ],
     createdAt: input.createdAt,
   });
@@ -687,6 +751,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     transformedBytes,
     decisionFiles,
     decisionHashes,
+    profile: input.profile,
   });
   return planned;
 }
@@ -697,6 +762,7 @@ export async function executePlannedPush(
 ): Promise<void> {
   const resource = resources.get(planned);
   if (!resource) throw new Error("Push plan is forged or already consumed");
+  if (resource.profile) await verifyPushProfileAssets(resource.profile);
   if (planned.plan.status === "blocked") throw new Error("Blocked push plan cannot execute");
   const actionIds = new Set(planned.plan.actions.map((action) => action.id));
   const bindingIds = new Set(resource.actionBindings.keys());

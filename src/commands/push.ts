@@ -1,9 +1,10 @@
-import { loadConfig } from "../config/loader.ts";
+import { getConfigDir, loadConfig } from "../config/loader.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
 import { executePlannedPush, planPush } from "../core/plan-push.ts";
 import { preparePushObservationRequest } from "../core/push-observation-request.ts";
 import { createSshPushExecutionAdapter } from "../core/push-ssh-adapter.ts";
+import { applyPushProfile } from "../core/push-profile.ts";
 import { testConnection } from "../core/ssh.ts";
 import { parseSshTarget } from "../core/ssh-target.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
@@ -39,7 +40,12 @@ export async function pushCommand(
     });
   }
 
-  const host = targetArg ?? config.target.host;
+  const selectedProfile = options.profile ? config.profiles[options.profile] : undefined;
+  if (options.profile && !selectedProfile)
+    throw new UsageError(`Unknown profile: ${options.profile}`);
+  if (selectedProfile && targetArg)
+    throw new UsageError("A profile supplies the SSH target; do not also pass a positional target");
+  const host = selectedProfile?.host ?? targetArg ?? config.target.host;
 
   if (host === "user@example.com") {
     throw new UsageError(
@@ -55,7 +61,7 @@ export async function pushCommand(
     });
   }
 
-  const files = await collectFiles({
+  let files = await collectFiles({
     providers,
     includeClaudeSettingsLocal: config.providers.claude.settings_local,
     includeClaudeMcpConfig: config.providers.claude.mcp_config,
@@ -63,9 +69,29 @@ export async function pushCommand(
     quiet: options.json,
   });
 
-  if (files.length === 0) {
-    throw new BlockedError("No files to push");
+  let appliedProfile: Awaited<ReturnType<typeof applyPushProfile>> | undefined;
+  try {
+    appliedProfile = selectedProfile
+      ? await applyPushProfile({
+          name: options.profile as string,
+          definition: selectedProfile,
+          configDir: getConfigDir(),
+          providers,
+          files,
+        })
+      : undefined;
+  } catch (error) {
+    throw new BlockedError(
+      `Cannot apply profile ${options.profile}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
+  if (appliedProfile) files = [...appliedProfile.files];
+  if (files.length === 0) throw new BlockedError("No files to push");
+  const policyOverrides = {
+    ...config.providers.codex.plugin_policies,
+    ...(appliedProfile?.profile.pluginPolicies ?? {}),
+  };
 
   if (!options.dryRun) {
     log.info(`Testing connection to ${host}...`);
@@ -87,7 +113,7 @@ export async function pushCommand(
     host,
     files,
     providers,
-    policyOverrides: config.providers.codex.plugin_policies,
+    policyOverrides,
   });
   const adapter = createSshPushExecutionAdapter();
   const observation = await adapter.observe(preparedRequest);
@@ -95,7 +121,9 @@ export async function pushCommand(
     files,
     host,
     providers,
-    policyOverrides: config.providers.codex.plugin_policies,
+    policyOverrides,
+    configuredPolicyIds: Object.keys(config.providers.codex.plugin_policies),
+    profile: appliedProfile?.profile,
     observation,
     preparedRequest,
     createdAt,

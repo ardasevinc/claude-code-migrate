@@ -45,7 +45,7 @@ export interface PlanDependency {
 export interface PlanPolicy {
   readonly code: SymbolicCode;
   readonly valueCode: SymbolicCode;
-  readonly provenance: "default" | "profile" | "cli" | "runtime";
+  readonly provenance: "default" | "config" | "profile" | "cli" | "runtime";
 }
 
 export type ActionOperation =
