@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import packageMetadata from "../package.json" with { type: "json" };
+import { inspectCommand, verifyCommand } from "./commands/archive.ts";
 import { backupCommand } from "./commands/backup.ts";
 import { configCommand } from "./commands/config.ts";
 import { pushCommand } from "./commands/push.ts";
@@ -42,6 +43,21 @@ export function createCli(): Command {
     .option("--all", "Push all providers")
     .option("--verbose", "Show the full dry-run file list", false)
     .action(pushCommand);
+
+  program
+    .command("inspect")
+    .description("Inspect a backup archive without extracting it")
+    .argument("<archive>", "Path to archive")
+    .option("--files", "Include archived file metadata", false)
+    .option("--json", "Print one JSON object", false)
+    .action(inspectCommand);
+
+  program
+    .command("verify")
+    .description("Verify a backup archive without extracting it")
+    .argument("<archive>", "Path to archive")
+    .option("--json", "Print one JSON object", false)
+    .action(verifyCommand);
 
   program
     .command("restore")
