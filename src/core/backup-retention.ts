@@ -25,7 +25,9 @@ export async function pruneLocalBackups(
   const parentDir = dirname(dirPath);
   const entries = await readdir(parentDir, { withFileTypes: true });
   const backupNames = entries
-    .filter((entry) => entry.isDirectory() && isBackupNameForDir(entry.name, dirPath))
+    .filter(
+      (entry) => (entry.isDirectory() || entry.isFile()) && isBackupNameForDir(entry.name, dirPath),
+    )
     .map((entry) => entry.name)
     .sort((a, b) => b.localeCompare(a));
 

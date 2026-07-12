@@ -2,7 +2,13 @@ import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { collectionPathsForHome } from "../config/providers.ts";
 import { resolveRestoreProvider } from "../core/arg-parser.ts";
-import { executePlannedRestore, planRestore, type PlannedRestore } from "../core/plan-restore.ts";
+import {
+  executePlannedRestore,
+  planRestore,
+  type PlannedRestore,
+  RestoreTargetPlanError,
+  RestoreTransformPlanError,
+} from "../core/plan-restore.ts";
 import { BlockedError, UsageError } from "../errors.ts";
 import { createRuntimeContext, type RuntimeContext } from "../runtime/context.ts";
 import type { ProviderName, RestoreOptions } from "../types/index.ts";
@@ -49,6 +55,8 @@ export async function restoreCommandWithContext(
     });
   } catch (error) {
     if (error instanceof BlockedError) throw error;
+    if (error instanceof RestoreTargetPlanError || error instanceof RestoreTransformPlanError)
+      throw new BlockedError(error.message, { cause: error });
     throw new BlockedError("Archive is invalid or unreadable", { cause: error });
   }
   if (options.dryRun) {

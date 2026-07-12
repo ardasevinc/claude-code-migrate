@@ -20,6 +20,7 @@ import type { CollectionPaths, ProviderName } from "../types/index.ts";
 import { BlockedError, ExecutionError } from "../errors.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { scanArchive } from "./archive-reader.ts";
+import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
 import { backupLocalDirectoryIfExists } from "./restore.ts";
 import {
   canonicalInventory,
@@ -86,6 +87,9 @@ interface RestorePlanResources {
 
 const resources = new WeakMap<PlannedRestore, RestorePlanResources>();
 const captures = new Set(["claude/.mcp-config.json", "codex/config.toml", "codex/hooks.json"]);
+
+export class RestoreTargetPlanError extends Error {}
+export class RestoreTransformPlanError extends Error {}
 
 function endpoint(domain: string, value: string): EndpointRef {
   return `endpoint_${createHash("sha256").update(`ccm:${domain}\0${value}`).digest("hex")}`;
@@ -201,19 +205,35 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
       ? scan.capturedFiles.get("codex/hooks.json")
       : undefined,
   };
-  const observation = await observeLocalRestoreTarget({
-    context: input.context,
-    paths: input.paths,
-    selectedProviders: providers,
-    incoming,
-    queries: deriveRestoreObservationQueries(captured),
-  });
-  const transformed = await transformRestoreInputs(
-    captured,
-    observation.claudeMcp,
-    observation.facts,
-    input.paths,
-  );
+  let observation: RestoreTargetObservation;
+  try {
+    observation = await observeLocalRestoreTarget({
+      context: input.context,
+      paths: input.paths,
+      selectedProviders: providers,
+      incoming,
+      queries: deriveRestoreObservationQueries(captured),
+    });
+  } catch (error) {
+    throw new RestoreTargetPlanError(
+      `Restore target is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  let transformed: RestoreTransformInputs & { warnings: readonly string[] };
+  try {
+    transformed = await transformRestoreInputs(
+      captured,
+      observation.claudeMcp,
+      observation.facts,
+      input.paths,
+    );
+  } catch (error) {
+    throw new RestoreTransformPlanError(
+      `Restore transform input is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
   let stagedIncoming = [...incoming];
   if (transformed.claudeMcp)
     stagedIncoming = replaceEntry(
@@ -597,6 +617,12 @@ export async function executePlannedRestore(
     const managed = new Map<string, Set<string>>();
     for (const action of changed) {
       const binding = resource.actionBindings.get(action.id);
+      if (binding?.kind === "symlink-view") {
+        const entries = managed.get(resource.paths.claudeDir) ?? new Set<string>();
+        for (const entry of binding.entries) entries.add(entry.path.slice("claude/".length));
+        managed.set(resource.paths.claudeDir, entries);
+        continue;
+      }
       if (binding?.kind !== "overlay-group") continue;
       const logical = binding.logicalGroup.split("/");
       const root =
@@ -612,11 +638,15 @@ export async function executePlannedRestore(
       managed.set(root, entries);
     }
     for (const [root, entries] of managed) {
-      const backup = await backupLocalDirectoryIfExists(root, [...entries]);
+      const backup = await backupLocalDirectoryIfExists(root, [...entries], { prune: false });
       if (backup) ownedBackups.push(backup);
     }
     if (changed.some((action) => action.operation === "merge-json")) {
-      const backup = await backupLocalDirectoryIfExists(resource.paths.claudeMcpConfigPath);
+      const backup = await backupLocalDirectoryIfExists(
+        resource.paths.claudeMcpConfigPath,
+        undefined,
+        { prune: false },
+      );
       if (backup) ownedBackups.push(backup);
     }
     await options.afterBackup?.();
@@ -691,6 +721,9 @@ export async function executePlannedRestore(
       actualFinal.push(inventoryEntry("claude/.mcp-config.json", 0o644, actual.claudeMcp.bytes));
     if (inventoryFingerprint(actualFinal) !== planned.plan.stagedPostFingerprint)
       throw new Error("Restored target does not match planned post-state");
+    for (const root of managed.keys()) await pruneLocalBackupsIfParentExists(root);
+    if (changed.some((action) => action.operation === "merge-json"))
+      await pruneLocalBackupsIfParentExists(resource.paths.claudeMcpConfigPath);
   } catch (error) {
     if (error instanceof BlockedError || error instanceof ExecutionError) throw error;
     if (!mutationStarted)

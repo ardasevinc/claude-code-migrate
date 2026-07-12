@@ -57,6 +57,7 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
 export async function backupLocalDirectoryIfExists(
   dirPath: string,
   managedEntries?: string[],
+  options: { prune?: boolean } = {},
 ): Promise<string | null> {
   if (!(await exists(dirPath))) {
     return null;
@@ -67,12 +68,14 @@ export async function backupLocalDirectoryIfExists(
     await rm(backupDir, { recursive: true, force: true });
   });
   let completed = false;
+  let copiedManagedEntry = managedEntries === undefined;
   try {
     if (managedEntries) {
       await mkdir(backupDir, { recursive: true });
       for (const entry of managedEntries) {
         const source = join(dirPath, entry);
         if (!(await exists(source))) continue;
+        copiedManagedEntry = true;
         const target = join(backupDir, entry);
         await mkdir(dirname(target), { recursive: true });
         await cp(source, target, { recursive: true });
@@ -80,13 +83,14 @@ export async function backupLocalDirectoryIfExists(
     } else {
       await cp(dirPath, backupDir, { recursive: true });
     }
-    completed = true;
+    completed = copiedManagedEntry;
   } finally {
     if (!completed) await rm(backupDir, { recursive: true, force: true });
     unregisterInterruptCleanup();
   }
+  if (!copiedManagedEntry) return null;
   log.dim(`  Backed up ${dirPath} -> ${backupDir}`);
-  await pruneLocalBackupsIfParentExists(dirPath);
+  if (options.prune !== false) await pruneLocalBackupsIfParentExists(dirPath);
   return backupDir;
 }
 
