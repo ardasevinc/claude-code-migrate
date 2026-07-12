@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -93,6 +93,27 @@ describe("streaming archive reader", () => {
     });
     expect(JSON.stringify(result)).not.toContain("secret");
     expect(result.files[0]?.sha256).toBeUndefined();
+  });
+
+  it("verifies without creating a temporary extraction workspace", async () => {
+    const body = "model = 'gpt-5'\n";
+    const input = await archive([
+      { name: "codex/config.toml", body },
+      { name: ".ccm-manifest.json", body: v2("codex/config.toml", body) },
+    ]);
+    const isolatedTmp = join(input.root, "tmp");
+    await mkdir(isolatedTmp);
+    const originalTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = isolatedTmp;
+    try {
+      const result = await verifyArchive(input.path);
+
+      expect(result.integrity).toBe("verified");
+      expect(await readdir(isolatedTmp)).toEqual([]);
+    } finally {
+      if (originalTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = originalTmpdir;
+    }
   });
 
   it("rejects mismatched hashes and removes partial extraction", async () => {

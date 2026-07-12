@@ -1,9 +1,8 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import { Transform } from "node:stream";
+import { Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { extract, type Headers } from "tar-stream";
@@ -43,7 +42,7 @@ const DEFAULT_LIMITS: ArchiveLimits = {
 };
 
 interface ObservedFile extends VerifiedArchiveFile {
-  destination: string;
+  destination?: string;
 }
 
 export async function verifyArchive(
@@ -52,10 +51,7 @@ export async function verifyArchive(
 ): Promise<VerifiedArchive> {
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
   validateLimits(limits);
-  const workspace = options.extractTo ? undefined : await mkdtemp(join(tmpdir(), "ccm-verify-"));
-  const destination = options.extractTo ?? workspace;
-  if (destination === undefined) throw new Error("Archive extraction destination is unavailable");
-  const extractionDestination = destination;
+  const destination = options.extractTo;
   const archiveHash = createHash("sha256");
   let compressedBytes = 0;
   let expandedBytes = 0;
@@ -66,8 +62,8 @@ export async function verifyArchive(
   const portablePaths = new Map<string, string>();
   const parser = extract();
 
-  let ownsDestination = workspace !== undefined;
-  if (!ownsDestination) {
+  let ownsDestination = false;
+  if (destination !== undefined) {
     await mkdir(destination, { mode: 0o700 });
     ownsDestination = true;
   }
@@ -106,7 +102,9 @@ export async function verifyArchive(
     }
     paths.add(path);
     if (directory) {
-      await mkdir(join(extractionDestination, path), { recursive: true, mode: 0o700 });
+      if (destination !== undefined) {
+        await mkdir(join(destination, path), { recursive: true, mode: 0o700 });
+      }
       stream.resume();
       return;
     }
@@ -123,8 +121,10 @@ export async function verifyArchive(
     const chunks: Buffer[] = [];
     const hash = createHash("sha256");
     let size = 0;
-    const outputPath = join(extractionDestination, path);
-    await mkdir(dirname(outputPath), { recursive: true, mode: 0o700 });
+    const outputPath = destination === undefined ? undefined : join(destination, path);
+    if (outputPath !== undefined) {
+      await mkdir(dirname(outputPath), { recursive: true, mode: 0o700 });
+    }
     const counter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         size += chunk.length;
@@ -134,10 +134,18 @@ export async function verifyArchive(
         callback(null, chunk);
       },
     });
-    await pipeline(stream, counter, createWriteStream(outputPath, { flags: "wx", mode: 0o600 }));
+    const sink =
+      outputPath === undefined
+        ? new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          })
+        : createWriteStream(outputPath, { flags: "wx", mode: 0o600 });
+    await pipeline(stream, counter, sink);
     if (size !== declaredSize) throw new Error(`Archive member size mismatch: ${path}`);
     const mode = (header.mode ?? 0) & 0o777;
-    await chmod(outputPath, mode);
+    if (outputPath !== undefined) await chmod(outputPath, mode);
     if (path === ".ccm-manifest.json") manifestBytes = Buffer.concat(chunks);
     else
       files.push({
@@ -203,10 +211,11 @@ export async function verifyArchive(
         legacy ? file : { ...file, sha256 },
       ),
     };
-    if (workspace) await rm(workspace, { recursive: true, force: true });
     return result;
   } catch (error) {
-    if (ownsDestination) await rm(destination, { recursive: true, force: true });
+    if (ownsDestination && destination !== undefined) {
+      await rm(destination, { recursive: true, force: true });
+    }
     throw error;
   }
 }
