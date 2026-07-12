@@ -76,6 +76,7 @@ describe("backup migration planning", () => {
           await writeFile(sourcePath, "model = 'raced'\n");
         },
       });
+      expect(planned.plan.actions[0]?.reversibility).toBe("irreversible");
 
       await expect(executePlannedBackup(planned)).rejects.toThrow(
         "Backup source changed during archive creation",

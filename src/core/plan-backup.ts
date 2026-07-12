@@ -1,18 +1,18 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat } from "node:fs/promises";
-import type { FileEntry, ProviderName } from "../types/index.ts";
 import { BlockedError } from "../errors.ts";
+import type { FileEntry, ProviderName } from "../types/index.ts";
 import { createArchive } from "./archiver.ts";
 import {
+  type InventoryEntry,
   inventoryFingerprint,
   inventoryFromFileEntries,
-  type InventoryEntry,
 } from "./inventory.ts";
 import {
   createMigrationPlan,
-  fingerprint,
   type EndpointRef,
+  fingerprint,
   type MigrationPlan,
   type PlanFingerprint,
 } from "./migration-plan.ts";
@@ -119,7 +119,7 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
         targetRef: "local-backup-archive",
         beforeFingerprint: observedTarget,
         afterFingerprint: sourceFingerprint,
-        reversibility: "reversible",
+        reversibility: input.force ? "irreversible" : "reversible",
         policyProvenance: [input.force ? "force-unconditional.cli" : "no-replace.default"],
       },
     ],
