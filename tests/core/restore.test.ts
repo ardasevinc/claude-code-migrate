@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -146,6 +146,43 @@ describe("restore helpers", () => {
       await expect(lstat(join(rootDir, "home"))).rejects.toThrow();
     } finally {
       consoleSpy.mockRestore();
+      Object.assign(DEFAULT_COLLECTION_PATHS, originalPaths);
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a symlinked local Claude MCP merge target without touching its referent", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-restore-mcp-shape-test-"));
+    const originalPaths = { ...DEFAULT_COLLECTION_PATHS };
+    try {
+      const incomingMcp = join(rootDir, "mcp.json");
+      const claudeFile = join(rootDir, "CLAUDE.md");
+      const archivePath = join(rootDir, "claude.tar.gz");
+      await writeFile(incomingMcp, '{"mcpServers":{"new":{}}}');
+      await writeFile(claudeFile, "provider");
+      await createArchive(
+        [
+          { sourcePath: incomingMcp, relativePath: "claude/.mcp-config.json", isSymlink: false },
+          { sourcePath: claudeFile, relativePath: "claude/CLAUDE.md", isSymlink: false },
+        ],
+        archivePath,
+        { providers: ["claude"] },
+      );
+      const home = join(rootDir, "home");
+      const referent = join(rootDir, "outside.json");
+      await mkdir(home, { recursive: true });
+      await writeFile(referent, '{"mcpServers":{"keep":{}}}');
+      await symlink(referent, join(home, ".claude.json"));
+      Object.assign(DEFAULT_COLLECTION_PATHS, {
+        claudeDir: join(home, ".claude"),
+        claudeMcpConfigPath: join(home, ".claude.json"),
+      });
+
+      await expect(restoreArchive(archivePath, "claude")).rejects.toThrow(
+        "Claude MCP target must be a regular non-symlink file",
+      );
+      expect(await readFile(referent, "utf8")).toBe('{"mcpServers":{"keep":{}}}');
+    } finally {
       Object.assign(DEFAULT_COLLECTION_PATHS, originalPaths);
       await rm(rootDir, { recursive: true, force: true });
     }

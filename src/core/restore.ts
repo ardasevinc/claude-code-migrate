@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   DEFAULT_COLLECTION_PATHS,
   isProviderName,
@@ -26,6 +26,8 @@ import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
 import { adaptCodexConfigForHost, normalizeLocalCodexMarketplaceSources } from "./codex.ts";
 import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 import { mergeMcpServers } from "./mcp.ts";
+import { createRuntimeContext } from "../runtime/context.ts";
+import { resolveLocalHookCandidate } from "./restore-observation.ts";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -87,9 +89,16 @@ async function mergeLocalClaudeMcp(extractRoot: string): Promise<void> {
   }
 
   const incomingRaw = await readFile(incomingPath, "utf8");
-  const existingRaw = (await exists(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath))
-    ? await readFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, "utf8")
-    : "{}";
+  let existingRaw = "{}";
+  try {
+    const stat = await lstat(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error("Claude MCP target must be a regular non-symlink file");
+    }
+    existingRaw = await readFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 
   const merged = mergeMcpServers(existingRaw, incomingRaw);
   await writeFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, merged, "utf8");
@@ -223,23 +232,14 @@ export async function restoreArchive(
         if (await exists(codexHooksPath)) {
           const hooksRaw = await readFile(codexHooksPath, "utf8");
           const configRaw = await readFile(codexConfigPath, "utf8");
-          const home = dirname(DEFAULT_COLLECTION_PATHS.codexDir);
+          const context = createRuntimeContext({
+            home: join(DEFAULT_COLLECTION_PATHS.codexDir, ".."),
+          });
           const hooksAdapted = await adaptCodexHooksForHost(
             hooksRaw,
             configRaw,
             codexHooksPath,
-            async (binaryName) => {
-              for (const candidate of [
-                join(home, ".local", "bin", basename(binaryName)),
-                join(home, ".bun", "bin", basename(binaryName)),
-                join(home, "bin", basename(binaryName)),
-                join("/usr/local/bin", basename(binaryName)),
-                join("/usr/bin", basename(binaryName)),
-              ]) {
-                if (await exists(candidate)) return candidate;
-              }
-              return null;
-            },
+            (binaryName) => resolveLocalHookCandidate(context, binaryName),
             { preserveVerifiedTrust: false },
           );
 

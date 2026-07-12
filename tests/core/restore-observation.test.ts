@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { collectionPathsForHome } from "../../src/config/providers.ts";
 import { observeLocalRestoreTarget } from "../../src/core/restore-observation.ts";
 import { MAX_RESTORE_OBSERVATION_FILE_BYTES } from "../../src/core/restore-observation.ts";
+import { resolveLocalHookCandidate } from "../../src/core/restore-observation.ts";
 import { createRuntimeContext } from "../../src/runtime/context.ts";
 import type { InventoryEntry } from "../../src/core/inventory.ts";
 
@@ -118,7 +119,7 @@ describe("observeLocalRestoreTarget", () => {
       context: createRuntimeContext({ home }),
       paths,
       selectedProviders: ["claude"],
-      incoming: [incoming("shared/agents/skills/incoming/SKILL.md")],
+      incoming: [incoming("claude/CLAUDE.md"), incoming("shared/agents/skills/incoming/SKILL.md")],
     });
     expect(observed.facts.sharedSkillNames).toEqual(["existing", "incoming"]);
     expect(observed.inventory.map((entry) => entry.path)).toEqual([
@@ -138,9 +139,59 @@ describe("observeLocalRestoreTarget", () => {
         context: createRuntimeContext({ home }),
         paths,
         selectedProviders: ["claude"],
-        incoming: [incoming("shared/agents/skills/new/SKILL.md")],
+        incoming: [incoming("claude/CLAUDE.md"), incoming("shared/agents/skills/new/SKILL.md")],
       }),
     ).rejects.toThrow("regular directory");
+  });
+
+  it("does not observe the Claude shared view without both provider and shared members", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-"));
+    const paths = collectionPathsForHome(home);
+    await mkdir(join(paths.sharedSkillsDir, "existing"), { recursive: true });
+    await mkdir(join(paths.claudeDir, "skills", "existing"), { recursive: true });
+    await writeFile(join(paths.claudeDir, "skills", "existing", "old"), "live");
+    for (const incomingEntries of [
+      [incoming("shared/agents/skills/new/SKILL.md")],
+      [incoming("claude/CLAUDE.md")],
+    ]) {
+      const observed = await observeLocalRestoreTarget({
+        context: createRuntimeContext({ home }),
+        paths,
+        selectedProviders: ["claude"],
+        incoming: incomingEntries,
+      });
+      expect(observed.facts.sharedSkillNames).toEqual([]);
+      expect(observed.inventory.some((entry) => entry.path === "claude/skills/existing/old")).toBe(
+        false,
+      );
+    }
+  });
+
+  it("ignores an exact shared skills root file when deriving skill names", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-"));
+    const paths = collectionPathsForHome(home);
+    const observed = await observeLocalRestoreTarget({
+      context: createRuntimeContext({ home }),
+      paths,
+      selectedProviders: ["claude"],
+      incoming: [incoming("claude/CLAUDE.md"), incoming("shared/agents/skills")],
+    });
+    expect(observed.facts.sharedSkillNames).toEqual([]);
+  });
+
+  it("resolves hooks only to regular executable files in the shared fixed order", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-"));
+    await mkdir(join(home, ".local", "bin", "hook"), { recursive: true });
+    await mkdir(join(home, ".bun", "bin"), { recursive: true });
+    await writeFile(join(home, ".bun", "bin", "hook"), "nope", { mode: 0o644 });
+    await mkdir(join(home, "bin"), { recursive: true });
+    await writeFile(join(home, "bin", "real"), "#!/bin/sh\n", { mode: 0o755 });
+    await symlink(join(home, "bin", "real"), join(home, "bin", "hook"));
+    expect(await resolveLocalHookCandidate(createRuntimeContext({ home }), "hook")).toBeNull();
+    await writeFile(join(home, ".local", "bin", "valid"), "#!/bin/sh\n", { mode: 0o755 });
+    expect(await resolveLocalHookCandidate(createRuntimeContext({ home }), "/old/valid")).toBe(
+      join(home, ".local", "bin", "valid"),
+    );
   });
 
   it("rejects special files in affected roots", async () => {

@@ -52,6 +52,29 @@ export interface ObserveLocalRestoreTargetInput {
   readonly queries?: RestoreObservationQueries;
 }
 
+export async function resolveLocalHookCandidate(
+  context: RuntimeContext,
+  command: string,
+): Promise<string | null> {
+  const name = basename(command);
+  for (const dir of [
+    join(context.home, ".local", "bin"),
+    join(context.home, ".bun", "bin"),
+    join(context.home, "bin"),
+    "/usr/local/bin",
+    "/usr/bin",
+  ]) {
+    const candidate = join(dir, name);
+    try {
+      const stat = await context.files.lstat(candidate);
+      if (stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0) return candidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return null;
+}
+
 function sha256(domain: string, bytes: Uint8Array): string {
   return createHash("sha256").update(domain).update("\0").update(bytes).digest("hex");
 }
@@ -244,14 +267,17 @@ export async function observeLocalRestoreTarget(
     );
   }
 
-  const recreatesSharedSkillView =
-    selected.has("claude") &&
-    managedIncoming.some((entry) => entry.path.startsWith("shared/agents/skills/"));
+  const hasClaudeMember = incoming.some((entry) => entry.path.startsWith("claude/"));
+  const hasSharedMember = managedIncoming.some((entry) => entry.path.startsWith("shared/agents/"));
+  const recreatesSharedSkillView = selected.has("claude") && hasClaudeMember && hasSharedMember;
   let postSharedSkillNames: string[] = [];
   if (recreatesSharedSkillView) {
     const existingNames = await sharedSkillNames(context, paths.sharedSkillsDir);
     const incomingNames = managedIncoming
-      .filter((entry) => entry.path.startsWith("shared/agents/skills/"))
+      .filter(
+        (entry) =>
+          entry.path.split("/").length > 4 && entry.path.startsWith("shared/agents/skills/"),
+      )
       .map((entry) => entry.path.split("/")[3])
       .filter((name): name is string => name !== undefined);
     postSharedSkillNames = [...new Set([...existingNames, ...incomingNames])].sort();
@@ -275,29 +301,9 @@ export async function observeLocalRestoreTarget(
     pathExistence.set(path, await exists(context, path));
   }
   const hookCandidates = new Map<string, string | null>();
-  const pathDirs = [
-    join(context.home, ".local", "bin"),
-    join(context.home, ".bun", "bin"),
-    join(context.home, "bin"),
-    "/usr/local/bin",
-    "/usr/bin",
-  ];
   for (const command of [...new Set(queries.hookCommands ?? [])].sort()) {
     const name = basename(command);
-    let match: string | null = null;
-    for (const dir of pathDirs) {
-      const candidate = join(dir, name);
-      try {
-        const stat = await context.files.stat(candidate);
-        if (stat.isFile() && (stat.mode & 0o111) !== 0) {
-          match = candidate;
-          break;
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-    }
-    hookCandidates.set(name, match);
+    hookCandidates.set(name, await resolveLocalHookCandidate(context, name));
   }
   const marketplacePayloads = new Map<string, boolean>();
   for (const name of [...new Set(queries.marketplaceNames ?? [])].sort()) {
