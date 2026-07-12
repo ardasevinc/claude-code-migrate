@@ -1,13 +1,36 @@
 import { describe, expect, it } from "vitest";
 import {
+  normalizeArchivePath,
   validateArchiveFileEntries,
   validateArchiveMemberPaths,
+  validateCanonicalArchivePath,
 } from "../../src/core/archive-entries.ts";
 import type { FileEntry } from "../../src/types/index.ts";
 
 function entry(relativePath: string): FileEntry {
   return { sourcePath: "/tmp/source", relativePath, isSymlink: false };
 }
+
+describe("canonical archive paths", () => {
+  it("normalizes only the conventional tar root prefix", () => {
+    expect(normalizeArchivePath("./codex/config.toml")).toBe("codex/config.toml");
+    expect(normalizeArchivePath("./", true)).toBeNull();
+    expect(() => normalizeArchivePath("././codex/config.toml")).toThrow("Unsafe archive path");
+    expect(() => normalizeArchivePath("codex//config.toml")).toThrow("Unsafe archive path");
+  });
+
+  it("rejects non-portable canonical paths", () => {
+    for (const path of [
+      "/codex/config.toml",
+      "C:/codex/config.toml",
+      "codex\\config.toml",
+      "codex/../auth.json",
+      "codex/config.toml\nforged",
+    ]) {
+      expect(() => validateCanonicalArchivePath(path)).toThrow("Unsafe archive path");
+    }
+  });
+});
 
 describe("validateArchiveFileEntries", () => {
   it("rejects duplicate destinations", () => {

@@ -4,26 +4,45 @@ import type { FileEntry } from "../types/index.ts";
 
 const RESERVED_ARCHIVE_PATHS = new Set([".ccm-manifest.json"]);
 
+export function normalizeArchivePath(rawPath: string, directory = false): string | null {
+  let path = rawPath;
+  if (path.startsWith("./")) path = path.slice(2);
+  if (directory && path.endsWith("/")) path = path.slice(0, -1);
+  if (directory && (path === "" || path === ".")) return null;
+  validateCanonicalArchivePath(path);
+  return path;
+}
+
+export function validateCanonicalArchivePath(path: string): void {
+  const segments = path.split("/");
+  const hasControlCharacter = Array.from(path).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (
+    path.length === 0 ||
+    isAbsolute(path) ||
+    win32.isAbsolute(path) ||
+    path.includes("\\") ||
+    hasControlCharacter ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..") ||
+    posix.normalize(path) !== path
+  ) {
+    throw new Error(`Unsafe archive path: ${JSON.stringify(path)}`);
+  }
+}
+
 export function validateArchiveFileEntries(files: FileEntry[]): void {
   const destinations = new Set<string>();
 
   for (const file of files) {
     const path = file.relativePath;
-    const segments = path.split("/");
-    const hasControlCharacter = Array.from(path).some((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint <= 0x1f || codePoint === 0x7f;
-    });
-    if (
-      path.length === 0 ||
-      isAbsolute(path) ||
-      win32.isAbsolute(path) ||
-      path.includes("\\") ||
-      hasControlCharacter ||
-      segments.some((segment) => segment === "" || segment === "." || segment === "..") ||
-      posix.normalize(path) !== path ||
-      RESERVED_ARCHIVE_PATHS.has(path)
-    ) {
+    try {
+      validateCanonicalArchivePath(path);
+    } catch {
+      throw new Error(`Unsafe archive destination: ${JSON.stringify(path)}`);
+    }
+    if (RESERVED_ARCHIVE_PATHS.has(path)) {
       throw new Error(`Unsafe archive destination: ${JSON.stringify(path)}`);
     }
 
@@ -42,8 +61,8 @@ export function validateArchiveMemberPaths(paths: string[]): string[] {
 
   for (const rawPath of paths) {
     const directory = rawPath.endsWith("/");
-    const path = rawPath.replace(/^\.\//, "").replace(/\/$/, "");
-    if (!path) continue;
+    const path = normalizeArchivePath(rawPath, directory);
+    if (path === null) continue;
     if (path === ".ccm-manifest.json") {
       if (directory) throw new Error("Archive manifest must be a regular file");
       normalizedPaths.push(path);
