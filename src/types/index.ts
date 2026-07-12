@@ -38,7 +38,7 @@ export interface FileEntry {
   mcpServersOnly?: string;
 }
 
-export interface Manifest {
+export interface LegacyArchiveManifest {
   version: string;
   timestamp: string;
   sourceHost: string;
@@ -46,6 +46,28 @@ export interface Manifest {
   providers: ProviderName[];
   files: FileEntry[];
 }
+
+export interface ArchiveManifestV2File {
+  path: string;
+  type: "file";
+  size: number;
+  mode: number;
+  sha256: string;
+}
+
+export interface ArchiveManifestV2 {
+  formatVersion: 2;
+  createdAt: string;
+  producer: {
+    name: "claude-code-migrate";
+    version: string;
+  };
+  providers: ProviderName[];
+  files: ArchiveManifestV2File[];
+}
+
+export type ArchiveManifest = LegacyArchiveManifest | ArchiveManifestV2;
+export type Manifest = LegacyArchiveManifest;
 
 export interface CollectionPaths {
   claudeDir: string;
