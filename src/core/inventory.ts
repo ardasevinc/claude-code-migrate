@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readlink } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import type { FileEntry } from "../types/index.ts";
 import { validateArchiveFileEntries, validateCanonicalArchivePath } from "./archive-entries.ts";
 import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
@@ -15,7 +15,6 @@ export interface InventoryEntry {
 export interface InventoryBinding {
   readonly sourcePath: string;
   readonly virtualContent?: string | Uint8Array;
-  readonly symlinkTarget?: string;
 }
 
 export type InventoryDisposition = "create" | "update" | "unchanged" | "preserve";
@@ -27,8 +26,40 @@ export interface InventoryOverlayEntry {
 const bytesCompare = (left: string, right: string): number =>
   Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 
-function digest(domain: string, bytes: Uint8Array): string {
-  return createHash("sha256").update(`${domain}\0`).update(bytes).digest("hex");
+/** Builds a logical symlink entry without retaining or exposing its raw target binding. */
+export function symlinkInventoryEntry(path: string, target: string): InventoryEntry {
+  const bytes = Buffer.from(target, "utf8");
+  const entry: InventoryEntry = {
+    path,
+    type: "symlink",
+    mode: 0o755,
+    size: bytes.byteLength,
+    sha256: createHash("sha256")
+      .update("ccm:inventory:symlink-target\0")
+      .update(bytes)
+      .digest("hex"),
+  };
+  validateEntry(entry);
+  return entry;
+}
+
+function validateEntry(entry: InventoryEntry): void {
+  validateCanonicalArchivePath(entry.path);
+  validateArchiveFileEntries([
+    { sourcePath: "<inventory-binding>", relativePath: entry.path, isSymlink: false },
+  ]);
+  if (entry.type !== "file" && entry.type !== "symlink") {
+    throw new Error(`Invalid inventory type: ${String(entry.type)}`);
+  }
+  if (entry.mode !== 0o644 && entry.mode !== 0o755) {
+    throw new Error(`Invalid inventory mode: ${entry.mode}`);
+  }
+  if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
+    throw new Error(`Invalid inventory size: ${entry.size}`);
+  }
+  if (!/^[a-f0-9]{64}$/.test(entry.sha256)) {
+    throw new Error("Invalid inventory sha256");
+  }
 }
 
 export function canonicalInventory(entries: readonly InventoryEntry[]): readonly InventoryEntry[] {
@@ -36,10 +67,15 @@ export function canonicalInventory(entries: readonly InventoryEntry[]): readonly
   const portablePaths = new Map<string, string>();
   const exact = new Set<string>();
   for (const entry of sorted) {
-    validateCanonicalArchivePath(entry.path);
+    validateEntry(entry);
     if (exact.has(entry.path)) throw new Error(`Duplicate inventory path: ${entry.path}`);
-    exact.add(entry.path);
     const segments = entry.path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      if (exact.has(segments.slice(0, index).join("/"))) {
+        throw new Error(`Inventory file ancestor conflict: ${entry.path}`);
+      }
+    }
+    exact.add(entry.path);
     for (let index = 1; index <= segments.length; index += 1) {
       const prefix = segments.slice(0, index).join("/");
       const portable = prefix.normalize("NFC").toLocaleLowerCase("en-US");
@@ -62,19 +98,7 @@ export async function inventoryFromFileEntries(
       const binding: InventoryBinding = {
         sourcePath: file.sourcePath,
         virtualContent: file.mcpServersOnly,
-        symlinkTarget: file.originalSymlinkTarget,
       };
-      if (file.isSymlink) {
-        const target = binding.symlinkTarget ?? (await readlink(binding.sourcePath));
-        const bytes = Buffer.from(target, "utf8");
-        return {
-          path: file.relativePath,
-          type: "symlink",
-          mode: 0o755,
-          size: bytes.byteLength,
-          sha256: digest("ccm:inventory:symlink-target", bytes),
-        };
-      }
       const bytes =
         binding.virtualContent === undefined
           ? await readFile(binding.sourcePath)
@@ -86,7 +110,7 @@ export async function inventoryFromFileEntries(
         type: "file",
         mode: (mode & 0o111) === 0 ? 0o644 : 0o755,
         size: bytes.byteLength,
-        sha256: digest("ccm:inventory:file-content", bytes),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
       };
     }),
   );
@@ -132,18 +156,20 @@ export function overlayInventories(
   });
 }
 
-export function postInventory(
+/** Raw overlay only. Callers must separately simulate transforms, merges, and symlink recreation. */
+export function overlayInventory(
   target: readonly InventoryEntry[],
   incoming: readonly InventoryEntry[],
 ): readonly InventoryEntry[] {
   return overlayInventories(target, incoming).map(({ entry }) => entry);
 }
 
-export function postInventoryFingerprint(
+/** Fingerprint of the raw no-delete overlay, not a staged-post fingerprint. */
+export function overlayInventoryFingerprint(
   target: readonly InventoryEntry[],
   incoming: readonly InventoryEntry[],
 ): PlanFingerprint {
-  return inventoryFingerprint(postInventory(target, incoming));
+  return inventoryFingerprint(overlayInventory(target, incoming));
 }
 
 export interface ManagedEntryGroup {
@@ -157,7 +183,14 @@ export function groupManagedTopLevelEntries(
   const groups = new Map<string, InventoryEntry[]>();
   for (const entry of canonicalInventory(entries)) {
     const segments = entry.path.split("/");
-    const depth = segments[0] === "shared" && segments[1] === "agents" ? 3 : 2;
+    const depth =
+      segments[0] === "shared" && segments[1] === "agents"
+        ? 3
+        : segments[0] === "codex" &&
+            segments[1] === ".tmp" &&
+            (segments[2] === "plugins" || segments[2] === "plugins.sha")
+          ? 3
+          : 2;
     const path = segments.slice(0, depth).join("/");
     const group = groups.get(path) ?? [];
     group.push(entry);

@@ -1,17 +1,17 @@
+import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
-  readFile,
   link,
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   rename,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import packageMetadata from "../../package.json" with { type: "json" };
 import { BlockedError } from "../errors.ts";
@@ -21,8 +21,8 @@ import type {
   ProviderName,
   VerifiedArchive,
 } from "../types/index.ts";
-import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { log } from "../utils/logger.ts";
 import { runProcess } from "../utils/process.ts";
 import { validateArchiveFileEntries } from "./archive-entries.ts";
 import { createArchiveManifestV2 } from "./archive-manifest.ts";
@@ -68,7 +68,7 @@ export async function createArchive(
 
       await mkdir(destDir, { recursive: true });
 
-      if (file.mcpServersOnly) {
+      if (file.mcpServersOnly !== undefined) {
         await writeFile(destPath, file.mcpServersOnly, "utf8");
       } else {
         await copyFile(file.sourcePath, destPath);

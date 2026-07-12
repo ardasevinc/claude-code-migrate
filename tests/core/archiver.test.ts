@@ -1,15 +1,15 @@
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -20,8 +20,8 @@ import {
   validateArchive,
   validateArchiveEntryPaths,
 } from "../../src/core/archiver.ts";
-import { runCommand, shellQuote } from "../../src/utils/shell.ts";
 import type { FileEntry } from "../../src/types/index.ts";
+import { runCommand, shellQuote } from "../../src/utils/shell.ts";
 
 describe("archiver", () => {
   async function fixture(rootDir: string, contents = "new\n"): Promise<FileEntry[]> {
@@ -29,6 +29,30 @@ describe("archiver", () => {
     await writeFile(sourcePath, contents, "utf8");
     return [{ sourcePath, relativePath: "codex/AGENTS.md", isSymlink: false }];
   }
+
+  it("archives empty virtual content without reading its source binding", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-empty-virtual-test-"));
+    try {
+      const archivePath = join(rootDir, "backup.tar.gz");
+      const extractDir = join(rootDir, "extract");
+      await createArchive(
+        [
+          {
+            sourcePath: join(rootDir, "missing"),
+            relativePath: "claude/.mcp-config.json",
+            isSymlink: false,
+            mcpServersOnly: "",
+          },
+        ],
+        archivePath,
+        { providers: ["claude"] },
+      );
+      await extractArchive(archivePath, extractDir);
+      expect(await readFile(join(extractDir, "claude/.mcp-config.json"), "utf8")).toBe("");
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
 
   it("creates a multi-provider archive with shared files once", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-test-"));

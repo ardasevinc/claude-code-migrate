@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   canonicalInventory,
@@ -6,7 +7,8 @@ import {
   inventoryFingerprint,
   inventoryFromFileEntries,
   overlayInventories,
-  postInventoryFingerprint,
+  overlayInventoryFingerprint,
+  symlinkInventoryEntry,
 } from "../../src/core/inventory.ts";
 
 const entry = (path: string, overrides: Partial<InventoryEntry> = {}): InventoryEntry => ({
@@ -63,24 +65,49 @@ describe("managed state inventory", () => {
       expect(inventoryFingerprint(changed)).not.toBe(inventoryFingerprint(base));
   });
 
-  it("hashes virtual and symlink bindings without serializing raw targets", async () => {
+  it("models collected symlink provenance as archived regular-file bytes", async () => {
     const target = "../../private/secret-target";
     const inventory = await inventoryFromFileEntries([
       {
         sourcePath: "/unused",
-        relativePath: "claude/skills/demo",
+        relativePath: "claude/skills/demo/SKILL.md",
         isSymlink: true,
         originalSymlinkTarget: target,
+        mcpServersOnly: "",
       },
     ]);
+    expect(inventory[0]).toMatchObject({ type: "file", mode: 0o644, size: 0 });
     expect(JSON.stringify(inventory)).not.toContain(target);
     expect(inventory[0]?.sha256).toHaveLength(64);
+  });
+
+  it("domain-separates logical symlink targets without retaining them", () => {
+    const target = "../../private/secret-target";
+    const logical = symlinkInventoryEntry("claude/skills/demo", target);
+    expect(logical.type).toBe("symlink");
+    expect(JSON.stringify(logical)).not.toContain(target);
+    expect(logical.sha256).not.toBe(createHash("sha256").update(target).digest("hex"));
   });
 
   it("rejects portable collisions", () => {
     expect(() =>
       canonicalInventory([entry("codex/skills/Demo/x"), entry("codex/skills/demo/y")]),
     ).toThrow("Non-portable inventory path collision");
+  });
+
+  it.each([
+    [entry("codex/auth.json"), "not managed"],
+    [entry("codex/config.toml", { mode: 0o600 as 0o644 }), "mode"],
+    [entry("codex/config.toml", { size: -1 }), "size"],
+    [entry("codex/config.toml", { sha256: "A".repeat(64) }), "sha256"],
+  ])("rejects malformed entries", (invalid, message) => {
+    expect(() => canonicalInventory([invalid])).toThrow(message);
+  });
+
+  it("rejects file ancestor conflicts", () => {
+    expect(() => canonicalInventory([entry("codex/rules"), entry("codex/rules/local.md")])).toThrow(
+      "file ancestor conflict",
+    );
   });
 
   it("overlays incoming entries while preserving target-only entries", () => {
@@ -95,7 +122,7 @@ describe("managed state inventory", () => {
       ["codex/config.toml", "update"],
       ["codex/rules/local.md", "preserve"],
     ]);
-    expect(postInventoryFingerprint(target, incoming)).toBe(
+    expect(overlayInventoryFingerprint(target, incoming)).toBe(
       inventoryFingerprint(overlay.map(({ entry: item }) => item)),
     );
   });
@@ -104,9 +131,15 @@ describe("managed state inventory", () => {
     const managed = [
       entry("codex/rules/a.md"),
       entry("codex/rules/b.md"),
+      entry("codex/.tmp/plugins/demo/file"),
+      entry("codex/.tmp/plugins.sha"),
+      entry("claude/.mcp-config.json"),
       entry("shared/agents/skills/demo/SKILL.md"),
     ];
     expect(groupManagedTopLevelEntries(managed).map((group) => group.path)).toEqual([
+      "claude/.mcp-config.json",
+      "codex/.tmp/plugins",
+      "codex/.tmp/plugins.sha",
       "codex/rules",
       "shared/agents/skills",
     ]);
