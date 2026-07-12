@@ -24,9 +24,13 @@ export interface PushObservationQueries {
   readonly pathExistence?: readonly string[];
   readonly commandNames?: readonly string[];
   readonly capturePaths?: readonly string[];
+  /** Home-relative captures whose live paths are resolved by the probe after observing HOME. */
+  readonly captureIds?: readonly PushCaptureId[];
   readonly marketplaceNames?: readonly string[];
   readonly sharedSkillNames?: boolean;
 }
+
+export type PushCaptureId = "claude-mcp" | "codex-config";
 
 export interface PushObservationTransport {
   run(
@@ -108,6 +112,7 @@ gui=false; [ "$(uname -s)" = Darwin ] && [ -n "\${DISPLAY-}\${WAYLAND_DISPLAY-}\
 for x in ${encoded([...new Set(queries.commandNames ?? [])].sort())}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
 for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); v=false; [ -e "$p" ] || [ -L "$p" ] && v=true; emit EXISTS "$x" "$v"; done
 for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
+for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "$x"); case "$i" in claude-mcp) p="$home/.claude.json";; codex-config) p="$home/.codex/config.toml";; *) exit 44;; esac; if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
 walk(){ ( logical=$1; live=$2; [ -e "$live" ] || [ -L "$live" ] || return 0; n=\${live##*/}; [ "$n" = .git ] && return 0; case "$logical" in codex/skills/.system|codex/skills/.system/*) return 0;; esac; if [ -L "$live" ]; then t=$(readlink "$live"; printf x); t=\${t%x}; z=$(printf '%s' "$t"|wc -c|tr -d ' '); h=$(printf 'ccm:inventory:symlink-target\\0%s' "$t"|hash); emit ENTRY "$(printf '%s' "$logical"|enc)" symlink 755 "$z" "$h"; elif [ -f "$live" ]; then z=$(size "$live"); [ "$z" -le ${MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES} ] || exit 42; m=$(mode "$live"); if [ $((0$m & 0111)) -ne 0 ]; then m=755; else m=644; fi; emit ENTRY "$(printf '%s' "$logical"|enc)" file "$m" "$z" "$(hash <"$live")"; elif [ -d "$live" ]; then for c in "$live"/* "$live"/.[!.]* "$live"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; n=\${c##*/}; walk "$logical/$n" "$c"; done; else exit 43; fi; ); }
 for x in ${encoded(roots)}; do l=$(dec "$x"); case "$l" in claude/*) p="$home/.claude/\${l#claude/}";; codex/*) p="$home/.codex/\${l#codex/}";; shared/agents/*) p="$home/.agents/\${l#shared/agents/}";; *) exit 44;; esac; walk "$l" "$p"; done
 for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
@@ -258,7 +263,11 @@ export function parseRemotePushObservation(
   };
   requireKeys(commands, queries.commandNames ?? [], "CMD");
   requireKeys(exists, queries.pathExistence ?? [], "EXISTS");
-  requireKeys(captures, queries.capturePaths ?? [], "CAPTURE");
+  requireKeys(
+    captures,
+    [...(queries.capturePaths ?? []), ...(queries.captureIds ?? [])],
+    "CAPTURE",
+  );
   requireKeys(markets, queries.marketplaceNames ?? [], "MARKET");
   const capabilities = {
     os,
@@ -323,6 +332,9 @@ export async function observeRemotePushTarget(input: {
   const queries = input.queries ?? {};
   for (const p of [...(queries.pathExistence ?? []), ...(queries.capturePaths ?? [])])
     validateAbsolute(p, "query path");
+  for (const id of queries.captureIds ?? [])
+    if (id !== "claude-mcp" && id !== "codex-config")
+      throw new Error(`Invalid push capture ID: ${JSON.stringify(id)}`);
   for (const n of [...(queries.commandNames ?? []), ...(queries.marketplaceNames ?? [])])
     if (n !== basename(n) || !/^[A-Za-z0-9._@+-]+$/.test(n))
       throw new Error(`Invalid observation name: ${JSON.stringify(n)}`);

@@ -178,6 +178,24 @@ describe("remote push observation", () => {
     ).toThrow("Invalid CAPTURE");
   });
 
+  it("resolves logical capture IDs only after learning remote HOME", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-capture-id-"));
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".claude.json"), "claude\n");
+    await writeFile(join(home, ".codex", "config.toml"), "codex\n");
+    const queries = { captureIds: ["claude-mcp", "codex-config"] as const };
+    const result = await runProcess("sh", ["-c", buildRemotePushObservationProbe([], queries)], {
+      env: { ...process.env, HOME: home },
+    });
+    const observed = parseRemotePushObservation(result.stdout, [], queries);
+    expect(Buffer.from(observed.facts.captures.get("claude-mcp") ?? []).toString()).toBe(
+      "claude\n",
+    );
+    expect(Buffer.from(observed.facts.captures.get("codex-config") ?? []).toString()).toBe(
+      "codex\n",
+    );
+  });
+
   it.each([
     ["unknown record", envelope("WAT\teA==")],
     ["duplicate singleton", envelope(`HOME\t${e("/tmp")}`)],
