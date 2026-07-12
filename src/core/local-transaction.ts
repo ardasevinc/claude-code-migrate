@@ -563,6 +563,7 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
   let commitStarted = false;
   let activeStep: Promise<void> = settled;
   let rollbackPromise: Promise<TransactionJournal> | undefined;
+  let rollbackFinalizationPromise: Promise<TransactionJournal> | undefined;
   const runStep = async (operation: () => Promise<void>): Promise<void> => {
     if (interrupted) throw new InterruptRequestedError("Transaction interrupted");
     const step = operation();
@@ -587,9 +588,16 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
       );
     return rollbackPromise;
   };
+  const rollbackAndFinalizeOnce = () => {
+    rollbackFinalizationPromise ??= rollbackOnce().then(async (rolledBack) => {
+      await finalizeTerminalJournal(options.context, roots, rolledBack);
+      return rolledBack;
+    });
+    return rollbackFinalizationPromise;
+  };
   const unregister = registerInterruptCleanup(async () => {
     interrupted = true;
-    await rollbackOnce();
+    await rollbackAndFinalizeOnce();
   });
   try {
     await options.afterBoundary?.("journal:planning", journal);
@@ -719,9 +727,8 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
       );
     }
     try {
-      journal = await rollbackOnce();
+      journal = await rollbackAndFinalizeOnce();
       unregister();
-      await finalizeTerminalJournal(options.context, roots, journal);
     } catch (rollbackError) {
       unregister();
       if (rollbackError instanceof ExecutionError) throw rollbackError;
