@@ -78,7 +78,11 @@ export async function adaptCodexHooksForHost(
         if (handler.type !== "command" || typeof handler.command !== "string") continue;
 
         const suffix = `:${eventLabel}:${groupIndex}:${handlerIndex}`;
-        const sourceStateEntry = Object.entries(states).find(([key]) => key.endsWith(suffix));
+        const targetKey = `${targetHooksPath}${suffix}`;
+        const matchingStateEntries = Object.entries(states).filter(([key]) => key.endsWith(suffix));
+        const sourceStateEntry =
+          matchingStateEntries.find(([key]) => key === targetKey) ?? matchingStateEntries[0];
+        for (const [key] of matchingStateEntries) consumedStateKeys.add(key);
         const originalHash = commandHookHash(eventLabel, group.matcher, handler);
 
         if (PATH_PATTERN.test(handler.command)) {
@@ -94,9 +98,7 @@ export async function adaptCodexHooksForHost(
         }
 
         if (!sourceStateEntry) continue;
-        const [sourceKey, sourceState] = sourceStateEntry;
-        consumedStateKeys.add(sourceKey);
-        const targetKey = `${targetHooksPath}${suffix}`;
+        const [, sourceState] = sourceStateEntry;
         const targetState: HookState = {};
 
         if (typeof sourceState.enabled === "boolean") {
