@@ -36,6 +36,7 @@ describe("prepared push observation request", () => {
     expect(request.queries.sharedSkillNames).toBe(true);
     expect(request.queries.codexPluginList).toBe(true);
     expect(request.queries.commandNames).toContain("codex");
+    expect(request.queries.commandNames).toContain("python3");
     expect(request.requestIdentity).toBe(
       pushObservationRequestIdentity({
         host: request.host,
@@ -59,5 +60,6 @@ describe("prepared push observation request", () => {
     });
     expect(request.inventoryRoots).toEqual(["shared/agents/skills"]);
     expect(request.queries.sharedSkillNames).toBe(false);
+    expect(request.queries.commandNames).toContain("python3");
   });
 });

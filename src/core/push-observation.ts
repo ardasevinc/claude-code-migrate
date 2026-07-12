@@ -45,6 +45,7 @@ export interface PushObservationTransport {
 export interface PrivatePushTargetFacts {
   readonly home: string;
   readonly pathExistence: ReadonlyMap<string, boolean>;
+  /** Canonical, symlink-resolved absolute executable paths, or null when unavailable. */
   readonly commandPaths: ReadonlyMap<string, string | null>;
   readonly captures: ReadonlyMap<string, Uint8Array | null>;
   readonly marketplacePayloads: ReadonlyMap<string, boolean>;
@@ -191,7 +192,11 @@ home=\${HOME-}; case "$home" in /*) ;; *) exit 41;; esac; case "$home" in *'/../
 printf 'CCM_PUSH_OBSERVATION\\t1\\n'; emit HOME "$(printf '%s' "$home"|enc)"
 os=$(uname -s); arch=$(uname -m); emit OS "$(printf '%s' "$os"|enc)"; emit ARCH "$(printf '%s' "$arch"|enc)"
 gui=false; [ "$(uname -s)" = Darwin ] && [ -n "\${DISPLAY-}\${WAYLAND_DISPLAY-}\${TERM_PROGRAM-}" ] && gui=true; emit GUI "$gui"
-codex_path=; for x in ${encoded(commandNames)}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); case "$p" in /*) ;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$n" "$home/.local/bin/$n" "$home/bin/$n" "/usr/local/bin/$n" "/usr/bin/$n"; do if [ -x "$c" ]; then p=$c; break; fi; done; fi; [ "$n" = codex ] && codex_path=$p; if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
+findcmd(){ p=$(command -v "$1" 2>/dev/null || true); case "$p" in /*) ;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$1" "$home/.local/bin/$1" "$home/bin/$1" "/usr/local/bin/$1" "/usr/bin/$1"; do if [ -x "$c" ]; then p=$c; break; fi; done; fi; printf '%s' "$p"; }
+python_path=$(findcmd python3); [ -n "$python_path" ] || exit 46
+resolve(){ "$python_path" -c 'import os,sys; p=os.path.realpath(sys.argv[1]); ok=os.path.isabs(p) and os.path.isfile(p) and os.access(p, os.X_OK); print(p) if ok else None; raise SystemExit(0 if ok else 1)' "$1"; }
+python_path=$(resolve "$python_path") || exit 46
+codex_path=; for x in ${encoded(commandNames)}; do n=$(dec "$x"); p=$(findcmd "$n"); if [ -n "$p" ]; then p=$(resolve "$p" 2>/dev/null || true); fi; [ "$n" = codex ] && codex_path=$p; if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
 for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); case "$p" in '~/'*) live="$home/\${p#??}";; *) live=$p;; esac; v=false; [ -e "$live" ] || [ -L "$live" ] && v=true; emit EXISTS "$x" "$v"; done
 for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
 for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "$x"); case "$i" in claude-mcp) p="$home/.claude.json";; codex-config) p="$home/.codex/config.toml";; *) exit 44;; esac; if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done

@@ -81,9 +81,11 @@ export async function preparePushObservationRequest(input: {
   const derived = derivePushObservationQueries(transforms, { ...(input.policyOverrides ?? {}) });
   const queries = canonicalQueries({
     ...derived,
-    commandNames: derived.codexPluginList
-      ? [...(derived.commandNames ?? []), "codex"]
-      : derived.commandNames,
+    commandNames: [
+      ...(derived.commandNames ?? []),
+      ...(derived.codexPluginList ? ["codex"] : []),
+      "python3",
+    ],
     sharedSkillNames: hasClaudeRoot && hasSharedRoot,
   });
   const roots = [...new Set(inventoryRoots)].sort();

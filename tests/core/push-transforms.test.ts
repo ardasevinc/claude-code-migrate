@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -173,11 +173,12 @@ command = "./scripts/gone"
         },
       },
     });
-    expect(observed.facts.commandPaths.get("demo")).toBe(join(bin, "demo"));
+    const resolvedDemo = await realpath(join(bin, "demo"));
+    expect(observed.facts.commandPaths.get("demo")).toBe(resolvedDemo);
     expect(observed.facts.pathExistence.get("~/.bun/bin/demo")).toBe(true);
     const transformed = await transformPushInputs({ codexConfig: config }, observed);
     const output = Buffer.from(transformed.codexConfig ?? []).toString();
-    expect(output).toContain(`command = ${JSON.stringify(join(bin, "demo"))}`);
+    expect(output).toContain(`command = ${JSON.stringify(resolvedDemo)}`);
     expect(output).not.toContain("mcp_servers.relative");
     expect(output).not.toContain("notify =");
   });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -158,7 +158,49 @@ describe("remote push observation", () => {
       },
     );
     const observed = parseRemotePushObservation(result.stdout, [], queries);
-    expect(observed.facts.commandPaths.get("demo")).toBe(join(home, ".bun", "bin", "demo"));
+    expect(observed.facts.commandPaths.get("demo")).toBe(
+      await realpath(join(home, ".bun", "bin", "demo")),
+    );
+  });
+
+  it("reports canonical command targets through relative symlink chains", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-command-symlink-"));
+    const bin = join(home, "bin");
+    await mkdir(join(home, "libexec"), { recursive: true });
+    await mkdir(bin);
+    const target = join(home, "libexec", "demo-real");
+    await writeFile(target, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await symlink("../libexec/demo-real", join(bin, "demo-link"));
+    await symlink("demo-link", join(bin, "demo"));
+    const queries = { commandNames: ["demo"] };
+    const result = await runProcess(
+      "/bin/sh",
+      ["-c", buildRemotePushObservationProbe([], queries)],
+      {
+        env: { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+    expect(
+      parseRemotePushObservation(result.stdout, [], queries).facts.commandPaths.get("demo"),
+    ).toBe(await realpath(target));
+  });
+
+  it("reports dangling command symlinks as missing", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-command-dangling-"));
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    await symlink("missing", join(bin, "demo"));
+    const queries = { commandNames: ["demo"] };
+    const result = await runProcess(
+      "/bin/sh",
+      ["-c", buildRemotePushObservationProbe([], queries)],
+      {
+        env: { HOME: home, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+    expect(
+      parseRemotePushObservation(result.stdout, [], queries).facts.commandPaths.get("demo"),
+    ).toBeNull();
   });
 
   it("resolves safe tilde existence queries against observed HOME", async () => {
