@@ -15,6 +15,7 @@ import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
 
 export const MAX_RESTORE_OBSERVATION_FILE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESTORE_OBSERVATION_TOTAL_BYTES = 64 * 1024 * 1024;
+export const MAX_RESTORE_OBSERVATION_ENTRIES = 100_000;
 
 export interface RestoreObservationQueries {
   readonly pathExistence?: readonly string[];
@@ -50,6 +51,7 @@ export interface ObserveLocalRestoreTargetInput {
   readonly selectedProviders: readonly ProviderName[];
   readonly incoming: readonly InventoryEntry[];
   readonly queries?: RestoreObservationQueries;
+  readonly limits?: { readonly maxEntries?: number };
 }
 
 export async function resolveLocalHookCandidate(
@@ -91,6 +93,14 @@ async function exists(context: RuntimeContext, path: string): Promise<boolean> {
 
 interface ObservationBudget {
   bytes: number;
+  entries: number;
+  maxEntries: number;
+}
+
+function consumeObservationEntry(budget: ObservationBudget, count = 1): void {
+  budget.entries += count;
+  if (budget.entries > budget.maxEntries)
+    throw new Error("Restore observation entry count cap exceeded");
 }
 
 async function boundedRegularFileRead(
@@ -148,6 +158,7 @@ async function inventoryTree(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
+  consumeObservationEntry(budget);
   if (stat.isSymbolicLink()) {
     const target = await context.files.readlink(root);
     const after = await context.files.lstat(root);
@@ -211,6 +222,7 @@ async function captureMcp(
     }
     throw error;
   }
+  consumeObservationEntry(budget);
   if (!stat.isFile()) throw new Error("Claude MCP target must be a regular file");
   const observed = await boundedRegularFileRead(context, path, "claude/.mcp-config.json", budget);
   if (
@@ -231,12 +243,17 @@ async function captureMcp(
   };
 }
 
-async function sharedSkillNames(context: RuntimeContext, path: string): Promise<string[]> {
+async function sharedSkillNames(
+  context: RuntimeContext,
+  path: string,
+  budget: ObservationBudget,
+): Promise<string[]> {
   try {
     const stat = await context.files.lstat(path);
     if (!stat.isDirectory() || stat.isSymbolicLink())
       throw new Error("Shared skills target must be a regular directory");
     const entries = await context.files.readdir(path, { withFileTypes: true });
+    consumeObservationEntry(budget, 1 + entries.length);
     return entries
       .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
       .map((entry) => entry.name)
@@ -259,7 +276,11 @@ export async function observeLocalRestoreTarget(
     if (group.path.startsWith("codex/")) return selected.has("codex");
     return selected.size > 0;
   });
-  const budget: ObservationBudget = { bytes: 0 };
+  const budget: ObservationBudget = {
+    bytes: 0,
+    entries: 0,
+    maxEntries: input.limits?.maxEntries ?? MAX_RESTORE_OBSERVATION_ENTRIES,
+  };
   const observedEntries: InventoryEntry[] = [];
   for (const group of groups) {
     observedEntries.push(
@@ -272,7 +293,7 @@ export async function observeLocalRestoreTarget(
   const recreatesSharedSkillView = selected.has("claude") && hasClaudeMember && hasSharedMember;
   let postSharedSkillNames: string[] = [];
   if (recreatesSharedSkillView) {
-    const existingNames = await sharedSkillNames(context, paths.sharedSkillsDir);
+    const existingNames = await sharedSkillNames(context, paths.sharedSkillsDir, budget);
     const incomingNames = managedIncoming
       .filter(
         (entry) =>

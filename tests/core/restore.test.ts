@@ -6,6 +6,7 @@ import { DEFAULT_COLLECTION_PATHS } from "../../src/config/providers.ts";
 import { createArchive } from "../../src/core/archiver.ts";
 import {
   backupLocalDirectoryIfExists,
+  mergeLocalClaudeMcp,
   resolveProvidersToRestore,
   restoreArchive,
 } from "../../src/core/restore.ts";
@@ -184,6 +185,36 @@ describe("restore helpers", () => {
       expect(await readFile(referent, "utf8")).toBe('{"mcpServers":{"keep":{}}}');
     } finally {
       Object.assign(DEFAULT_COLLECTION_PATHS, originalPaths);
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically replaces a target swapped to a symlink after its safe read", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-restore-mcp-swap-test-"));
+    try {
+      const extractRoot = join(rootDir, "extract");
+      const targetPath = join(rootDir, ".claude.json");
+      const referent = join(rootDir, "outside.json");
+      await mkdir(join(extractRoot, "claude"), { recursive: true });
+      await writeFile(join(extractRoot, "claude", ".mcp-config.json"), '{"mcpServers":{"new":{}}}');
+      await writeFile(targetPath, '{"mcpServers":{"old":{}}}');
+      await writeFile(referent, "external");
+
+      await mergeLocalClaudeMcp(extractRoot, {
+        targetPath,
+        beforeCommit: async () => {
+          await rm(targetPath);
+          await symlink(referent, targetPath);
+        },
+      });
+
+      expect(await readFile(referent, "utf8")).toBe("external");
+      const targetStat = await lstat(targetPath);
+      expect(targetStat.isFile()).toBe(true);
+      expect(targetStat.isSymbolicLink()).toBe(false);
+      expect(targetStat.mode & 0o777).toBe(0o600);
+      expect(await readFile(targetPath, "utf8")).toContain('"new"');
+    } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
   });

@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import {
   cp,
   lstat,
@@ -5,12 +8,14 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  open,
+  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   DEFAULT_COLLECTION_PATHS,
   isProviderName,
@@ -27,7 +32,10 @@ import { adaptCodexConfigForHost, normalizeLocalCodexMarketplaceSources } from "
 import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 import { mergeMcpServers } from "./mcp.ts";
 import { createRuntimeContext } from "../runtime/context.ts";
-import { resolveLocalHookCandidate } from "./restore-observation.ts";
+import {
+  MAX_RESTORE_OBSERVATION_FILE_BYTES,
+  resolveLocalHookCandidate,
+} from "./restore-observation.ts";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -81,34 +89,80 @@ export async function backupLocalDirectoryIfExists(
   return backupDir;
 }
 
-async function mergeLocalClaudeMcp(extractRoot: string): Promise<void> {
+export interface MergeLocalClaudeMcpOptions {
+  readonly targetPath?: string;
+  /** Test seam at the atomic commit boundary. */
+  readonly beforeCommit?: (targetPath: string, tempPath: string) => Promise<void>;
+}
+
+async function readBoundedRegularNoFollow(path: string, absent: string | null): Promise<string> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error("Claude MCP target must be a regular non-symlink file");
+    if (before.size > MAX_RESTORE_OBSERVATION_FILE_BYTES)
+      throw new Error("Claude MCP target exceeds restore observation file cap");
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      bytes.byteLength !== before.size ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size
+    )
+      throw new Error("Claude MCP target changed during read");
+    return bytes.toString("utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" && absent !== null) return absent;
+    if (code === "ELOOP") throw new Error("Claude MCP target must be a regular non-symlink file");
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+export async function mergeLocalClaudeMcp(
+  extractRoot: string,
+  options: MergeLocalClaudeMcpOptions = {},
+): Promise<void> {
   const incomingPath = join(extractRoot, "claude", ".mcp-config.json");
 
   if (!(await exists(incomingPath))) {
     return;
   }
 
-  const incomingRaw = await readFile(incomingPath, "utf8");
-  let existingRaw = "{}";
-  try {
-    const stat = await lstat(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new Error("Claude MCP target must be a regular non-symlink file");
-    }
-    existingRaw = await readFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  const targetPath = options.targetPath ?? DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath;
+  const incomingRaw = await readBoundedRegularNoFollow(incomingPath, null);
+  const existingRaw = await readBoundedRegularNoFollow(targetPath, "{}");
 
   const merged = mergeMcpServers(existingRaw, incomingRaw);
-  await writeFile(DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath, merged, "utf8");
+  const tempPath = join(dirname(targetPath), `.${basename(targetPath)}.ccm-${randomUUID()}.tmp`);
+  let committed = false;
+  try {
+    const temp = await open(
+      tempPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600,
+    );
+    try {
+      await temp.writeFile(merged, "utf8");
+      await temp.sync();
+    } finally {
+      await temp.close();
+    }
+    await options.beforeCommit?.(targetPath, tempPath);
+    await rename(tempPath, targetPath);
+    committed = true;
+  } finally {
+    if (!committed) await rm(tempPath, { force: true });
+  }
   await rm(incomingPath, { force: true });
 
   const incoming = JSON.parse(incomingRaw) as { mcpServers?: Record<string, unknown> };
   const serverCount = Object.keys(incoming.mcpServers ?? {}).length;
-  log.dim(
-    `  Merged ${serverCount} MCP server(s) into ${DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath}`,
-  );
+  log.dim(`  Merged ${serverCount} MCP server(s) into ${targetPath}`);
 }
 
 async function recreateClaudeSharedSkillSymlinks(): Promise<void> {

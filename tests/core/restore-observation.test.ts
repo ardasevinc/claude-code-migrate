@@ -228,4 +228,20 @@ describe("observeLocalRestoreTarget", () => {
       }),
     ).rejects.toThrow("file cap exceeded");
   });
+
+  it("counts directories and zero-byte files against the observation entry cap", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-"));
+    const paths = collectionPathsForHome(home);
+    await mkdir(join(paths.codexDir, "skills", "empty-dir"), { recursive: true });
+    await writeFile(join(paths.codexDir, "skills", "zero"), "");
+    await expect(
+      observeLocalRestoreTarget({
+        context: createRuntimeContext({ home }),
+        paths,
+        selectedProviders: ["codex"],
+        incoming: [incoming("codex/skills/new/SKILL.md")],
+        limits: { maxEntries: 2 },
+      }),
+    ).rejects.toThrow("entry count cap exceeded");
+  });
 });
