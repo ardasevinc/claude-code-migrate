@@ -272,6 +272,95 @@ describe("transaction journals", () => {
     ).toThrow("material references cannot change");
   });
 
+  it("persists complete immutable restart-recovery metadata", async () => {
+    const { context } = await fixture();
+    const journal = createTransactionJournal({
+      kind: "restore",
+      planId: "plan_x",
+      now: new Date("2026-07-12T12:00:00.000Z"),
+      members: [{ id: "codex-agents", rootCode: "codex-home" }],
+    });
+    await publishTransactionJournal(context, journal, null);
+    const preparing = transitionTransactionJournal(
+      journal,
+      "preparing",
+      new Date("2026-07-12T12:01:00.000Z"),
+      {
+        members: [
+          {
+            ...(journal.members[0] as TransactionMember),
+            state: "snapshotted",
+            stageRef: "stage-abc",
+            rollbackRef: "rollback-abc",
+            targetRef: "skills/my skill/iş.md",
+            originalKind: "file",
+            preimageFingerprint: `fp_${"a".repeat(64)}`,
+            postimageFingerprint: `fp_${"b".repeat(64)}`,
+            backupRef: "1783900000000",
+          },
+        ],
+      },
+    );
+    await publishTransactionJournal(context, preparing, 0);
+    expect((await readTransactionJournal(context, journal.id)).members[0]).toMatchObject({
+      targetRef: "skills/my skill/iş.md",
+      originalKind: "file",
+      backupRef: "1783900000000",
+    });
+    expect(() =>
+      transitionTransactionJournal(preparing, "prepared", new Date("2026-07-12T12:02:00.000Z"), {
+        members: preparing.members.map((member) => ({
+          ...member,
+          postimageFingerprint: `fp_${"c".repeat(64)}`,
+        })),
+      }),
+    ).toThrow("recovery metadata cannot change");
+    expect(() =>
+      parseTransactionJournal(
+        JSON.stringify({
+          ...preparing,
+          members: preparing.members.map(({ backupRef: _backupRef, ...member }) => member),
+        }),
+      ),
+    ).toThrow("recovery metadata must be complete");
+  });
+
+  it.each([
+    ["AGENTS.md", "AGENTS.md", "overlap"],
+    ["skills", "skills/demo", "overlap"],
+    ["Skills/demo", "skills/other", "portable collision"],
+    [".", "AGENTS.md", "overlap"],
+  ])("rejects unsafe same-root recovery targets %s and %s", (first, second, message) => {
+    const journal = createTransactionJournal({
+      kind: "restore",
+      planId: "plan_x",
+      now: new Date("2026-07-12T12:00:00.000Z"),
+      members: [
+        { id: "first", rootCode: "codex-home" },
+        { id: "second", rootCode: "codex-home" },
+      ],
+    });
+    const recovery = (member: TransactionMember, targetRef: string): TransactionMember => ({
+      ...member,
+      state: "snapshotted",
+      stageRef: `stage-${member.id}`,
+      rollbackRef: `rollback-${member.id}`,
+      targetRef,
+      originalKind: "file",
+      preimageFingerprint: `fp_${"a".repeat(64)}`,
+      postimageFingerprint: `fp_${"b".repeat(64)}`,
+      backupRef: "1783900000000",
+    });
+    expect(() =>
+      transitionTransactionJournal(journal, "preparing", new Date("2026-07-12T12:01:00.000Z"), {
+        members: [
+          recovery(journal.members[0] as TransactionMember, first),
+          recovery(journal.members[1] as TransactionMember, second),
+        ],
+      }),
+    ).toThrow(message);
+  });
+
   it.each([
     '{"schemaVersion":1,"schemaVersion":1}',
     '{"schemaVersion":2}',

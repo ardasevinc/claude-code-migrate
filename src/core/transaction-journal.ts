@@ -9,6 +9,7 @@ import {
   AdvisoryLockReleaseError,
   withAdvisoryFileLock,
 } from "./advisory-lock.ts";
+import { validateCanonicalArchivePath } from "./archive-entries.ts";
 import { ccmStateRoot, transactionJournalDir } from "./state-paths.ts";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.ts";
 
@@ -29,12 +30,19 @@ export type TransactionMemberState =
   | "rolled_back"
   | "untouched";
 
+export type TransactionTargetKind = "absent" | "file" | "directory" | "symlink";
+
 export interface TransactionMember {
   readonly id: string;
   readonly state: TransactionMemberState;
   readonly rootCode: string;
   readonly stageRef?: string;
   readonly rollbackRef?: string;
+  readonly targetRef?: string;
+  readonly originalKind?: TransactionTargetKind;
+  readonly preimageFingerprint?: string;
+  readonly postimageFingerprint?: string;
+  readonly backupRef?: string;
 }
 
 export interface TransactionJournal {
@@ -66,6 +74,8 @@ const MAX_JOURNALS = 1024;
 const JOURNAL_ID = /^txn_[a-f0-9]{32}$/;
 const SYMBOL = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const PLAN_ID = /^plan_[a-zA-Z0-9._-]{1,128}$/;
+const FINGERPRINT = /^fp_[a-f0-9]{64}$/;
+const BACKUP_REF = /^(0|[1-9][0-9]{0,19})$/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const WRITER_LOCK = ".writer.lock";
 const TRANSITIONS: Readonly<Record<TransactionState, readonly TransactionState[]>> = {
@@ -125,7 +135,22 @@ function timestamp(value: unknown, label: string): string {
 function validateMemberShape(value: unknown, index: number): TransactionMember {
   const label = `journal member ${index}`;
   const member = record(value, label);
-  exactKeys(member, ["id", "state", "rootCode", "stageRef", "rollbackRef"], label);
+  exactKeys(
+    member,
+    [
+      "id",
+      "state",
+      "rootCode",
+      "stageRef",
+      "rollbackRef",
+      "targetRef",
+      "originalKind",
+      "preimageFingerprint",
+      "postimageFingerprint",
+      "backupRef",
+    ],
+    label,
+  );
   const state = member.state;
   if (
     state !== "pending" &&
@@ -141,6 +166,55 @@ function validateMemberShape(value: unknown, index: number): TransactionMember {
     member.rollbackRef === undefined
       ? undefined
       : symbol(member.rollbackRef, `${label} rollbackRef`);
+  const targetRef =
+    member.targetRef === undefined
+      ? undefined
+      : member.targetRef === "."
+        ? "."
+        : (() => {
+            if (typeof member.targetRef !== "string" || member.targetRef.length > 512)
+              throw new Error(`${label} targetRef is invalid`);
+            try {
+              validateCanonicalArchivePath(member.targetRef);
+            } catch {
+              throw new Error(`${label} targetRef is invalid`);
+            }
+            return member.targetRef;
+          })();
+  const originalKind = member.originalKind;
+  if (
+    originalKind !== undefined &&
+    originalKind !== "absent" &&
+    originalKind !== "file" &&
+    originalKind !== "directory" &&
+    originalKind !== "symlink"
+  )
+    throw new Error(`${label} originalKind is invalid`);
+  const preimageFingerprint = member.preimageFingerprint;
+  if (
+    preimageFingerprint !== undefined &&
+    (typeof preimageFingerprint !== "string" || !FINGERPRINT.test(preimageFingerprint))
+  )
+    throw new Error(`${label} preimageFingerprint is invalid`);
+  const postimageFingerprint = member.postimageFingerprint;
+  if (
+    postimageFingerprint !== undefined &&
+    (typeof postimageFingerprint !== "string" || !FINGERPRINT.test(postimageFingerprint))
+  )
+    throw new Error(`${label} postimageFingerprint is invalid`);
+  const backupRef = member.backupRef;
+  if (backupRef !== undefined && (typeof backupRef !== "string" || !BACKUP_REF.test(backupRef)))
+    throw new Error(`${label} backupRef is invalid`);
+  const recoveryFields = [
+    targetRef,
+    originalKind,
+    preimageFingerprint,
+    postimageFingerprint,
+    backupRef,
+  ];
+  const recoveryFieldCount = recoveryFields.filter((field) => field !== undefined).length;
+  if (recoveryFieldCount !== 0 && recoveryFieldCount !== recoveryFields.length)
+    throw new Error(`${label} recovery metadata must be complete`);
   if (
     (state === "pending" || state === "untouched") &&
     (stageRef !== undefined || rollbackRef !== undefined)
@@ -158,6 +232,11 @@ function validateMemberShape(value: unknown, index: number): TransactionMember {
     rootCode: symbol(member.rootCode, `${label} rootCode`),
     ...(stageRef === undefined ? {} : { stageRef }),
     ...(rollbackRef === undefined ? {} : { rollbackRef }),
+    ...(targetRef === undefined ? {} : { targetRef }),
+    ...(originalKind === undefined ? {} : { originalKind }),
+    ...(preimageFingerprint === undefined ? {} : { preimageFingerprint }),
+    ...(postimageFingerprint === undefined ? {} : { postimageFingerprint }),
+    ...(backupRef === undefined ? {} : { backupRef }),
   };
 }
 
@@ -187,6 +266,41 @@ function validateGlobalInvariants(journal: TransactionJournal): void {
       throw new Error("recovery_required journal needs an error code");
   } else if (journal.terminalErrorCode !== undefined) {
     throw new Error("terminalErrorCode is only valid for recovery_required");
+  }
+  const targetsByRoot = new Map<string, string[]>();
+  for (const member of journal.members) {
+    if (member.targetRef === undefined) continue;
+    const targets = targetsByRoot.get(member.rootCode) ?? [];
+    targets.push(member.targetRef);
+    targetsByRoot.set(member.rootCode, targets);
+  }
+  for (const targets of targetsByRoot.values()) {
+    const portablePrefixes = new Map<string, string>();
+    const portableTargets: string[] = [];
+    for (const target of targets) {
+      if (target === ".") {
+        if (targets.length > 1) throw new Error("journal recovery targets overlap");
+        portableTargets.push(target);
+        continue;
+      }
+      const segments = target.split("/");
+      for (let index = 1; index <= segments.length; index += 1) {
+        const prefix = segments.slice(0, index).join("/");
+        const portable = prefix.normalize("NFC").toLocaleLowerCase("en-US");
+        const existing = portablePrefixes.get(portable);
+        if (existing !== undefined && existing !== prefix)
+          throw new Error("journal recovery targets have a portable collision");
+        portablePrefixes.set(portable, prefix);
+      }
+      portableTargets.push(target.normalize("NFC").toLocaleLowerCase("en-US"));
+    }
+    portableTargets.sort();
+    for (let index = 0; index < portableTargets.length; index += 1) {
+      const target = portableTargets[index] as string;
+      const next = portableTargets[index + 1];
+      if (next !== undefined && (next === target || next.startsWith(`${target}/`)))
+        throw new Error("journal recovery targets overlap");
+    }
   }
 }
 
@@ -296,6 +410,16 @@ export function transitionTransactionJournal(
       (before.rollbackRef !== undefined && after.rollbackRef !== before.rollbackRef)
     )
       throw new Error("Transaction member material references cannot change");
+    if (
+      (before.targetRef !== undefined && after.targetRef !== before.targetRef) ||
+      (before.originalKind !== undefined && after.originalKind !== before.originalKind) ||
+      (before.preimageFingerprint !== undefined &&
+        after.preimageFingerprint !== before.preimageFingerprint) ||
+      (before.postimageFingerprint !== undefined &&
+        after.postimageFingerprint !== before.postimageFingerprint) ||
+      (before.backupRef !== undefined && after.backupRef !== before.backupRef)
+    )
+      throw new Error("Transaction member recovery metadata cannot change");
   }
   return parseTransactionJournal(
     JSON.stringify({
@@ -336,6 +460,16 @@ function assertJournalSuccessor(existing: TransactionJournal, candidate: Transac
       (before.rollbackRef !== undefined && after.rollbackRef !== before.rollbackRef)
     )
       throw new BlockedError("Transaction journal member is not a valid successor");
+    if (
+      (before.targetRef !== undefined && after.targetRef !== before.targetRef) ||
+      (before.originalKind !== undefined && after.originalKind !== before.originalKind) ||
+      (before.preimageFingerprint !== undefined &&
+        after.preimageFingerprint !== before.preimageFingerprint) ||
+      (before.postimageFingerprint !== undefined &&
+        after.postimageFingerprint !== before.postimageFingerprint) ||
+      (before.backupRef !== undefined && after.backupRef !== before.backupRef)
+    )
+      throw new BlockedError("Transaction journal member recovery metadata changed");
   }
 }
 
