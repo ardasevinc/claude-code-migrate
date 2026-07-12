@@ -3,91 +3,159 @@ import {
   canonicalJson,
   createMigrationPlan,
   diffMigrationPlans,
+  fingerprint,
   type MigrationPlanInput,
 } from "../../src/core/migration-plan.ts";
 
+const fp = (value: string) => fingerprint("test", value);
+const action = {
+  operation: "overlay",
+  disposition: "update",
+  phase: "commit",
+  scope: "codex",
+  targetRef: "codex/config",
+  sourceRef: "archive/codex/config",
+  beforeFingerprint: fp("before"),
+  afterFingerprint: fp("after"),
+  reversibility: "reversible",
+  policyProvenance: ["conflict.merge"],
+} as const;
 const base = (overrides: Partial<MigrationPlanInput> = {}): MigrationPlanInput => ({
-  sourceIdentity: "source-host-canary.example",
-  destinationIdentity: "destination-host-canary.example",
-  policy: { conflict: "merge", secrets: "redact" },
-  actions: [
-    {
-      provider: "codex",
-      resource: "configuration",
-      disposition: "update",
-      preconditions: [{ code: "destination-writable", satisfied: true }],
-      notices: [{ code: "merge-required", level: "info" }],
-    },
+  kind: "push",
+  providers: ["claude", "codex"],
+  profile: "portable",
+  executionModel: "staged-v1",
+  sourceEndpoint: "secret-source",
+  targetEndpoint: "secret-target",
+  sourceFingerprint: fp("source"),
+  targetFingerprint: fp("target"),
+  stagedPostFingerprint: fp("post"),
+  preconditions: [
+    { id: "target-writable", required: true, status: "satisfied", reasonCode: "target.writable" },
   ],
-  createdAt: "2026-07-12T12:00:00.000Z",
+  actions: [action],
+  dependencies: [],
+  warnings: [{ code: "content.changed" }],
+  policies: [{ code: "conflict", value: "merge", provenance: "cli" }],
+  createdAt: "2026-07-12T12:00:00Z",
   ...overrides,
 });
 
-describe("migration plan primitives", () => {
-  it("canonicalizes object keys while preserving array order", () => {
-    expect(canonicalJson({ z: 1, a: { d: 2, c: 3 } })).toBe('{"a":{"c":3,"d":2},"z":1}');
-  });
-
-  it("redacts raw identities and deeply freezes the returned JSON graph", () => {
+describe("migration plan contract", () => {
+  it("canonicalizes, redacts and freezes", () => {
+    expect(canonicalJson({ z: 1, a: 2 })).toBe('{"a":2,"z":1}');
     const plan = createMigrationPlan(base());
-    const serialized = JSON.stringify(plan);
-    expect(serialized).not.toContain("source-host-canary");
-    expect(serialized).not.toContain("destination-host-canary");
-    expect(Object.isFrozen(plan)).toBe(true);
+    expect(JSON.stringify(plan)).not.toContain("secret-source");
     expect(Object.isFrozen(plan.actions)).toBe(true);
-    expect(Object.isFrozen(plan.actions[0]?.preconditions)).toBe(true);
-    expect(() => {
-      (plan.policy as { conflict: string }).conflict = "overwrite";
-    }).toThrow();
+    expect(plan.schemaVersion).toBe(2);
   });
 
-  it("keeps plan and action ids stable across clocks and object key insertion order", () => {
+  it("keeps ids deterministic with action identity independent of mutable planning results", () => {
     const first = createMigrationPlan(base());
-    const policy = { secrets: "redact", conflict: "merge" } as const;
-    const second = createMigrationPlan(base({ createdAt: "2030-01-01T00:00:00Z", policy }));
-    expect(second.planId).toBe(first.planId);
-    expect(second.actions[0]?.actionId).toBe(first.actions[0]?.actionId);
-  });
-
-  it("changes domain-separated identities and plan ids for semantic changes", () => {
-    const first = createMigrationPlan(base());
-    const identities = createMigrationPlan(
-      base({ sourceIdentity: "different-source", destinationIdentity: "different-destination" }),
-    );
-    expect(first.source.fingerprint).not.toBe(first.destination.fingerprint);
-    expect(identities.planId).not.toBe(first.planId);
     const changed = createMigrationPlan(
       base({
-        actions: [{ provider: "codex", resource: "configuration", disposition: "create" }],
+        createdAt: "2030-01-01T00:00:00Z",
+        warnings: [],
+        actions: [{ ...action, disposition: "merge", beforeFingerprint: fp("drift") }],
       }),
     );
-    expect(changed.actions[0]?.actionId).not.toBe(first.actions[0]?.actionId);
+    expect(changed.actions[0]?.id).toBe(first.actions[0]?.id);
+    expect(changed.id).not.toBe(first.id);
     expect(diffMigrationPlans(first, changed)).toEqual({
       changed: true,
-      added: [changed.actions[0]?.actionId],
-      removed: [first.actions[0]?.actionId],
+      added: [],
+      removed: [],
+      changedActions: [first.actions[0]?.id],
     });
   });
 
-  it("derives blocked and noop status without a delete disposition", () => {
-    const blocked = createMigrationPlan(
-      base({
-        actions: [
-          {
-            provider: "shared",
-            resource: "skills",
-            disposition: "skip",
-            preconditions: [{ code: "compatible", satisfied: false }],
-          },
-        ],
-      }),
-    );
-    expect(blocked.status).toBe("blocked");
-    expect(JSON.stringify(blocked)).not.toContain('"delete"');
+  it("derives blocked and noop only from binding readiness rules", () => {
     expect(
       createMigrationPlan(
-        base({ actions: [{ provider: "claude", resource: "settings", disposition: "skip" }] }),
+        base({
+          preconditions: [
+            { id: "reachable", required: true, status: "unknown", reasonCode: "target.unknown" },
+          ],
+        }),
       ).status,
+    ).toBe("blocked");
+    expect(
+      createMigrationPlan(base({ actions: [{ ...action, disposition: "preserve" }] })).status,
     ).toBe("noop");
+  });
+
+  it("validates duplicate, unknown, self, cyclic dependencies and symbolic values", () => {
+    expect(() => createMigrationPlan(base({ actions: [action, action] }))).toThrow(
+      "duplicate action",
+    );
+    expect(() => createMigrationPlan(base({ warnings: [{ code: "free form message!" }] }))).toThrow(
+      "safe symbolic",
+    );
+    const one = createMigrationPlan(base()).actions[0]?.id;
+    if (!one) throw new Error("missing test action");
+    expect(() =>
+      createMigrationPlan(
+        base({
+          dependencies: [
+            {
+              id: "missing-owner",
+              ownerActionId: one,
+              dependsOnActionId: "action_missing",
+              type: "ordering",
+              required: true,
+              status: "unknown",
+              resolution: "unresolved",
+            },
+          ],
+        }),
+      ),
+    ).toThrow("unknown action");
+    expect(() =>
+      createMigrationPlan(
+        base({
+          dependencies: [
+            {
+              id: "self",
+              ownerActionId: one,
+              dependsOnActionId: one,
+              type: "ordering",
+              required: true,
+              status: "satisfied",
+              resolution: "resolved",
+            },
+          ],
+        }),
+      ),
+    ).toThrow("self-referential");
+    const secondInput = { ...action, targetRef: "codex/other" };
+    const second = createMigrationPlan(base({ actions: [secondInput] })).actions[0]?.id;
+    if (!second) throw new Error("missing second test action");
+    expect(() =>
+      createMigrationPlan(
+        base({
+          actions: [action, secondInput],
+          dependencies: [
+            {
+              id: "one-two",
+              ownerActionId: one,
+              dependsOnActionId: second,
+              type: "data",
+              required: true,
+              status: "satisfied",
+              resolution: "resolved",
+            },
+            {
+              id: "two-one",
+              ownerActionId: second,
+              dependsOnActionId: one,
+              type: "data",
+              required: true,
+              status: "satisfied",
+              resolution: "resolved",
+            },
+          ],
+        }),
+      ),
+    ).toThrow("cyclic");
   });
 });
