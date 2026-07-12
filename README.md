@@ -95,6 +95,33 @@ ccm backup ./out.tar.gz         # all enabled providers + shared
 ccm backup --dry-run
 ```
 
+New backups use the v2 archive manifest. It records the producing ccm version and, for every
+payload file, its canonical path, size, mode, and SHA-256 digest. ccm verifies the finished archive
+before publishing it.
+
+### Inspect and verify
+
+```bash
+ccm inspect ./ccm-backup.tar.gz          # metadata summary, no destination extraction
+ccm inspect ./ccm-backup.tar.gz --files  # include file metadata
+ccm inspect ./ccm-backup.tar.gz --json
+ccm verify ./ccm-backup.tar.gz
+ccm verify ./ccm-backup.tar.gz --json
+```
+
+`inspect` exits `0` for a structurally valid v1 or v2 archive. `verify` exits `0` only when v2 file
+integrity is verified, `1` for a valid legacy v1 archive whose integrity metadata is unavailable,
+and `3` for an invalid, unreadable, or unsupported archive. JSON output follows the same exit
+semantics and is suitable for automation.
+
+Legacy v1 backups remain restorable throughout the ccm 1.x release line. To upgrade one, restore
+it with a trusted 1.x ccm installation, review the restored files, then create a fresh v2 backup.
+Do not treat that conversion as retroactive verification of the v1 archive.
+
+Archive reads and restores use bounded streaming extraction. ccm rejects unsafe paths and entry
+types, duplicate or non-portable destinations, malformed manifests, integrity mismatches, and
+archives that exceed its compressed, expanded, per-file, entry-count, manifest, or path limits.
+
 ### Push
 
 ```bash
@@ -115,6 +142,9 @@ ccm restore ./ccm-backup.tar.gz        # restore all providers in archive
 ccm restore ./ccm-backup.tar.gz codex  # restore only codex
 ccm restore ./ccm-backup.tar.gz --dry-run
 ```
+
+Restored Codex hook trust is deliberately removed. Review the restored hook commands and approve
+them again on the destination host before relying on them.
 
 ## Config file
 
