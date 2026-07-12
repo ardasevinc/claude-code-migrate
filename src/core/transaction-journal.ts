@@ -10,7 +10,7 @@ import {
   withAdvisoryFileLock,
 } from "./advisory-lock.ts";
 import { validateCanonicalArchivePath } from "./archive-entries.ts";
-import { ccmStateRoot, transactionJournalDir } from "./state-paths.ts";
+import { ccmStateRoot, receiptDir, transactionJournalDir } from "./state-paths.ts";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.ts";
 
 export type TransactionState =
@@ -562,8 +562,14 @@ async function ensureCanonicalStateHome(path: string): Promise<void> {
   )
     throw new Error("Unsafe XDG state directory ancestry");
   for (const directory of missing.reverse()) {
-    await mkdir(directory, { mode: 0o700 });
-    await syncDirectory(dirname(directory));
+    let created = false;
+    try {
+      await mkdir(directory, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if (!isNodeError(error, "EEXIST")) throw error;
+    }
+    if (created) await syncDirectory(dirname(directory));
     const info = await lstat(directory);
     if (
       !info.isDirectory() ||
@@ -594,7 +600,10 @@ async function ensureCanonicalStateHome(path: string): Promise<void> {
   }
 }
 
-async function ensureJournalDirectory(context: RuntimeContext): Promise<string> {
+export async function ensurePrivateStateDirectory(
+  context: RuntimeContext,
+  kind: "transactions" | "receipts",
+): Promise<string> {
   const root = ccmStateRoot(context);
   const stateHome = dirname(root);
   await ensureCanonicalStateHome(stateHome);
@@ -607,9 +616,13 @@ async function ensureJournalDirectory(context: RuntimeContext): Promise<string> 
   if ((await realpath(stateHome)) !== resolve(stateHome))
     throw new Error("XDG state directory is not canonical");
   await ensurePrivateLeaf(root);
-  const directory = transactionJournalDir(context);
+  const directory = kind === "transactions" ? transactionJournalDir(context) : receiptDir(context);
   await ensurePrivateLeaf(directory);
   return directory;
+}
+
+async function ensureJournalDirectory(context: RuntimeContext): Promise<string> {
+  return ensurePrivateStateDirectory(context, "transactions");
 }
 
 async function readHandleBounded(path: string): Promise<string> {
