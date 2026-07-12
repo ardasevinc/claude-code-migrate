@@ -155,17 +155,19 @@ export async function restoreArchive(
     }
 
     const needsShared = providersToRestore.some((name) => PROVIDERS[name].usesSharedSkills);
+    const hasClaude = await exists(join(extractionDir, "claude"));
+    const hasCodex = await exists(join(extractionDir, "codex"));
     const sharedExtractPath = join(extractionDir, "shared", "agents");
     const hasShared = await exists(sharedExtractPath);
 
     if (options.dryRun) {
       log.info(`Would restore providers: ${providersToRestore.join(", ")}`);
-      if (providersToRestore.includes("claude")) {
+      if (providersToRestore.includes("claude") && hasClaude) {
         log.dim(`  claude -> ${DEFAULT_COLLECTION_PATHS.claudeDir}`);
         log.dim(`  claude MCP merge -> ${DEFAULT_COLLECTION_PATHS.claudeMcpConfigPath}`);
       }
 
-      if (providersToRestore.includes("codex")) {
+      if (providersToRestore.includes("codex") && hasCodex) {
         log.dim(`  codex -> ${DEFAULT_COLLECTION_PATHS.codexDir}`);
       }
 
@@ -173,14 +175,14 @@ export async function restoreArchive(
         log.dim(`  shared agents assets -> ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
       }
 
-      if (providersToRestore.includes("claude") && needsShared && hasShared) {
+      if (providersToRestore.includes("claude") && hasClaude && needsShared && hasShared) {
         log.dim("  recreate claude shared-skill symlinks");
       }
 
       return;
     }
 
-    if (providersToRestore.includes("claude")) {
+    if (providersToRestore.includes("claude") && hasClaude) {
       await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.claudeDir, [
         ...PROVIDERS.claude.alwaysInclude,
         ...PROVIDERS.claude.includeIfExists,
@@ -194,7 +196,7 @@ export async function restoreArchive(
       log.success(`Restored Claude provider to ${DEFAULT_COLLECTION_PATHS.claudeDir}`);
     }
 
-    if (providersToRestore.includes("codex")) {
+    if (providersToRestore.includes("codex") && hasCodex) {
       await backupLocalDirectoryIfExists(DEFAULT_COLLECTION_PATHS.codexDir, [
         ...PROVIDERS.codex.alwaysInclude,
         ...PROVIDERS.codex.includeIfExists,
@@ -278,7 +280,7 @@ export async function restoreArchive(
       log.success(`Restored shared agents assets to ${DEFAULT_COLLECTION_PATHS.sharedAgentsDir}`);
     }
 
-    if (providersToRestore.includes("claude") && needsShared && hasShared) {
+    if (providersToRestore.includes("claude") && hasClaude && needsShared && hasShared) {
       await recreateClaudeSharedSkillSymlinks();
       log.success("Recreated Claude shared skill symlinks");
     }
