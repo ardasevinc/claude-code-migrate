@@ -19,6 +19,7 @@ export type TransactionState =
   | "prepared"
   | "committing"
   | "committed"
+  | "aborting"
   | "rolling_back"
   | "rolled_back"
   | "recovery_required";
@@ -81,10 +82,11 @@ const WRITER_LOCK = ".writer.lock";
 const MUTATION_LOCK = ".mutation.lock";
 const TRANSITIONS: Readonly<Record<TransactionState, readonly TransactionState[]>> = {
   planning: ["preparing", "rolling_back", "recovery_required"],
-  preparing: ["prepared", "rolling_back", "recovery_required"],
-  prepared: ["committing", "rolling_back", "recovery_required"],
+  preparing: ["prepared", "aborting", "rolling_back", "recovery_required"],
+  prepared: ["committing", "aborting", "rolling_back", "recovery_required"],
   committing: ["committed", "rolling_back", "recovery_required"],
   committed: [],
+  aborting: ["rolled_back", "recovery_required"],
   rolling_back: ["rolled_back", "recovery_required"],
   rolled_back: [],
   recovery_required: ["rolling_back", "committed", "rolled_back"],
@@ -260,8 +262,11 @@ function validateGlobalInvariants(journal: TransactionJournal): void {
     states.some((state) => state === "pending" || state === "rolled_back")
   )
     throw new Error("committing journal has invalid member state");
-  if (journal.state === "rolling_back" && states.some((state) => state === "pending"))
-    throw new Error("rolling_back journal has unsnapshotted members");
+  if (
+    (journal.state === "aborting" || journal.state === "rolling_back") &&
+    states.some((state) => state === "pending")
+  )
+    throw new Error(`${journal.state} journal has unsnapshotted members`);
   if (journal.state === "recovery_required") {
     if (!journal.terminalErrorCode)
       throw new Error("recovery_required journal needs an error code");

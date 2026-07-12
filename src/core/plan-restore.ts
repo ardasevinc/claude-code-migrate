@@ -1,27 +1,24 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
 import {
   chmod,
   cp,
+  lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
-  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { isProviderName } from "../config/providers.ts";
+import { BlockedError, ExecutionError } from "../errors.ts";
 import type { RuntimeContext } from "../runtime/context.ts";
 import type { CollectionPaths, ProviderName } from "../types/index.ts";
-import { BlockedError, ExecutionError } from "../errors.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { scanArchive } from "./archive-reader.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
-import { backupLocalDirectoryIfExists } from "./restore.ts";
 import {
   canonicalInventory,
   groupManagedTopLevelEntries,
@@ -31,6 +28,11 @@ import {
   overlayInventory,
   symlinkInventoryEntry,
 } from "./inventory.ts";
+import {
+  executeLocalTransaction,
+  type LocalTransactionMemberInput,
+  type LocalTransactionRootBinding,
+} from "./local-transaction.ts";
 import {
   createMigrationPlan,
   deriveActionId,
@@ -494,6 +496,8 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
 export interface ExecutePlannedRestoreOptions {
   /** Test seam for proving the second target drift check. */
   readonly afterBackup?: () => Promise<void>;
+  /** Test seam immediately after cloning a live transaction member. */
+  readonly afterStageClone?: (stagePath: string, logicalBase: string) => Promise<void>;
 }
 
 function sourceFingerprint(
@@ -508,48 +512,6 @@ function sourceFingerprint(
   });
 }
 
-function livePath(paths: CollectionPaths, logical: string): string {
-  const parts = logical.split("/");
-  if (parts[0] === "claude") return join(paths.claudeDir, ...parts.slice(1));
-  if (parts[0] === "codex") return join(paths.codexDir, ...parts.slice(1));
-  if (parts[0] === "shared" && parts[1] === "agents")
-    return join(paths.sharedAgentsDir, ...parts.slice(2));
-  throw new Error(`Unsupported restore path: ${logical}`);
-}
-
-async function atomicWriteNoFollow(path: string, bytes: Uint8Array): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  try {
-    const stat = await import("node:fs/promises").then(({ lstat }) => lstat(path));
-    if (!stat.isFile() || stat.isSymbolicLink())
-      throw new Error("Restore target must be a regular non-symlink file");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const temporary = join(
-    dirname(path),
-    `.${path.split("/").at(-1)}.ccm-${crypto.randomUUID()}.tmp`,
-  );
-  let committed = false;
-  try {
-    const handle = await open(
-      temporary,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
-      0o600,
-    );
-    try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, path);
-    committed = true;
-  } finally {
-    if (!committed) await rm(temporary, { force: true });
-  }
-}
-
 async function assertTargetUnchanged(resource: RestorePlanResources): Promise<void> {
   const observed = await observeLocalRestoreTarget({
     context: resource.context,
@@ -559,7 +521,180 @@ async function assertTargetUnchanged(resource: RestorePlanResources): Promise<vo
     queries: resource.queries,
   });
   if (observed.targetFingerprint !== resource.observation.targetFingerprint)
-    throw new Error("Restore target changed after planning");
+    throw new BlockedError("Restore target changed after planning");
+}
+
+interface RestoreTransactionMember {
+  readonly rootCode: string;
+  readonly rootPath: string;
+  readonly targetRef: string;
+  readonly logicalBase: string;
+  readonly overlays: InventoryEntry[];
+  readonly symlinks: InventoryEntry[];
+  mcpBytes?: Uint8Array;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function ensureSafeStageParent(stagePath: string, target: string): Promise<void> {
+  if (target === stagePath) return;
+  const root = await lstat(stagePath);
+  if (!root.isDirectory() || root.isSymbolicLink())
+    throw new BlockedError("Restore stage root is not a directory");
+  const suffix = relative(stagePath, dirname(target));
+  if (suffix === "") return;
+  if (suffix === ".." || suffix.startsWith("../"))
+    throw new BlockedError("Restore stage target escapes its transaction member");
+  let current = stagePath;
+  for (const segment of suffix.split("/")) {
+    current = join(current, segment);
+    try {
+      const info = await lstat(current);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new BlockedError("Restore stage has a non-directory ancestor");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await mkdir(current, { mode: 0o700 });
+      const info = await lstat(current);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new BlockedError("Restore stage ancestor changed during creation");
+    }
+  }
+}
+
+function restoreRoot(
+  paths: CollectionPaths,
+  logical: string,
+): { code: string; path: string; relativePath: string; logicalRoot: string } {
+  const parts = logical.split("/");
+  if (parts[0] === "claude")
+    return {
+      code: "claude-home",
+      path: paths.claudeDir,
+      relativePath: parts.slice(1).join("/"),
+      logicalRoot: "claude",
+    };
+  if (parts[0] === "codex")
+    return {
+      code: "codex-home",
+      path: paths.codexDir,
+      relativePath: parts.slice(1).join("/"),
+      logicalRoot: "codex",
+    };
+  if (parts[0] === "shared" && parts[1] === "agents")
+    return {
+      code: "shared-agents",
+      path: paths.sharedAgentsDir,
+      relativePath: parts.slice(2).join("/"),
+      logicalRoot: "shared/agents",
+    };
+  throw new BlockedError(`Unsupported restore path: ${logical}`);
+}
+
+async function buildRestoreTransactionMembers(
+  resource: RestorePlanResources,
+  changed: readonly RestoreActionBinding[],
+  extraction: string,
+  afterStageClone?: (stagePath: string, logicalBase: string) => Promise<void>,
+): Promise<{ roots: LocalTransactionRootBinding[]; members: LocalTransactionMemberInput[] }> {
+  const roots: LocalTransactionRootBinding[] = [
+    { code: "claude-home", path: resource.paths.claudeDir },
+    { code: "codex-home", path: resource.paths.codexDir },
+    { code: "shared-agents", path: resource.paths.sharedAgentsDir },
+    { code: "claude-mcp", path: resource.paths.claudeMcpConfigPath, allowWholeExisting: true },
+  ];
+  const absentRoots = new Set<string>();
+  for (const root of roots) if (!(await pathExists(root.path))) absentRoots.add(root.code);
+  const specs = new Map<string, RestoreTransactionMember>();
+  const memberFor = (logical: string): RestoreTransactionMember => {
+    const root = restoreRoot(resource.paths, logical);
+    const targetRef = absentRoots.has(root.code)
+      ? "."
+      : (root.relativePath.split("/")[0] as string);
+    const logicalBase = targetRef === "." ? root.logicalRoot : `${root.logicalRoot}/${targetRef}`;
+    const key = `${root.code}:${targetRef}`;
+    let member = specs.get(key);
+    if (!member) {
+      member = {
+        rootCode: root.code,
+        rootPath: root.path,
+        targetRef,
+        logicalBase,
+        overlays: [],
+        symlinks: [],
+      };
+      specs.set(key, member);
+    }
+    return member;
+  };
+  for (const binding of changed) {
+    if (binding.kind === "overlay-group") {
+      const member = memberFor(binding.logicalGroup);
+      member.overlays.push(...binding.entries);
+    } else if (binding.kind === "symlink-view") {
+      for (const entry of binding.entries) memberFor(entry.path).symlinks.push(entry);
+    } else if (binding.kind === "write-mcp") {
+      const key = "claude-mcp:.";
+      specs.set(key, {
+        rootCode: "claude-mcp",
+        rootPath: resource.paths.claudeMcpConfigPath,
+        targetRef: ".",
+        logicalBase: "claude/.mcp-config.json",
+        overlays: [],
+        symlinks: [],
+        mcpBytes: binding.bytes,
+      });
+    }
+  }
+  const members = [...specs.values()].map(
+    (spec, index): LocalTransactionMemberInput => ({
+      id: `restore-member-${index + 1}`,
+      rootCode: spec.rootCode,
+      targetRef: spec.targetRef,
+      materialize: async (stagePath) => {
+        if (spec.mcpBytes) {
+          await writeFile(stagePath, spec.mcpBytes, { mode: 0o600, flag: "wx" });
+          return;
+        }
+        const live = spec.targetRef === "." ? spec.rootPath : join(spec.rootPath, spec.targetRef);
+        if (await pathExists(live)) await cp(live, stagePath, { recursive: true, force: true });
+        else {
+          const needsDirectory =
+            spec.targetRef === "." ||
+            [...spec.overlays, ...spec.symlinks].some((entry) => entry.path !== spec.logicalBase);
+          if (needsDirectory) await mkdir(stagePath, { recursive: true });
+        }
+        await afterStageClone?.(stagePath, spec.logicalBase);
+        for (const entry of spec.overlays) {
+          const suffix = relative(spec.logicalBase, entry.path);
+          const target = suffix === "" ? stagePath : join(stagePath, suffix);
+          await ensureSafeStageParent(stagePath, target);
+          await rm(target, { recursive: true, force: true });
+          await cp(join(extraction, entry.path), target, { recursive: true, force: true });
+          await chmod(target, entry.mode);
+        }
+        for (const entry of spec.symlinks) {
+          const suffix = relative(spec.logicalBase, entry.path);
+          const target = suffix === "" ? stagePath : join(stagePath, suffix);
+          await ensureSafeStageParent(stagePath, target);
+          await rm(target, { recursive: true, force: true });
+          await symlink(
+            join(resource.paths.sharedSkillsDir, entry.path.split("/").at(-1) as string),
+            target,
+          );
+        }
+      },
+    }),
+  );
+  return { roots, members };
 }
 
 export async function executePlannedRestore(
@@ -580,7 +715,6 @@ export async function executePlannedRestore(
   const unregisterInterruptCleanup = registerInterruptCleanup(() =>
     rm(temp, { recursive: true, force: true }),
   );
-  const ownedBackups: string[] = [];
   let mutationStarted = false;
   try {
     const scan = await scanArchive(resource.archivePath, { extractTo: extraction });
@@ -619,53 +753,6 @@ export async function executePlannedRestore(
     if (inventoryFingerprint(resource.stagedFinal) !== planned.plan.stagedPostFingerprint)
       throw new Error("Sealed staged restore fingerprint does not match plan");
 
-    await assertTargetUnchanged(resource);
-    const changed = planned.plan.actions.filter(
-      (action) => action.phase !== "materialize" && action.disposition !== "unchanged",
-    );
-    const managed = new Map<string, Set<string>>();
-    for (const action of changed) {
-      const binding = resource.actionBindings.get(action.id);
-      if (binding?.kind === "symlink-view") {
-        const entries = managed.get(resource.paths.claudeDir) ?? new Set<string>();
-        for (const entry of binding.entries) entries.add(entry.path.slice("claude/".length));
-        managed.set(resource.paths.claudeDir, entries);
-        continue;
-      }
-      if (binding?.kind !== "overlay-group") continue;
-      const logical = binding.logicalGroup.split("/");
-      const root =
-        logical[0] === "claude"
-          ? resource.paths.claudeDir
-          : logical[0] === "codex"
-            ? resource.paths.codexDir
-            : resource.paths.sharedAgentsDir;
-      const relative =
-        logical[0] === "shared" ? logical.slice(2).join("/") : logical.slice(1).join("/");
-      const entries = managed.get(root) ?? new Set<string>();
-      entries.add(relative);
-      managed.set(root, entries);
-    }
-    for (const [root, entries] of managed) {
-      const backup = await backupLocalDirectoryIfExists(root, [...entries], { prune: false });
-      if (backup) ownedBackups.push(backup);
-    }
-    if (changed.some((action) => action.operation === "merge-json")) {
-      const backup = await backupLocalDirectoryIfExists(
-        resource.paths.claudeMcpConfigPath,
-        undefined,
-        { prune: false },
-      );
-      if (backup) ownedBackups.push(backup);
-    }
-    await options.afterBackup?.();
-    try {
-      await assertTargetUnchanged(resource);
-    } catch (error) {
-      for (const backup of ownedBackups) await rm(backup, { recursive: true, force: true });
-      throw error;
-    }
-
     const actionIndexes = new Map(planned.plan.actions.map((action, index) => [action.id, index]));
     for (const action of planned.plan.actions)
       if (!resource.actionBindings.has(action.id))
@@ -679,6 +766,7 @@ export async function executePlannedRestore(
         throw new Error(`Restore action dependency is out of order: ${dependency.id}`);
 
     const consumed = new Set<string>();
+    const changedBindings: RestoreActionBinding[] = [];
     for (const action of planned.plan.actions) {
       for (const dependency of planned.plan.dependencies.filter(
         (item) => item.ownerActionId === action.id && item.required,
@@ -689,50 +777,56 @@ export async function executePlannedRestore(
       if (!binding) throw new Error(`Missing restore action binding: ${action.id}`);
       consumed.add(action.id);
       if (action.disposition === "unchanged" || binding.kind === "transform-stage") continue;
-      if (!mutationStarted) {
-        resources.delete(planned);
-        mutationStarted = true;
-      }
-      if (binding.kind === "write-mcp") {
-        await atomicWriteNoFollow(resource.paths.claudeMcpConfigPath, binding.bytes);
-      } else if (binding.kind === "overlay-group") {
-        for (const entry of binding.entries) {
-          const source = join(extraction, entry.path);
-          const target = livePath(resource.paths, entry.path);
-          await mkdir(dirname(target), { recursive: true });
-          await cp(source, target, { recursive: true, force: true });
-          await chmod(target, entry.mode);
-        }
-      } else if (binding.kind === "symlink-view") {
-        for (const entry of binding.entries) {
-          const target = livePath(resource.paths, entry.path);
-          await rm(target, { recursive: true, force: true });
-          await mkdir(dirname(target), { recursive: true });
-          const name = entry.path.split("/").at(-1) as string;
-          await symlink(join(resource.paths.sharedSkillsDir, name), target);
-        }
-      }
+      changedBindings.push(binding);
     }
     if (
       consumed.size !== resource.actionBindings.size ||
       consumed.size !== planned.plan.actions.length
     )
       throw new Error("Restore action bindings were not consumed exactly once");
-    const actual = await observeLocalRestoreTarget({
+    await assertTargetUnchanged(resource);
+    const transaction = await buildRestoreTransactionMembers(
+      resource,
+      changedBindings,
+      extraction,
+      options.afterStageClone,
+    );
+    resources.delete(planned);
+    mutationStarted = true;
+    await executeLocalTransaction({
       context: resource.context,
-      paths: resource.paths,
-      selectedProviders: resource.providers,
-      incoming: resource.selectedInventory,
-      queries: resource.queries,
+      planId: planned.plan.id,
+      roots: transaction.roots,
+      members: transaction.members,
+      beforeCommit: async () => {
+        await options.afterBackup?.();
+        await assertTargetUnchanged(resource);
+      },
+      verify: async () => {
+        const actual = await observeLocalRestoreTarget({
+          context: resource.context,
+          paths: resource.paths,
+          selectedProviders: resource.providers,
+          incoming: resource.selectedInventory,
+          queries: resource.queries,
+        });
+        const actualFinal = [...actual.inventory];
+        if (resource.transformed.claudeMcp && actual.claudeMcp.bytes)
+          actualFinal.push(
+            inventoryEntry("claude/.mcp-config.json", 0o644, actual.claudeMcp.bytes),
+          );
+        if (inventoryFingerprint(actualFinal) !== planned.plan.stagedPostFingerprint)
+          throw new Error("Restored target does not match planned post-state");
+      },
     });
-    const actualFinal = [...actual.inventory];
-    if (resource.transformed.claudeMcp && actual.claudeMcp.bytes)
-      actualFinal.push(inventoryEntry("claude/.mcp-config.json", 0o644, actual.claudeMcp.bytes));
-    if (inventoryFingerprint(actualFinal) !== planned.plan.stagedPostFingerprint)
-      throw new Error("Restored target does not match planned post-state");
-    for (const root of managed.keys()) await pruneLocalBackupsIfParentExists(root);
-    if (changed.some((action) => action.operation === "merge-json"))
-      await pruneLocalBackupsIfParentExists(resource.paths.claudeMcpConfigPath);
+    for (const root of new Set(
+      transaction.members.map((member) => {
+        const binding = transaction.roots.find((item) => item.code === member.rootCode);
+        if (!binding) throw new Error(`Missing transaction root: ${member.rootCode}`);
+        return binding.path;
+      }),
+    ))
+      await pruneLocalBackupsIfParentExists(root);
   } catch (error) {
     if (error instanceof BlockedError || error instanceof ExecutionError) throw error;
     if (!mutationStarted)

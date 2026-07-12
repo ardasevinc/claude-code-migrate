@@ -19,6 +19,7 @@ describe("fake-machine integration harness", () => {
       expect(machine.env.XDG_CONFIG_HOME).toBe(machine.xdgConfigHome);
       expect(machine.env.XDG_CACHE_HOME).toBe(machine.xdgCacheHome);
       expect(machine.env.XDG_DATA_HOME).toBe(machine.xdgDataHome);
+      expect(machine.env.XDG_STATE_HOME).toBe(machine.xdgStateHome);
       expect(machine.env.PATH?.split(delimiter)[0]).toBe(machine.shimDir);
       expect(machine.env.CCM_TEST_BUN).toBe(bunExecutable);
     } finally {

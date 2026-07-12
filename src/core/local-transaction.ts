@@ -47,6 +47,8 @@ export interface ExecuteLocalTransactionOptions {
   readonly roots: readonly LocalTransactionRootBinding[];
   readonly members: readonly LocalTransactionMemberInput[];
   readonly verify: () => Promise<void>;
+  /** Revalidate caller-owned preconditions after durable preparation, before commit begins. */
+  readonly beforeCommit?: () => Promise<void>;
   readonly afterBoundary?: (boundary: string, journal: TransactionJournal) => Promise<void>;
   /** Test seam immediately before the atomic absent-target rename syscall. */
   readonly beforeAbsentRename?: (targetPath: string) => Promise<void>;
@@ -374,6 +376,33 @@ async function rollbackJournal(
   return journal;
 }
 
+async function abortPreparedJournal(
+  context: RuntimeContext,
+  roots: ReadonlyMap<string, LocalTransactionRootBinding>,
+  supplied: TransactionJournal,
+): Promise<TransactionJournal> {
+  let journal = await readTransactionJournal(context, supplied.id);
+  if (journal.state !== "preparing" && journal.state !== "prepared" && journal.state !== "aborting")
+    throw new ExecutionError(`Transaction advanced before pre-commit abort: ${journal.id}`);
+  if (journal.state !== "aborting")
+    journal = await transitionAndPublish(context, journal, "aborting", {
+      terminalErrorCode: null,
+    });
+  for (const member of journal.members) {
+    const paths = resolveTransactionMemberPaths(roots, journal.id, member);
+    if (await pathExists(paths.rollback)) {
+      const recovery = await transitionAndPublish(context, journal, "recovery_required", {
+        terminalErrorCode: "unexpected-precommit-rollback-material",
+      });
+      throw new ExecutionError(`Transaction requires recovery: ${recovery.id}`);
+    }
+    await durableRemove(paths.stage);
+  }
+  return transitionAndPublish(context, journal, "rolled_back", {
+    members: journal.members.map((member) => ({ ...member, state: "rolled_back" as const })),
+  });
+}
+
 async function maintainExistingJournals(
   context: RuntimeContext,
   roots: ReadonlyMap<string, LocalTransactionRootBinding>,
@@ -385,6 +414,15 @@ async function maintainExistingJournals(
     }
     if (journal.state === "planning") {
       const rolledBack = await rollbackJournal(context, roots, journal);
+      await finalizeTerminalJournal(context, roots, rolledBack);
+      continue;
+    }
+    if (
+      journal.state === "preparing" ||
+      journal.state === "prepared" ||
+      journal.state === "aborting"
+    ) {
+      const rolledBack = await abortPreparedJournal(context, roots, journal);
       await finalizeTerminalJournal(context, roots, rolledBack);
       continue;
     }
@@ -408,6 +446,7 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
   });
   journal = await publishReconciled(options.context, undefined, journal);
   let interrupted = false;
+  let commitStarted = false;
   let activeStep: Promise<void> = settled;
   let rollbackPromise: Promise<TransactionJournal> | undefined;
   const runStep = async (operation: () => Promise<void>): Promise<void> => {
@@ -424,7 +463,14 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
   const rollbackOnce = () => {
     rollbackPromise ??= activeStep
       .catch(() => {})
-      .then(() => rollbackJournal(options.context, roots, journal));
+      .then(() =>
+        !commitStarted &&
+        (journal.state === "preparing" ||
+          journal.state === "prepared" ||
+          journal.state === "aborting")
+          ? abortPreparedJournal(options.context, roots, journal)
+          : rollbackJournal(options.context, roots, journal),
+      );
     return rollbackPromise;
   };
   const unregister = registerInterruptCleanup(async () => {
@@ -493,12 +539,14 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
       journal = await transitionAndPublish(options.context, journal, "prepared");
     });
     await options.afterBoundary?.("journal:prepared", journal);
+    await runStep(options.beforeCommit ?? (() => settled));
     for (const member of journal.members) {
       const paths = resolveTransactionMemberPaths(roots, journal.id, member);
       const current = await fingerprintLocalPath(paths.target);
       if (current.fingerprint !== member.preimageFingerprint)
         throw new BlockedError("Transaction target changed after preparation");
     }
+    commitStarted = true;
     await runStep(async () => {
       journal = await transitionAndPublish(options.context, journal, "committing");
     });
@@ -525,7 +573,10 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
       if (member.originalKind !== "absent") {
         await options.afterBoundary?.(`renamed:rollback:${member.id}`, journal);
         await runStep(async () => {
-          await durableRename(paths.stage, paths.target);
+          await renameNoReplace(paths.stage, paths.target);
+          await syncDirectory(dirname(paths.stage));
+          if (dirname(paths.target) !== dirname(paths.stage))
+            await syncDirectory(dirname(paths.target));
         });
       }
       await options.afterBoundary?.(`renamed:commit:${member.id}`, journal);

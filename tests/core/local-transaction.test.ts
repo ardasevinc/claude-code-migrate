@@ -13,11 +13,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { executeLocalTransaction } from "../../src/core/local-transaction.ts";
-import { ensureTransactionWorkspace } from "../../src/core/local-transaction-paths.ts";
+import { fingerprintLocalPath } from "../../src/core/local-transaction-fingerprint.ts";
+import {
+  ensureTransactionWorkspace,
+  resolveTransactionMemberPaths,
+} from "../../src/core/local-transaction-paths.ts";
 import {
   createTransactionJournal,
   listTransactionJournals,
   publishTransactionJournal,
+  transitionTransactionJournal,
 } from "../../src/core/transaction-journal.ts";
 import { BlockedError, ExecutionError } from "../../src/errors.ts";
 import { createRuntimeContext } from "../../src/runtime/context.ts";
@@ -202,6 +207,40 @@ describe("local transactions", () => {
           beforeAbsentRename: () => writeFile(target, "external\n"),
         }),
       ).rejects.toBeInstanceOf(ExecutionError);
+      expect(await readFile(target, "utf8")).toBe("external\n");
+      expect((await listTransactionJournals(state.context))[0]?.state).toBe("recovery_required");
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("never overwrites a target recreated after moving the original aside", async () => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      await writeFile(target, "old\n");
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_existing_race",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "restored\n"),
+            },
+          ],
+          verify: async () => {},
+          afterBoundary: async (boundary) => {
+            if (boundary === "renamed:rollback:codex-agents")
+              await writeFile(target, "external\n", { flag: "wx" });
+          },
+        }),
+      ).rejects.toThrow("requires recovery");
       expect(await readFile(target, "utf8")).toBe("external\n");
       expect((await listTransactionJournals(state.context))[0]?.state).toBe("recovery_required");
     } finally {
@@ -440,6 +479,130 @@ describe("local transactions", () => {
       expect(secondMaterialized).toBe(false);
       release();
       await first;
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves external drift while aborting a prepared transaction", async () => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      await writeFile(target, "old\n");
+
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_drift",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "new\n"),
+            },
+          ],
+          beforeCommit: async () => {
+            await writeFile(target, "external\n");
+            throw new BlockedError("target drifted");
+          },
+          verify: async () => {},
+        }),
+      ).rejects.toBeInstanceOf(BlockedError);
+      expect(await readFile(target, "utf8")).toBe("external\n");
+      expect(await listTransactionJournals(state.context)).toEqual([]);
+      expect((await readdir(state.home)).filter((name) => name.includes(".backup-"))).toEqual([]);
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "prepared",
+    "aborting",
+  ] as const)("resumes and finalizes a crashed %s pre-commit abort", async (crashState) => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      await writeFile(target, "old\n");
+      let journal = createTransactionJournal({
+        kind: "restore",
+        planId: "plan_crashed_abort",
+        now: new Date("2026-07-13T00:00:00.000Z"),
+        members: [{ id: "codex-agents", rootCode: "codex-home" }],
+      });
+      await publishTransactionJournal(state.context, journal, null);
+      await ensureTransactionWorkspace(codex, journal.id);
+      const pending = journal.members[0];
+      const rootBinding = state.roots[0];
+      if (!pending || !rootBinding) throw new Error("invalid transaction fixture");
+      const provisional = {
+        ...pending,
+        state: "snapshotted" as const,
+        stageRef: "stage-0",
+        rollbackRef: "rollback-0",
+        targetRef: "AGENTS.md",
+        originalKind: "file" as const,
+        preimageFingerprint: (await fingerprintLocalPath(target)).fingerprint,
+        postimageFingerprint: "",
+        backupRef: "1",
+      };
+      const paths = resolveTransactionMemberPaths(
+        new Map([["codex-home", rootBinding]]),
+        journal.id,
+        { ...provisional, postimageFingerprint: `fp_${"0".repeat(64)}` },
+      );
+      await writeFile(paths.stage, "new\n");
+      const member = {
+        ...provisional,
+        postimageFingerprint: (await fingerprintLocalPath(paths.stage)).fingerprint,
+      };
+      let next = transitionTransactionJournal(
+        journal,
+        "preparing",
+        new Date("2026-07-13T00:00:00.001Z"),
+        { members: [member] },
+      );
+      await publishTransactionJournal(state.context, next, journal.revision);
+      journal = next;
+      next = transitionTransactionJournal(
+        journal,
+        "prepared",
+        new Date("2026-07-13T00:00:00.002Z"),
+      );
+      await publishTransactionJournal(state.context, next, journal.revision);
+      journal = next;
+      if (crashState === "aborting") {
+        next = transitionTransactionJournal(
+          journal,
+          "aborting",
+          new Date("2026-07-13T00:00:00.003Z"),
+        );
+        await publishTransactionJournal(state.context, next, journal.revision);
+      }
+
+      await executeLocalTransaction({
+        context: state.context,
+        planId: "plan_after_crash",
+        roots: state.roots,
+        members: [
+          {
+            id: "codex-claude",
+            rootCode: "codex-home",
+            targetRef: "CLAUDE.md",
+            materialize: (stage) => writeFile(stage, "after\n"),
+          },
+        ],
+        verify: async () => {},
+      });
+      expect(await readFile(target, "utf8")).toBe("old\n");
+      expect(await readFile(join(codex, "CLAUDE.md"), "utf8")).toBe("after\n");
+      expect(await listTransactionJournals(state.context)).toEqual([]);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }

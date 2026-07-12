@@ -2,10 +2,12 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   readlink,
+  realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,11 +41,14 @@ async function fixture(
 }
 
 async function setup(files: Array<[string, string]>) {
-  const root = await mkdtemp(join(tmpdir(), "ccm-planned-executor-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-planned-executor-")));
   const home = join(root, "home");
   await mkdir(home);
   const archivePath = await fixture(root, files);
-  const context = createRuntimeContext({ home });
+  const context = createRuntimeContext({
+    home,
+    process: { cwd: () => home, env: { XDG_STATE_HOME: join(root, "state") } },
+  });
   const planned = await planRestore({
     archivePath,
     provider: "codex",
@@ -59,7 +64,7 @@ describe("executePlannedRestore", () => {
     ["codex/config.toml", "[[[not toml"],
     ["codex/hooks.json", '{"hooks":'],
   ])("attributes malformed incoming %s to restore inputs", async (path, content) => {
-    const root = await mkdtemp(join(tmpdir(), "ccm-planned-invalid-input-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-planned-invalid-input-")));
     try {
       const home = join(root, "home");
       await mkdir(home);
@@ -68,7 +73,10 @@ describe("executePlannedRestore", () => {
         planRestore({
           archivePath,
           provider: "codex",
-          context: createRuntimeContext({ home }),
+          context: createRuntimeContext({
+            home,
+            process: { cwd: () => home, env: { XDG_STATE_HOME: join(root, "state") } },
+          }),
           paths: collectionPathsForHome(home),
         }),
       ).rejects.toBeInstanceOf(RestoreTransformPlanError);
@@ -76,7 +84,10 @@ describe("executePlannedRestore", () => {
         planRestore({
           archivePath,
           provider: "codex",
-          context: createRuntimeContext({ home }),
+          context: createRuntimeContext({
+            home,
+            process: { cwd: () => home, env: { XDG_STATE_HOME: join(root, "state") } },
+          }),
           paths: collectionPathsForHome(home),
         }),
       ).rejects.toThrow("Restore inputs are invalid");
@@ -169,7 +180,7 @@ describe("executePlannedRestore", () => {
   });
 
   it("backs up a replaced local shared-skill subtree and creates only the sealed view", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ccm-planned-symlink-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-planned-symlink-")));
     try {
       const home = join(root, "home");
       await mkdir(join(home, ".claude/skills/example"), { recursive: true });
@@ -182,7 +193,10 @@ describe("executePlannedRestore", () => {
         ],
         ["claude"],
       );
-      const context = createRuntimeContext({ home });
+      const context = createRuntimeContext({
+        home,
+        process: { cwd: () => home, env: { XDG_STATE_HOME: join(root, "state") } },
+      });
       const planned = await planRestore({
         archivePath,
         provider: "claude",
@@ -197,6 +211,89 @@ describe("executePlannedRestore", () => {
       expect(await readlink(join(home, ".claude/skills/example"))).toBe(
         join(home, ".agents/skills/example"),
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically merges Claude files and the shared-skill view without losing private skills", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-planned-claude-overlap-")));
+    try {
+      const home = join(root, "home");
+      await mkdir(join(home, ".claude/skills/private"), { recursive: true });
+      await writeFile(join(home, ".claude/skills/private/SKILL.md"), "private\n");
+      const archivePath = await fixture(
+        root,
+        [
+          ["claude/CLAUDE.md", "claude\n"],
+          ["shared/agents/skills/example/SKILL.md", "shared\n"],
+        ],
+        ["claude"],
+      );
+      const context = createRuntimeContext({
+        home,
+        process: { cwd: () => home, env: { XDG_STATE_HOME: join(root, "state") } },
+      });
+      const planned = await planRestore({
+        archivePath,
+        provider: "claude",
+        context,
+        paths: collectionPathsForHome(home),
+      });
+
+      await executePlannedRestore(planned);
+
+      expect(await readFile(join(home, ".claude/CLAUDE.md"), "utf8")).toBe("claude\n");
+      expect(await readFile(join(home, ".claude/skills/private/SKILL.md"), "utf8")).toBe(
+        "private\n",
+      );
+      expect(await readlink(join(home, ".claude/skills/example"))).toBe(
+        join(home, ".agents/skills/example"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("commits the standalone Claude MCP merge in the same transaction", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-planned-claude-mcp-")));
+    try {
+      const home = join(root, "home");
+      await mkdir(join(home, ".claude"), { recursive: true });
+      await writeFile(
+        join(home, ".claude.json"),
+        '{"theme":"dark","mcpServers":{"old":{"command":"old"}}}',
+      );
+      const archivePath = await fixture(
+        root,
+        [
+          ["claude/CLAUDE.md", "claude\n"],
+          ["claude/.mcp-config.json", '{"mcpServers":{"new":{"command":"new"}}}'],
+        ],
+        ["claude"],
+      );
+      const context = createRuntimeContext({
+        home,
+        process: { cwd: () => home, env: { XDG_STATE_HOME: join(root, "state") } },
+      });
+      const planned = await planRestore({
+        archivePath,
+        provider: "claude",
+        context,
+        paths: collectionPathsForHome(home),
+      });
+
+      await executePlannedRestore(planned);
+
+      expect(JSON.parse(await readFile(join(home, ".claude.json"), "utf8"))).toEqual({
+        theme: "dark",
+        mcpServers: { old: { command: "old" }, new: { command: "new" } },
+      });
+      const backup = (await readdir(home)).find((name) => name.startsWith(".claude.json.backup-"));
+      expect(JSON.parse(await readFile(join(home, backup as string), "utf8"))).toEqual({
+        theme: "dark",
+        mcpServers: { old: { command: "old" } },
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -229,6 +326,35 @@ describe("executePlannedRestore", () => {
         ".codex.backup-4",
         ".codex.backup-5",
       ]);
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("never follows a symlink ancestor introduced into a cloned stage", async () => {
+    const state = await setup([["codex/rules/incoming.md", "incoming\n"]]);
+    try {
+      const attacker = join(state.root, "attacker");
+      await mkdir(join(state.home, ".codex/rules"), { recursive: true });
+      await mkdir(attacker);
+      await writeFile(join(attacker, "incoming.md"), "outside\n");
+      const planned = await planRestore({
+        archivePath: state.archivePath,
+        provider: "codex",
+        context: state.context,
+        paths: collectionPathsForHome(state.home),
+      });
+
+      await expect(
+        executePlannedRestore(planned, {
+          afterStageClone: async (stagePath, logicalBase) => {
+            if (logicalBase !== "codex/rules") return;
+            await rm(stagePath, { recursive: true, force: true });
+            await symlink(attacker, stagePath);
+          },
+        }),
+      ).rejects.toBeInstanceOf(BlockedError);
+      expect(await readFile(join(attacker, "incoming.md"), "utf8")).toBe("outside\n");
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }

@@ -18,6 +18,7 @@ export interface FakeMachine {
   readonly xdgConfigHome: string;
   readonly xdgCacheHome: string;
   readonly xdgDataHome: string;
+  readonly xdgStateHome: string;
   readonly shimDir: string;
   readonly commandLog: string;
   readonly faultDir: string;
@@ -52,7 +53,7 @@ export interface FaultSpec {
 }
 
 export async function createFakeMachine(prefix = "ccm-fake-machine-"): Promise<FakeMachine> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   const home = join(root, "home");
   const remoteHome = join(root, "remote-home");
   const tmp = join(root, "tmp");
@@ -60,13 +61,23 @@ export async function createFakeMachine(prefix = "ccm-fake-machine-"): Promise<F
   const xdgConfig = join(root, "xdg", "config");
   const xdgCache = join(root, "xdg", "cache");
   const xdgData = join(root, "xdg", "data");
+  const xdgState = join(root, "xdg", "state");
   const shimDir = join(root, "bin");
   const faultDir = join(root, "faults");
   const commandLog = join(root, "commands.ndjson");
   await Promise.all(
-    [home, remoteHome, tmp, remoteTmp, xdgConfig, xdgCache, xdgData, shimDir, faultDir].map(
-      (path) => mkdir(path, { recursive: true }),
-    ),
+    [
+      home,
+      remoteHome,
+      tmp,
+      remoteTmp,
+      xdgConfig,
+      xdgCache,
+      xdgData,
+      xdgState,
+      shimDir,
+      faultDir,
+    ].map((path) => mkdir(path, { recursive: true })),
   );
   await writeFile(commandLog, "", "utf8");
 
@@ -85,6 +96,7 @@ export async function createFakeMachine(prefix = "ccm-fake-machine-"): Promise<F
     XDG_CONFIG_HOME: xdgConfig,
     XDG_CACHE_HOME: xdgCache,
     XDG_DATA_HOME: xdgData,
+    XDG_STATE_HOME: xdgState,
     PATH: `${shimDir}${delimiter}${process.env.PATH ?? ""}`,
     NO_COLOR: "1",
     CCM_TEST_BUN: bunExecutable,
@@ -105,6 +117,7 @@ export async function createFakeMachine(prefix = "ccm-fake-machine-"): Promise<F
     xdgConfigHome: xdgConfig,
     xdgCacheHome: xdgCache,
     xdgDataHome: xdgData,
+    xdgStateHome: xdgState,
     shimDir,
     commandLog,
     faultDir,
@@ -172,8 +185,9 @@ async function isolatedEnvForHome(home: string): Promise<NodeJS.ProcessEnv> {
   const xdgConfig = join(home, ".ccm-test-xdg", "config");
   const xdgCache = join(home, ".ccm-test-xdg", "cache");
   const xdgData = join(home, ".ccm-test-xdg", "data");
+  const xdgState = join(home, ".ccm-test-xdg", "state");
   await Promise.all(
-    [tmp, xdgConfig, xdgCache, xdgData].map((path) => mkdir(path, { recursive: true })),
+    [tmp, xdgConfig, xdgCache, xdgData, xdgState].map((path) => mkdir(path, { recursive: true })),
   );
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -182,6 +196,7 @@ async function isolatedEnvForHome(home: string): Promise<NodeJS.ProcessEnv> {
     XDG_CONFIG_HOME: xdgConfig,
     XDG_CACHE_HOME: xdgCache,
     XDG_DATA_HOME: xdgData,
+    XDG_STATE_HOME: xdgState,
     NO_COLOR: "1",
   };
   delete env.FORCE_COLOR;
