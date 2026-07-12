@@ -7,10 +7,15 @@ import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { pack } from "tar-stream";
 import { describe, expect, it } from "vitest";
-import { verifyArchive } from "../../src/core/archive-reader.ts";
+import { scanArchive, verifyArchive } from "../../src/core/archive-reader.ts";
 
 async function archive(
-  entries: Array<{ name: string; body?: string; type?: "file" | "directory"; mode?: number }>,
+  entries: Array<{
+    name: string;
+    body?: string | Buffer;
+    type?: "file" | "directory";
+    mode?: number;
+  }>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "ccm-reader-test-"));
   const path = join(root, "archive.tar.gz");
@@ -93,6 +98,43 @@ describe("streaming archive reader", () => {
     });
     expect(JSON.stringify(result)).not.toContain("secret");
     expect(result.files[0]?.sha256).toBeUndefined();
+  });
+
+  it("scans legacy hashes and selectively captures exact bytes", async () => {
+    const body = Buffer.from([0, 255, 1, 2]);
+    const manifest = JSON.stringify({
+      version: "1.8.2",
+      timestamp: "2026-07-12T00:00:00.000Z",
+      sourceHost: "test-host",
+      claudeVersion: null,
+      providers: ["codex"],
+      files: [{ sourcePath: "/secret", relativePath: "codex/config.toml", isSymlink: false }],
+    });
+    const input = await archive([
+      { name: "codex/config.toml", body },
+      { name: ".ccm-manifest.json", body: manifest },
+    ]);
+    const scan = await scanArchive(input.path, {
+      capture: new Set(["codex/config.toml", "codex/AGENTS.md"]),
+    });
+    expect(scan.archive.files[0]?.sha256).toBeUndefined();
+    expect(scan.observedFiles[0]?.sha256).toBe(createHash("sha256").update(body).digest("hex"));
+    expect(scan.capturedFiles.get("codex/config.toml")).toEqual(body);
+    expect(scan.capturedFiles.has("codex/AGENTS.md")).toBe(false);
+  });
+
+  it("enforces the total selective capture limit", async () => {
+    const body = "capture me";
+    const input = await archive([
+      { name: "codex/config.toml", body },
+      { name: ".ccm-manifest.json", body: v2("codex/config.toml", body) },
+    ]);
+    await expect(
+      scanArchive(input.path, {
+        capture: new Set(["codex/config.toml"]),
+        limits: { captureBytes: 1 },
+      }),
+    ).rejects.toThrow("Archive capture size limit exceeded");
   });
 
   it("verifies without creating a temporary extraction workspace", async () => {

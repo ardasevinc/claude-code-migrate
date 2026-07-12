@@ -22,6 +22,7 @@ export const MAX_ARCHIVE_FILE_BYTES = 1024 ** 3;
 export const MAX_ARCHIVE_ENTRIES = 100_000;
 export const MAX_ARCHIVE_MANIFEST_BYTES = 8 * 1024 ** 2;
 export const MAX_ARCHIVE_PATH_BYTES = 4096;
+export const MAX_ARCHIVE_CAPTURE_BYTES = 32 * 1024 ** 2;
 
 export interface ArchiveLimits {
   compressedBytes: number;
@@ -30,6 +31,7 @@ export interface ArchiveLimits {
   entries: number;
   manifestBytes: number;
   pathBytes: number;
+  captureBytes: number;
 }
 
 const DEFAULT_LIMITS: ArchiveLimits = {
@@ -39,19 +41,49 @@ const DEFAULT_LIMITS: ArchiveLimits = {
   entries: MAX_ARCHIVE_ENTRIES,
   manifestBytes: MAX_ARCHIVE_MANIFEST_BYTES,
   pathBytes: MAX_ARCHIVE_PATH_BYTES,
+  captureBytes: MAX_ARCHIVE_CAPTURE_BYTES,
 };
 
 interface ObservedFile extends VerifiedArchiveFile {
   destination?: string;
+  sha256: string;
+}
+
+export interface ArchiveScan {
+  archive: VerifiedArchive;
+  observedFiles: ReadonlyArray<VerifiedArchiveFile & { sha256: string }>;
+  capturedFiles: ReadonlyMap<string, Buffer>;
+}
+
+export interface ScanArchiveOptions {
+  capture?: ReadonlySet<string>;
+  extractTo?: string;
+  limits?: Partial<ArchiveLimits>;
 }
 
 export async function verifyArchive(
   archivePath: string,
   options: { extractTo?: string; limits?: Partial<ArchiveLimits> } = {},
 ): Promise<VerifiedArchive> {
+  return (await scanArchive(archivePath, options)).archive;
+}
+
+export async function scanArchive(
+  archivePath: string,
+  options: ScanArchiveOptions = {},
+): Promise<ArchiveScan> {
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
   validateLimits(limits);
   const destination = options.extractTo;
+  const capture = options.capture ?? new Set<string>();
+  for (const requested of capture) {
+    if (normalizeArchivePath(requested, false) !== requested) {
+      throw new Error(`Unsafe capture path: ${requested}`);
+    }
+    validateArchiveMemberPaths([requested]);
+  }
+  const capturedFiles = new Map<string, Buffer>();
+  let capturedBytes = 0;
   const archiveHash = createHash("sha256");
   let compressedBytes = 0;
   let expandedBytes = 0;
@@ -129,8 +161,11 @@ export async function verifyArchive(
       transform(chunk: Buffer, _encoding, callback) {
         size += chunk.length;
         if (size > max) return callback(new Error("Archive file size limit exceeded"));
+        if (capture.has(path) && capturedBytes + size > limits.captureBytes) {
+          return callback(new Error("Archive capture size limit exceeded"));
+        }
         hash.update(chunk);
-        if (path === ".ccm-manifest.json") chunks.push(Buffer.from(chunk));
+        if (path === ".ccm-manifest.json" || capture.has(path)) chunks.push(Buffer.from(chunk));
         callback(null, chunk);
       },
     });
@@ -147,7 +182,11 @@ export async function verifyArchive(
     const mode = (header.mode ?? 0) & 0o777;
     if (outputPath !== undefined) await chmod(outputPath, mode);
     if (path === ".ccm-manifest.json") manifestBytes = Buffer.concat(chunks);
-    else
+    else {
+      if (capture.has(path)) {
+        capturedBytes += size;
+        capturedFiles.set(path, Buffer.concat(chunks));
+      }
       files.push({
         path,
         size,
@@ -155,6 +194,7 @@ export async function verifyArchive(
         sha256: hash.digest("hex"),
         destination: outputPath,
       });
+    }
   }
 
   try {
@@ -211,7 +251,11 @@ export async function verifyArchive(
         legacy ? file : { ...file, sha256 },
       ),
     };
-    return result;
+    return {
+      archive: result,
+      observedFiles: files.map(({ destination: _destination, ...file }) => file),
+      capturedFiles,
+    };
   } catch (error) {
     if (ownsDestination && destination !== undefined) {
       await rm(destination, { recursive: true, force: true });
