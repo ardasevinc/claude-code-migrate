@@ -205,6 +205,15 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
       ? scan.capturedFiles.get("codex/hooks.json")
       : undefined,
   };
+  let queries: ReturnType<typeof deriveRestoreObservationQueries>;
+  try {
+    queries = deriveRestoreObservationQueries(captured);
+  } catch (error) {
+    throw new RestoreTransformPlanError(
+      `Restore inputs are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
   let observation: RestoreTargetObservation;
   try {
     observation = await observeLocalRestoreTarget({
@@ -212,7 +221,7 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
       paths: input.paths,
       selectedProviders: providers,
       incoming,
-      queries: deriveRestoreObservationQueries(captured),
+      queries,
     });
   } catch (error) {
     throw new RestoreTargetPlanError(
@@ -230,7 +239,7 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
     );
   } catch (error) {
     throw new RestoreTransformPlanError(
-      `Restore transform input is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      `Restore inputs are invalid: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
@@ -465,7 +474,7 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
     archivePath: input.archivePath,
     context: input.context,
     providers,
-    queries: deriveRestoreObservationQueries(captured),
+    queries,
     paths: { ...input.paths },
     transformed: {
       claudeMcp: transformed.claudeMcp && Buffer.from(transformed.claudeMcp),

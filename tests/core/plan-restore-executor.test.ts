@@ -13,7 +13,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectionPathsForHome } from "../../src/config/providers.ts";
 import { createArchive } from "../../src/core/archiver.ts";
-import { executePlannedRestore, planRestore } from "../../src/core/plan-restore.ts";
+import {
+  executePlannedRestore,
+  planRestore,
+  RestoreTransformPlanError,
+} from "../../src/core/plan-restore.ts";
 import { BlockedError } from "../../src/errors.ts";
 import { createRuntimeContext } from "../../src/runtime/context.ts";
 import type { FileEntry, ProviderName } from "../../src/types/index.ts";
@@ -51,6 +55,36 @@ async function setup(files: Array<[string, string]>) {
 }
 
 describe("executePlannedRestore", () => {
+  it.each([
+    ["codex/config.toml", "[[[not toml"],
+    ["codex/hooks.json", '{"hooks":'],
+  ])("attributes malformed incoming %s to restore inputs", async (path, content) => {
+    const root = await mkdtemp(join(tmpdir(), "ccm-planned-invalid-input-"));
+    try {
+      const home = join(root, "home");
+      await mkdir(home);
+      const archivePath = await fixture(root, [[path, content]]);
+      await expect(
+        planRestore({
+          archivePath,
+          provider: "codex",
+          context: createRuntimeContext({ home }),
+          paths: collectionPathsForHome(home),
+        }),
+      ).rejects.toBeInstanceOf(RestoreTransformPlanError);
+      await expect(
+        planRestore({
+          archivePath,
+          provider: "codex",
+          context: createRuntimeContext({ home }),
+          paths: collectionPathsForHome(home),
+        }),
+      ).rejects.toThrow("Restore inputs are invalid");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("executes a sealed overlay and preserves excluded history", async () => {
     const state = await setup([["codex/AGENTS.md", "incoming\n"]]);
     try {

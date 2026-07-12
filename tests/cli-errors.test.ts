@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { createArchive } from "../src/core/archiver.ts";
 
 const projectRoot = join(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
@@ -22,6 +23,23 @@ async function runCli(args: string[], home: string) {
 }
 
 describe("CLI errors", () => {
+  it.each([
+    ["codex/config.toml", "[[[not toml"],
+    ["codex/hooks.json", '{"hooks":'],
+  ])("attributes malformed restore member %s to archive inputs", async (relativePath, content) => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-cli-invalid-restore-"));
+    const source = join(home, "source");
+    const archive = join(home, "invalid-input.tar.gz");
+    await writeFile(source, content);
+    await createArchive([{ sourcePath: source, relativePath, isSymlink: false }], archive, {
+      providers: ["codex"],
+    });
+    const result = await runCli(["restore", archive, "codex", "--dry-run"], home);
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toContain("Restore inputs are invalid");
+    expect(result.stderr).not.toContain("Restore target is invalid");
+  });
+
   it("fails closed when the existing config cannot be parsed", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
     const configDir = join(home, ".config", "claude-code-migrate");
