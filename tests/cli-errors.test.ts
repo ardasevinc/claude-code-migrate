@@ -5,22 +5,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createArchive } from "../src/core/archiver.ts";
+import { runCcm } from "./integration/harness/index.ts";
 
-const projectRoot = join(import.meta.dirname, "..");
 const execFileAsync = promisify(execFile);
-
-async function runCli(args: string[], home: string) {
-  try {
-    const result = await execFileAsync("bun", ["src/index.ts", ...args], {
-      cwd: projectRoot,
-      env: { ...process.env, HOME: home, NO_COLOR: "1" },
-    });
-    return { exitCode: 0, ...result };
-  } catch (error) {
-    const result = error as { code: number; stdout: string; stderr: string };
-    return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
-  }
-}
 
 describe("CLI errors", () => {
   it.each([
@@ -34,7 +21,7 @@ describe("CLI errors", () => {
     await createArchive([{ sourcePath: source, relativePath, isSymlink: false }], archive, {
       providers: ["codex"],
     });
-    const result = await runCli(["restore", archive, "codex", "--dry-run"], home);
+    const result = await runCcm(["restore", archive, "codex", "--dry-run"], home);
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toContain("Restore inputs are invalid");
     expect(result.stderr).not.toContain("Restore target is invalid");
@@ -46,7 +33,7 @@ describe("CLI errors", () => {
     await mkdir(configDir, { recursive: true });
     await writeFile(join(configDir, "config.toml"), "[target\nhost = broken", "utf8");
 
-    const result = await runCli(["config"], home);
+    const result = await runCcm(["config"], home);
 
     expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
@@ -63,7 +50,7 @@ describe("CLI errors", () => {
       "utf8",
     );
 
-    const result = await runCli(["config"], home);
+    const result = await runCcm(["config"], home);
 
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toContain('target.type must be "ssh"');
@@ -79,7 +66,7 @@ describe("CLI errors", () => {
       "utf8",
     );
 
-    const result = await runCli(["config"], home);
+    const result = await runCcm(["config"], home);
 
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toContain("commmands is not a recognized setting");
@@ -89,7 +76,7 @@ describe("CLI errors", () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
     const archive = join(home, "missing.tar.gz");
 
-    const result = await runCli(["restore", archive], home);
+    const result = await runCcm(["restore", archive], home);
 
     expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
@@ -101,7 +88,7 @@ describe("CLI errors", () => {
     const archive = join(home, "invalid.tar.gz");
     await writeFile(archive, "not an archive", "utf8");
 
-    const result = await runCli(["restore", archive], home);
+    const result = await runCcm(["restore", archive], home);
 
     expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
@@ -119,7 +106,7 @@ describe("CLI errors", () => {
       "utf8",
     );
 
-    const result = await runCli(["push", "--dry-run"], home);
+    const result = await runCcm(["push", "--dry-run"], home);
 
     expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe("");
@@ -128,7 +115,7 @@ describe("CLI errors", () => {
 
   it("maps Commander syntax failures to usage", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
-    const result = await runCli(["restore"], home);
+    const result = await runCcm(["restore"], home);
 
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("missing required argument");
@@ -163,7 +150,7 @@ describe("CLI errors", () => {
     );
     await execFileAsync("tar", ["-czf", archive, "-C", sourceDir, "."]);
 
-    const result = await runCli(["restore", archive], home);
+    const result = await runCcm(["restore", archive], home);
 
     expect(result.exitCode).toBe(3);
     expect(await readFile(join(codexDir, "auth.json"), "utf8")).toBe("original-auth");

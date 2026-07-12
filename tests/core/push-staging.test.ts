@@ -71,7 +71,7 @@ describe("push archive staging", () => {
         }),
       ).rejects.toThrow("Push source changed during archive staging");
       expect(await readFile(source, "utf8")).toBe("after\n");
-      expect(
+      await expect(
         (await import("node:fs/promises"))
           .readdir(root)
           .then((x) => x.filter((n) => n.startsWith("ccm-push-stage-"))),

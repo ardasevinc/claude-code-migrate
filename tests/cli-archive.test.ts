@@ -1,30 +1,15 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
-import { promisify } from "node:util";
 import { createGzip } from "node:zlib";
 import { pack } from "tar-stream";
 import { describe, expect, it } from "vitest";
+import { runCcm } from "./integration/harness/index.ts";
 
 const projectRoot = join(import.meta.dirname, "..");
-const execFileAsync = promisify(execFile);
-
-async function runCli(args: string[], home: string) {
-  try {
-    const result = await execFileAsync("bun", ["src/index.ts", ...args], {
-      cwd: projectRoot,
-      env: { ...process.env, HOME: home, FORCE_COLOR: "1" },
-    });
-    return { exitCode: 0, ...result };
-  } catch (error) {
-    const result = error as { code: number; stdout: string; stderr: string };
-    return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
-  }
-}
 
 async function makeArchive(home: string, manifest: object, body = "model = 'gpt-5'\n") {
   const archivePath = join(home, "operator-secret-name.tar.gz");
@@ -68,7 +53,9 @@ describe("archive operator commands", () => {
   it("inspects v2 archives as one redacted ANSI-free JSON object", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-inspect-"));
     const archivePath = await makeArchive(home, v2());
-    const result = await runCli(["inspect", archivePath, "--files", "--json"], home);
+    const result = await runCcm(["inspect", archivePath, "--files", "--json"], home, {
+      env: { FORCE_COLOR: "1", NO_COLOR: undefined },
+    });
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
@@ -101,13 +88,13 @@ describe("archive operator commands", () => {
       ],
     });
 
-    const inspected = await runCli(["inspect", archivePath, "--json"], home);
+    const inspected = await runCcm(["inspect", archivePath, "--json"], home);
     expect(inspected.exitCode).toBe(0);
     expect(inspected.stdout).not.toContain("secret-host");
     expect(inspected.stdout).not.toContain("sourcePath");
     expect(JSON.parse(inspected.stdout)).toMatchObject({ integrity: "unavailable" });
 
-    const verified = await runCli(["verify", archivePath, "--json"], home);
+    const verified = await runCcm(["verify", archivePath, "--json"], home);
     expect(verified.exitCode).toBe(1);
     expect(verified.stderr).toBe("");
     expect(JSON.parse(verified.stdout)).toMatchObject({
@@ -125,7 +112,7 @@ describe("archive operator commands", () => {
     const archivePath = join(home, "private-invalid-name.tar.gz");
     await writeFile(archivePath, "not an archive");
 
-    const result = await runCli([command, archivePath, "--json"], home);
+    const result = await runCcm([command, archivePath, "--json"], home);
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toBe("");
     expect(result.stdout.trim().split("\n")).toHaveLength(1);
@@ -139,7 +126,7 @@ describe("archive operator commands", () => {
   it("rejects future archive schemas with exit 3", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-future-"));
     const archivePath = await makeArchive(home, { ...v2(), formatVersion: 3 });
-    const result = await runCli(["verify", archivePath, "--json"], home);
+    const result = await runCcm(["verify", archivePath, "--json"], home);
 
     expect(result.exitCode).toBe(3);
     expect(JSON.parse(result.stdout)).toEqual({

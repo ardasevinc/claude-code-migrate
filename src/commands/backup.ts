@@ -20,7 +20,15 @@ export async function backupCommand(
   arg1: string | undefined,
   arg2: string | undefined,
   options: BackupOptions,
-  context: RuntimeContext = createRuntimeContext(),
+): Promise<void> {
+  return backupCommandWithContext(arg1, arg2, options, createRuntimeContext());
+}
+
+export async function backupCommandWithContext(
+  arg1: string | undefined,
+  arg2: string | undefined,
+  options: BackupOptions,
+  context: RuntimeContext,
 ): Promise<void> {
   if (options.json && !options.dryRun) {
     throw new UsageError("--json currently requires --dry-run");
