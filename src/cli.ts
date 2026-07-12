@@ -40,6 +40,7 @@ export function createCli(): Command {
     .argument("[providerOrTarget]", "Provider name (claude|codex) or SSH target (user@host)")
     .argument("[target]", "SSH target (user@host) when provider is specified")
     .option("--dry-run", "Preview without transferring", false)
+    .option("--json", "Print the push plan as one JSON object (dry-run only)", false)
     .option("--skip-version-check", "Skip Claude version check", false)
     .option("--providers <providers>", "Comma-separated providers to push (claude,codex)")
     .option("--all", "Push all providers")

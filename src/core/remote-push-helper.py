@@ -945,6 +945,10 @@ def extract_archive(workspace_fd, expected):
                             if count > MAX_ARCHIVE_MEMBERS:
                                 fail("archive member count exceeds limit")
                             raw_name = member.name.rstrip("/")
+                            if raw_name == ".":
+                                continue
+                            if raw_name.startswith("./"):
+                                raw_name = raw_name[2:]
                             parts = raw_name.split("/")
                             if (not raw_name or member.name.startswith("/") or len(parts) > MAX_PATH_DEPTH or
                                     len(raw_name.encode("utf-8")) > MAX_PATH_BYTES or not all(safe_component(p) for p in parts)):

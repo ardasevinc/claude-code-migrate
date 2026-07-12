@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 const [commandArg, ...args] = process.argv.slice(2);
@@ -15,6 +15,15 @@ switch (command) {
   case "codex":
     if (args.includes("--version") || args.includes("-v"))
       console.log(process.env.CCM_TEST_CODEX_VERSION ?? "codex-cli 0.0.0-fake");
+    else if (args[0] === "plugin" && args[1] === "list" && args.includes("--json"))
+      console.log(JSON.stringify({ installed: installedPlugins(), available: [] }));
+    else if (args[0] === "plugin" && args[1] === "add" && args[2]) {
+      const installed = new Set(installedPlugins());
+      installed.add(args[2]);
+      const path = installedPluginPath();
+      writeFileSync(path, JSON.stringify([...installed].sort()), "utf8");
+      if (args.includes("--json")) console.log("{}");
+    }
     break;
   case "ssh":
     process.exitCode = runSsh(args);
@@ -141,4 +150,13 @@ function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing fake-machine environment variable: ${name}`);
   return value;
+}
+
+function installedPluginPath(): string {
+  return join(requiredEnv("HOME"), ".ccm-test-installed-plugins.json");
+}
+
+function installedPlugins(): string[] {
+  const path = installedPluginPath();
+  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as string[]) : [];
 }

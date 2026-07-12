@@ -1,22 +1,14 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { loadConfig } from "../config/loader.ts";
-import { CODEX_DIR } from "../config/providers.ts";
-import { createArchive } from "../core/archiver.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
-import {
-  previewPush,
-  previewRemoteCodexPluginPolicy,
-  pushArchive,
-  testConnection,
-} from "../core/ssh.ts";
+import { executePlannedPush, planPush } from "../core/plan-push.ts";
+import { preparePushObservationRequest } from "../core/push-observation-request.ts";
+import { createSshPushExecutionAdapter } from "../core/push-ssh-adapter.ts";
+import { testConnection } from "../core/ssh.ts";
 import { parseSshTarget } from "../core/ssh-target.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
 import { BlockedError, ConnectivityError, UsageError } from "../errors.ts";
 import type { PushOptions } from "../types/index.ts";
-import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { log } from "../utils/logger.ts";
 
 export async function pushCommand(
@@ -24,6 +16,10 @@ export async function pushCommand(
   arg2: string | undefined,
   options: PushOptions,
 ): Promise<void> {
+  if (options.json && !options.dryRun) {
+    throw new UsageError("--json currently requires --dry-run");
+  }
+  const createdAt = new Date().toISOString();
   const config = await loadConfig();
   const enabledProviders = getEnabledProviders(config);
 
@@ -64,58 +60,64 @@ export async function pushCommand(
     includeClaudeSettingsLocal: config.providers.claude.settings_local,
     includeClaudeMcpConfig: config.providers.claude.mcp_config,
     dryRun: options.dryRun,
+    quiet: options.json,
   });
 
   if (files.length === 0) {
     throw new BlockedError("No files to push");
   }
 
-  if (options.dryRun) {
-    await previewPush(files, host, { verbose: options.verbose ?? false });
-    if (providers.includes("codex")) {
-      const codexConfigPath = join(CODEX_DIR, "config.toml");
-      const rawCodexConfig = await readFile(codexConfigPath, "utf8").catch(() => "");
-      if (rawCodexConfig.trim()) {
-        await previewRemoteCodexPluginPolicy(
-          host,
-          rawCodexConfig,
-          config.providers.codex.plugin_policies,
-        );
-      }
+  if (!options.dryRun) {
+    log.info(`Testing connection to ${host}...`);
+    const connected = await testConnection(host);
+    if (!connected) {
+      throw new ConnectivityError(`Cannot connect to ${host}. Check your SSH configuration.`);
     }
-    return;
+    log.success("Connection established");
   }
 
-  log.info(`Testing connection to ${host}...`);
-  const connected = await testConnection(host);
-
-  if (!connected) {
-    throw new ConnectivityError(`Cannot connect to ${host}. Check your SSH configuration.`);
-  }
-
-  log.success("Connection established");
-
-  if (providers.includes("claude") && !options.skipVersionCheck) {
+  if (!options.dryRun && providers.includes("claude") && !options.skipVersionCheck) {
     const versionCheck = await checkVersionCompatibility(host);
     if (versionCheck.warning) {
       log.warn(versionCheck.warning);
     }
   }
 
-  const tempWorkspace = await mkdtemp(join(tmpdir(), "ccm-push-"));
-  const tempArchive = join(tempWorkspace, "archive.tar.gz");
-  let unregisterInterruptCleanup: (() => void) | undefined;
+  const preparedRequest = await preparePushObservationRequest({
+    host,
+    files,
+    providers,
+    policyOverrides: config.providers.codex.plugin_policies,
+  });
+  const adapter = createSshPushExecutionAdapter();
+  const observation = await adapter.observe(preparedRequest);
+  const planned = await planPush({
+    files,
+    host,
+    providers,
+    policyOverrides: config.providers.codex.plugin_policies,
+    observation,
+    preparedRequest,
+    createdAt,
+  });
 
-  try {
-    await createArchive(files, tempArchive, { providers });
-    unregisterInterruptCleanup = registerInterruptCleanup(async () => {
-      await rm(tempWorkspace, { recursive: true, force: true });
-    });
-    await pushArchive(tempArchive, host, {
-      codexPluginPolicies: config.providers.codex.plugin_policies,
-    });
-  } finally {
-    await rm(tempWorkspace, { recursive: true, force: true });
-    unregisterInterruptCleanup?.();
+  if (options.dryRun) {
+    if (options.json) {
+      console.log(JSON.stringify(planned.plan));
+      return;
+    }
+    log.info(`Push plan ${planned.plan.id} (${planned.plan.status})`);
+    log.info(`Providers: ${planned.plan.providers.join(", ")}`);
+    if (options.verbose)
+      for (const action of planned.plan.actions)
+        log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
+    return;
   }
+
+  if (planned.plan.status === "blocked") {
+    throw new BlockedError("Push plan is blocked");
+  }
+  log.info(`Executing push plan ${planned.plan.id}...`);
+  await executePlannedPush(planned, adapter);
+  log.success(`Successfully pushed config to ${host}`);
 }

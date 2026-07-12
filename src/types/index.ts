@@ -139,6 +139,7 @@ export interface CollectorOptions {
 
 export interface PushOptions {
   dryRun: boolean;
+  json?: boolean;
   skipVersionCheck: boolean;
   providers?: string;
   all?: boolean;
