@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -110,6 +110,30 @@ describe("streaming archive reader", () => {
     await expect(stat(destination)).rejects.toThrow();
   });
 
+  it("rejects a preexisting symlink destination without touching its target", async () => {
+    const input = await archive([{ name: "codex/config.toml", body: "hostile" }]);
+    const target = join(input.root, "caller-owned");
+    const destination = join(input.root, "out");
+    await mkdir(target);
+    await writeFile(join(target, "canary"), "preserve me");
+    await symlink(target, destination);
+
+    await expect(verifyArchive(input.path, { extractTo: destination })).rejects.toThrow();
+    expect(await readFile(join(target, "canary"), "utf8")).toBe("preserve me");
+    await expect(stat(join(target, "codex/config.toml"))).rejects.toThrow();
+  });
+
+  it("applies the verified executable mode", async () => {
+    const body = "#!/bin/sh\nexit 0\n";
+    const input = await archive([
+      { name: "codex/hooks.json", body, mode: 0o755 },
+      { name: ".ccm-manifest.json", body: v2("codex/hooks.json", body, { mode: 0o755 }) },
+    ]);
+    const destination = join(input.root, "out");
+    await verifyArchive(input.path, { extractTo: destination });
+    expect((await stat(join(destination, "codex/hooks.json"))).mode & 0o777).toBe(0o755);
+  });
+
   it("enforces injectable streaming limits", async () => {
     const input = await archive([{ name: "codex/config.toml", body: "too large" }]);
     await expect(verifyArchive(input.path, { limits: { compressedBytes: 1 } })).rejects.toThrow(
@@ -120,8 +144,24 @@ describe("streaming archive reader", () => {
   it.each([
     ["duplicate", ["codex/config.toml", "codex/config.toml"]],
     ["portable collision", ["codex/skills/demo/SKILL.md", "codex/skills/DEMO/SKILL.md"]],
+    ["ancestor case collision", ["codex/skills/Demo/one.md", "codex/skills/demo/two.md"]],
+    ["ancestor NFC collision", ["codex/skills/café/one.md", "codex/skills/café/two.md"]],
   ])("rejects %s paths", async (_label, names) => {
     const input = await archive(names.map((name) => ({ name, body: "x" })));
     await expect(verifyArchive(input.path)).rejects.toThrow(/Duplicate|collision/);
+  });
+
+  it.each([
+    [
+      "top-level",
+      '{"formatVersion":1,"formatVersion":2,"createdAt":"2026-07-12T00:00:00.000Z","producer":{"name":"claude-code-migrate","version":"2.0.0"},"providers":["codex"],"files":[]}',
+    ],
+    [
+      "nested escaped",
+      '{"formatVersion":2,"createdAt":"2026-07-12T00:00:00.000Z","producer":{"name":"claude-code-migrate","na\\u006de":"claude-code-migrate","version":"2.0.0"},"providers":["codex"],"files":[]}',
+    ],
+  ])("rejects duplicate JSON keys at %s scope", async (_label, manifest) => {
+    const input = await archive([{ name: ".ccm-manifest.json", body: manifest }]);
+    await expect(verifyArchive(input.path)).rejects.toThrow("Archive manifest is invalid");
   });
 });

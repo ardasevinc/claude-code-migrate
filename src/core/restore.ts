@@ -135,12 +135,13 @@ export async function restoreArchive(
   options: { dryRun?: boolean } = {},
 ): Promise<void> {
   const tempDir = await mkdtemp(join(tmpdir(), "ccm-restore-"));
+  const extractionDir = join(tempDir, "archive");
   const unregisterInterruptCleanup = registerInterruptCleanup(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
   try {
-    const manifest = await extractArchive(archivePath, tempDir);
+    const manifest = await extractArchive(archivePath, extractionDir);
 
     const availableProviders = manifest.providers.filter((p) => isProviderName(p));
 
@@ -154,7 +155,7 @@ export async function restoreArchive(
     }
 
     const needsShared = providersToRestore.some((name) => PROVIDERS[name].usesSharedSkills);
-    const sharedExtractPath = join(tempDir, "shared", "agents");
+    const sharedExtractPath = join(extractionDir, "shared", "agents");
     const hasShared = await exists(sharedExtractPath);
 
     if (options.dryRun) {
@@ -185,8 +186,11 @@ export async function restoreArchive(
         ...PROVIDERS.claude.includeIfExists,
         "settings.local.json",
       ]);
-      await mergeLocalClaudeMcp(tempDir);
-      await copyDirectoryContents(join(tempDir, "claude"), DEFAULT_COLLECTION_PATHS.claudeDir);
+      await mergeLocalClaudeMcp(extractionDir);
+      await copyDirectoryContents(
+        join(extractionDir, "claude"),
+        DEFAULT_COLLECTION_PATHS.claudeDir,
+      );
       log.success(`Restored Claude provider to ${DEFAULT_COLLECTION_PATHS.claudeDir}`);
     }
 
@@ -197,7 +201,7 @@ export async function restoreArchive(
         ".ccm",
         ".tmp/plugins",
       ]);
-      await copyDirectoryContents(join(tempDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
+      await copyDirectoryContents(join(extractionDir, "codex"), DEFAULT_COLLECTION_PATHS.codexDir);
       const codexConfigPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "config.toml");
       const codexHooksPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "hooks.json");
       if (await exists(codexConfigPath)) {

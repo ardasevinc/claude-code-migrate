@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -63,10 +63,14 @@ export async function verifyArchive(
   let manifestBytes: Buffer | undefined;
   const files: ObservedFile[] = [];
   const paths = new Set<string>();
-  const portablePaths = new Set<string>();
+  const portablePaths = new Map<string, string>();
   const parser = extract();
 
-  await mkdir(destination, { recursive: true, mode: 0o700 });
+  let ownsDestination = workspace !== undefined;
+  if (!ownsDestination) {
+    await mkdir(destination, { mode: 0o700 });
+    ownsDestination = true;
+  }
   parser.on("entry", (header, stream, next) => {
     void consumeEntry(header, stream).then(next, (error: unknown) =>
       parser.destroy(error as Error),
@@ -89,12 +93,18 @@ export async function verifyArchive(
       return;
     }
     validateArchiveMemberPaths([header.name]);
-    const portable = path.normalize("NFC").toLocaleLowerCase("en-US");
     if (paths.has(path)) throw new Error(`Duplicate archive member: ${path}`);
-    if (portablePaths.has(portable))
-      throw new Error(`Non-portable archive path collision: ${path}`);
+    const segments = path.split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      const prefix = segments.slice(0, index).join("/");
+      const portable = prefix.normalize("NFC").toLocaleLowerCase("en-US");
+      const existing = portablePaths.get(portable);
+      if (existing !== undefined && existing !== prefix) {
+        throw new Error(`Non-portable archive path collision: ${path}`);
+      }
+      portablePaths.set(portable, prefix);
+    }
     paths.add(path);
-    portablePaths.add(portable);
     if (directory) {
       await mkdir(join(extractionDestination, path), { recursive: true, mode: 0o700 });
       stream.resume();
@@ -126,12 +136,14 @@ export async function verifyArchive(
     });
     await pipeline(stream, counter, createWriteStream(outputPath, { flags: "wx", mode: 0o600 }));
     if (size !== declaredSize) throw new Error(`Archive member size mismatch: ${path}`);
+    const mode = (header.mode ?? 0) & 0o777;
+    await chmod(outputPath, mode);
     if (path === ".ccm-manifest.json") manifestBytes = Buffer.concat(chunks);
     else
       files.push({
         path,
         size,
-        mode: (header.mode ?? 0) & 0o777,
+        mode,
         sha256: hash.digest("hex"),
         destination: outputPath,
       });
@@ -165,7 +177,9 @@ export async function verifyArchive(
     if (!manifestBytes) throw new Error("Archive manifest is missing");
     let manifest: ArchiveManifest;
     try {
-      manifest = parseArchiveManifest(JSON.parse(manifestBytes.toString("utf8")));
+      manifest = parseArchiveManifest(
+        parseJsonWithoutDuplicateKeys(manifestBytes.toString("utf8")),
+      );
     } catch (error) {
       throw new Error("Archive manifest is invalid", { cause: error });
     }
@@ -192,9 +206,79 @@ export async function verifyArchive(
     if (workspace) await rm(workspace, { recursive: true, force: true });
     return result;
   } catch (error) {
-    await rm(destination, { recursive: true, force: true });
+    if (ownsDestination) await rm(destination, { recursive: true, force: true });
     throw error;
   }
+}
+
+function parseJsonWithoutDuplicateKeys(source: string): unknown {
+  let offset = 0;
+  const whitespace = () => {
+    while (/\s/.test(source[offset] ?? "")) offset += 1;
+  };
+  const string = (): string => {
+    const start = offset++;
+    while (offset < source.length) {
+      if (source[offset] === "\\") {
+        offset += 2;
+      } else if (source[offset++] === '"') {
+        return JSON.parse(source.slice(start, offset)) as string;
+      }
+    }
+    throw new SyntaxError("Unterminated JSON string");
+  };
+  const value = (): void => {
+    whitespace();
+    if (source[offset] === "{") {
+      offset += 1;
+      whitespace();
+      const keys = new Set<string>();
+      if (source[offset] !== "}") {
+        while (true) {
+          whitespace();
+          if (source[offset] !== '"') throw new SyntaxError("Expected JSON object key");
+          const key = string();
+          if (keys.has(key)) throw new SyntaxError(`Duplicate JSON object key: ${key}`);
+          keys.add(key);
+          whitespace();
+          if (source[offset++] !== ":") throw new SyntaxError("Expected ':'");
+          value();
+          whitespace();
+          if (source[offset] === "}") break;
+          if (source[offset++] !== ",") throw new SyntaxError("Expected ','");
+        }
+      }
+      offset += 1;
+      return;
+    }
+    if (source[offset] === "[") {
+      offset += 1;
+      whitespace();
+      if (source[offset] !== "]") {
+        while (true) {
+          value();
+          whitespace();
+          if (source[offset] === "]") break;
+          if (source[offset++] !== ",") throw new SyntaxError("Expected ','");
+        }
+      }
+      offset += 1;
+      return;
+    }
+    if (source[offset] === '"') {
+      string();
+      return;
+    }
+    const match = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(
+      source.slice(offset),
+    );
+    if (!match) throw new SyntaxError("Invalid JSON value");
+    offset += match[0].length;
+  };
+  value();
+  whitespace();
+  if (offset !== source.length) throw new SyntaxError("Unexpected JSON input");
+  return JSON.parse(source) as unknown;
 }
 
 export function extractVerifiedArchive(
