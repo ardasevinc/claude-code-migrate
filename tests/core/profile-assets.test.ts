@@ -81,6 +81,31 @@ describe("profile assets", () => {
     await expect(captureProfileAssets(profile("secret.md"), linkedConfig)).rejects.toThrow();
   });
 
+  it("accepts a config directory beneath a sticky world-writable ancestor", async () => {
+    const dir = await fixture();
+    const sticky = join(dir, "sticky");
+    const configDir = join(sticky, "config");
+    await mkdir(sticky);
+    await chmod(sticky, 0o1777);
+    await mkdir(configDir);
+    await writeFile(join(configDir, "CLAUDE.md"), "safe");
+    const assets = await captureProfileAssets(profile("CLAUDE.md"), configDir);
+    expect(assets[0]?.bytes.toString()).toBe("safe");
+  });
+
+  it("rejects a config directory beneath a non-sticky world-writable ancestor", async () => {
+    const dir = await fixture();
+    const writable = join(dir, "plain-writable");
+    const configDir = join(writable, "config");
+    await mkdir(writable);
+    await chmod(writable, 0o777);
+    await mkdir(configDir);
+    await writeFile(join(configDir, "CLAUDE.md"), "unsafe ancestry");
+    await expect(captureProfileAssets(profile("CLAUDE.md"), configDir)).rejects.toThrow(
+      "group/world-writable ancestors",
+    );
+  });
+
   it("rejects untrusted-writable asset ancestors before opening a leaf", async () => {
     const dir = await fixture();
     const parent = join(dir, "profiles", "devbox");

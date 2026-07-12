@@ -55,7 +55,8 @@ async function assertNoSymlinkComponents(configDir: string, assetPath: string): 
 
 async function trustedConfigDirectory(configDir: string): Promise<string> {
   // Node/Bun do not expose openat. Establish the local-config threat boundary explicitly:
-  // root/current-uid owners are trusted, while no other principal may write any ancestor.
+  // root/current-uid owners are trusted. Sticky ancestors such as /tmp prevent other users
+  // from replacing our owned entry; ordinary group/world-writable ancestors do not.
   const lexical = resolve(configDir);
   const currentUid = process.getuid?.();
   const chain: string[] = [];
@@ -68,7 +69,9 @@ async function trustedConfigDirectory(configDir: string): Promise<string> {
     if (info.isSymbolicLink() || !info.isDirectory()) {
       throw new Error("Profile config directory must have regular directory ancestors");
     }
-    if ((info.mode & 0o022) !== 0) {
+    const isWritable = (info.mode & 0o022) !== 0;
+    const isStickyAncestor = current !== lexical && (info.mode & 0o1000) !== 0;
+    if (isWritable && !isStickyAncestor) {
       throw new Error("Profile config directory must not have group/world-writable ancestors");
     }
     if (currentUid !== undefined && info.uid !== 0 && info.uid !== currentUid) {
