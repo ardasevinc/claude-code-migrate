@@ -8,6 +8,7 @@ export interface ProcessOptions {
   env?: NodeJS.ProcessEnv;
   nothrow?: boolean;
   maxBuffer?: number;
+  timeoutMs?: number;
 }
 
 export interface ProcessResult {
@@ -67,6 +68,7 @@ async function executeProcess(
     const maxBuffer = options.maxBuffer ?? 20 * 1024 * 1024;
     let bufferedBytes = 0;
     let bufferError: string | undefined;
+    let timeoutError: string | undefined;
     let settled = false;
     let childClosed = false;
     let resolveChildClosed: () => void;
@@ -86,6 +88,18 @@ async function executeProcess(
         await childClosedPromise;
       }
     });
+    const timeout =
+      options.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            if (childClosed) return;
+            timeoutError = `process timed out after ${options.timeoutMs}ms`;
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!childClosed) child.kill("SIGKILL");
+            }, INTERRUPT_GRACE_MS).unref();
+          }, options.timeoutMs);
+    timeout?.unref();
 
     const capture = (chunks: Buffer[], chunk: Buffer) => {
       if (settled || bufferError) return;
@@ -118,20 +132,22 @@ async function executeProcess(
       childClosed = true;
       resolveChildClosed();
       unregisterInterruptCleanup();
+      if (timeout) clearTimeout(timeout);
       finish({ stdout: "", stderr: "", exitCode: null, signal: null, error: error.message }, error);
     });
     child.on("close", (exitCode, signal) => {
       childClosed = true;
       resolveChildClosed();
       unregisterInterruptCleanup();
+      if (timeout) clearTimeout(timeout);
       const result: ProcessResult = {
         stdout: Buffer.concat(stdout).toString(),
         stderr: Buffer.concat(stderr).toString(),
         exitCode,
         signal,
-        ...(bufferError ? { error: bufferError } : {}),
+        ...(bufferError || timeoutError ? { error: bufferError ?? timeoutError } : {}),
       };
-      finish(result, bufferError ? new Error(bufferError) : undefined);
+      finish(result, result.error ? new Error(result.error) : undefined);
     });
   });
 }

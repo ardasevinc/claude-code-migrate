@@ -9,11 +9,14 @@ import {
 import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 import { runProcess, type ProcessResult } from "../utils/process.ts";
+import { shellQuote } from "../utils/shell.ts";
 import type { HostCapabilities } from "./codex-plugin-policy.ts";
 
 export const MAX_PUSH_OBSERVATION_ENTRIES = 100_000;
-export const MAX_PUSH_OBSERVATION_FILE_BYTES = 4 * 1024 * 1024;
-export const MAX_PUSH_OBSERVATION_TOTAL_BYTES = 32 * 1024 * 1024;
+export const MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES = 4 * 1024 * 1024;
+export const MAX_PUSH_OBSERVATION_CAPTURE_TOTAL_BYTES = 32 * 1024 * 1024;
+export const MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES = 1024 * 1024 * 1024;
+export const MAX_PUSH_OBSERVATION_INVENTORY_TOTAL_BYTES = 4 * 1024 * 1024 * 1024;
 export const MAX_PUSH_OBSERVATION_STDOUT_BYTES = 64 * 1024 * 1024;
 export const PUSH_OBSERVATION_TIMEOUT_MS = 30_000;
 
@@ -28,7 +31,7 @@ export interface PushObservationQueries {
 export interface PushObservationTransport {
   run(
     host: string,
-    argvCommand: readonly string[],
+    argvCommand: string,
     options: { maxBuffer: number; timeout: number },
   ): Promise<Pick<ProcessResult, "stdout" | "stderr" | "exitCode">>;
 }
@@ -51,7 +54,10 @@ export interface PushTargetObservation {
 
 const defaultTransport: PushObservationTransport = {
   async run(host, argvCommand, options) {
-    return runProcess("ssh", [host, ...argvCommand], { maxBuffer: options.maxBuffer });
+    return runProcess("ssh", [host, argvCommand], {
+      maxBuffer: options.maxBuffer,
+      timeoutMs: options.timeout,
+    });
   },
 };
 
@@ -61,13 +67,27 @@ function b64(value: string): string {
 function q(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
+function hasControl(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
+}
 
 function validateAbsolute(path: string, label: string): void {
-  if (!path.startsWith("/") || path.includes("\0") || path.split("/").includes(".."))
+  if (
+    Buffer.byteLength(path) > 4096 ||
+    !/^\/(?!\/)(?!$)/.test(path) ||
+    path.endsWith("/") ||
+    path.includes("//") ||
+    path.includes("\\") ||
+    hasControl(path) ||
+    path.split("/").some((part) => part === "." || part === "..")
+  )
     throw new Error(`Invalid ${label}: ${JSON.stringify(path)}`);
 }
 
-/** One read-only POSIX-sh probe. It intentionally has no temp files; re-observation seals TOCTOU at apply time. */
+/** One probe with no explicit writes. Reads may update atime; re-observation seals shell TOCTOU at apply time. */
 export function buildRemotePushObservationProbe(
   incoming: readonly InventoryEntry[],
   queries: PushObservationQueries = {},
@@ -75,7 +95,7 @@ export function buildRemotePushObservationProbe(
   const roots = groupManagedTopLevelEntries(incoming).map((group) => group.path);
   const encoded = (values: readonly string[]) => values.map((v) => q(b64(v))).join(" ");
   return `set -eu
-emit(){ printf '%s\\t%b\\n' "$1" "$2"; }
+emit(){ printf '%s' "$1"; shift; for field do printf '\\t%s' "$field"; done; printf '\\n'; }
 enc(){ if printf '' | base64 2>/dev/null | grep -q '^$'; then base64 | tr -d '\\n'; else base64 | tr -d '\\n'; fi; }
 hash(){ (sha256sum 2>/dev/null || shasum -a 256 2>/dev/null) | awk '{print $1}'; }
 mode(){ (stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null); }
@@ -83,14 +103,14 @@ size(){ (stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null); }
 dec(){ printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D; }
 home=\${HOME-}; case "$home" in /*) ;; *) exit 41;; esac; case "$home" in *'/../'*|*/..|*/./*|*/.) exit 41;; esac
 printf 'CCM_PUSH_OBSERVATION\\t1\\n'; emit HOME "$(printf '%s' "$home"|enc)"
-emit OS "$(uname -s|enc)"; emit ARCH "$(uname -m|enc)"
+os=$(uname -s); arch=$(uname -m); emit OS "$(printf '%s' "$os"|enc)"; emit ARCH "$(printf '%s' "$arch"|enc)"
 gui=false; [ "$(uname -s)" = Darwin ] && [ -n "\${DISPLAY-}\${WAYLAND_DISPLAY-}\${TERM_PROGRAM-}" ] && gui=true; emit GUI "$gui"
-for x in ${encoded([...new Set(queries.commandNames ?? [])].sort())}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); emit CMD "$x\\t$(printf '%s' "$p"|enc)"; done
-for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); v=false; [ -e "$p" ] || [ -L "$p" ] && v=true; emit EXISTS "$x\\t$v"; done
-for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_FILE_BYTES} ] || exit 42; emit CAPTURE "$x\\t$z\\t$(hash <"$p")\\t$(enc <"$p")"; else emit CAPTURE "$x\\t-"; fi; done
-walk(){ ( logical=$1; live=$2; [ -e "$live" ] || [ -L "$live" ] || return 0; if [ -L "$live" ]; then t=$(readlink "$live"); z=$(printf '%s' "$t"|wc -c|tr -d ' '); h=$(printf 'ccm:inventory:symlink-target\\0%s' "$t"|hash); emit ENTRY "$(printf '%s' "$logical"|enc)\\tsymlink\\t755\\t$z\\t$h"; elif [ -f "$live" ]; then z=$(size "$live"); [ "$z" -le ${MAX_PUSH_OBSERVATION_FILE_BYTES} ] || exit 42; m=$(mode "$live"); case "$m" in *[1357]) m=755;; *) m=644;; esac; emit ENTRY "$(printf '%s' "$logical"|enc)\\tfile\\t$m\\t$z\\t$(hash <"$live")"; elif [ -d "$live" ]; then for c in "$live"/* "$live"/.[!.]* "$live"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; n=\${c##*/}; walk "$logical/$n" "$c"; done; else exit 43; fi; ); }
+for x in ${encoded([...new Set(queries.commandNames ?? [])].sort())}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
+for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); v=false; [ -e "$p" ] || [ -L "$p" ] && v=true; emit EXISTS "$x" "$v"; done
+for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
+walk(){ ( logical=$1; live=$2; [ -e "$live" ] || [ -L "$live" ] || return 0; n=\${live##*/}; [ "$n" = .git ] && return 0; if [ -L "$live" ]; then t=$(readlink "$live"; printf x); t=\${t%x}; z=$(printf '%s' "$t"|wc -c|tr -d ' '); h=$(printf 'ccm:inventory:symlink-target\\0%s' "$t"|hash); emit ENTRY "$(printf '%s' "$logical"|enc)" symlink 755 "$z" "$h"; elif [ -f "$live" ]; then z=$(size "$live"); [ "$z" -le ${MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES} ] || exit 42; m=$(mode "$live"); case "$m" in *[1357]*) m=755;; *) m=644;; esac; emit ENTRY "$(printf '%s' "$logical"|enc)" file "$m" "$z" "$(hash <"$live")"; elif [ -d "$live" ]; then for c in "$live"/* "$live"/.[!.]* "$live"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; n=\${c##*/}; walk "$logical/$n" "$c"; done; else exit 43; fi; ); }
 for x in ${encoded(roots)}; do l=$(dec "$x"); case "$l" in claude/*) p="$home/.claude/\${l#claude/}";; codex/*) p="$home/.codex/\${l#codex/}";; shared/agents/*) p="$home/.agents/\${l#shared/agents/}";; *) exit 44;; esac; walk "$l" "$p"; done
-for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x\\t$v"; done
+for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
 ${queries.sharedSkillNames ? `if [ -d "$home/.agents/skills" ] && [ ! -L "$home/.agents/skills" ]; then for p in "$home/.agents/skills"/*; do [ -d "$p" ] && [ ! -L "$p" ] || continue; emit SKILL "$(printf '%s' "\${p##*/}"|enc)"; done; fi` : ":"}
 printf 'END\\n'`;
 }
@@ -129,7 +149,8 @@ export function parseRemotePushObservation(
     captures = new Map<string, Uint8Array | null>(),
     markets = new Map<string, boolean>();
   const skills: string[] = [];
-  let total = 0;
+  let captureTotal = 0,
+    inventoryTotal = 0;
   const singleton = new Set<string>();
   for (const line of lines) {
     const [kind = "", ...f] = line.split("\t");
@@ -144,9 +165,10 @@ export function parseRemotePushObservation(
       gui = f[0] === "true";
     else if (kind === "CMD" && f.length === 2) {
       const k = decode(f[0] ?? ""),
-        v = decode(f[1] ?? "");
+        v = f[1] === "-" ? null : decode(f[1] ?? "");
       if (commands.has(k)) throw new Error("Duplicate CMD");
-      commands.set(k, v || null);
+      if (v !== null) validateAbsolute(v, "resolved command path");
+      commands.set(k, v);
     } else if (kind === "EXISTS" && f.length === 2) {
       const k = decode(f[0] ?? "");
       if (exists.has(k) || !/^(true|false)$/.test(f[1] ?? "")) throw new Error("Invalid EXISTS");
@@ -155,8 +177,20 @@ export function parseRemotePushObservation(
       const k = decode(f[0] ?? "");
       if (markets.has(k) || !/^(true|false)$/.test(f[1] ?? "")) throw new Error("Invalid MARKET");
       markets.set(k, f[1] === "true");
-    } else if (kind === "SKILL" && f.length === 1) skills.push(decode(f[0] ?? ""));
-    else if (kind === "CAPTURE" && f.length === 2 && f[1] === "-") {
+    } else if (kind === "SKILL" && f.length === 1) {
+      if (!queries.sharedSkillNames) throw new Error("Unexpected SKILL");
+      const name = decode(f[0] ?? "");
+      if (
+        name !== basename(name) ||
+        name === "." ||
+        name === ".." ||
+        name.includes("\\") ||
+        hasControl(name) ||
+        skills.includes(name)
+      )
+        throw new Error("Invalid SKILL");
+      skills.push(name);
+    } else if (kind === "CAPTURE" && f.length === 2 && f[1] === "-") {
       const k = decode(f[0] ?? "");
       if (captures.has(k)) throw new Error("Duplicate CAPTURE");
       captures.set(k, null);
@@ -174,19 +208,19 @@ export function parseRemotePushObservation(
         captures.has(k) ||
         !Number.isSafeInteger(n) ||
         n < 0 ||
-        n > MAX_PUSH_OBSERVATION_FILE_BYTES ||
+        n > MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES ||
         data.length !== n ||
         createHash("sha256").update(data).digest("hex") !== f[2]
       )
         throw new Error("Invalid CAPTURE");
-      total += n;
+      captureTotal += n;
       captures.set(k, data);
     } else if (kind === "ENTRY" && f.length === 5) {
       const size = Number(f[3]);
       if (
         !Number.isSafeInteger(size) ||
         size < 0 ||
-        size > MAX_PUSH_OBSERVATION_FILE_BYTES ||
+        size > MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES ||
         !/^[a-f0-9]{64}$/.test(f[4] ?? "")
       )
         throw new Error("Invalid ENTRY");
@@ -197,9 +231,13 @@ export function parseRemotePushObservation(
         size,
         sha256: f[4] ?? "",
       });
-      total += size;
+      inventoryTotal += size;
     } else throw new Error(`Unknown or malformed observation record: ${kind}`);
-    if (inventory.length > MAX_PUSH_OBSERVATION_ENTRIES || total > MAX_PUSH_OBSERVATION_TOTAL_BYTES)
+    if (
+      inventory.length > MAX_PUSH_OBSERVATION_ENTRIES ||
+      captureTotal > MAX_PUSH_OBSERVATION_CAPTURE_TOTAL_BYTES ||
+      inventoryTotal > MAX_PUSH_OBSERVATION_INVENTORY_TOTAL_BYTES
+    )
       throw new Error("Push observation budget exceeded");
   }
   if (!home || !os || !arch || gui === undefined) throw new Error("Incomplete push observation");
@@ -242,12 +280,20 @@ export function parseRemotePushObservation(
   const factsDigest = createHash("sha256")
     .update(
       JSON.stringify({
-        existence: [...exists.values()],
-        commands: [...commands.values()].map(Boolean),
-        captures: [...captures.values()].map(
-          (v) => v && createHash("sha256").update(v).digest("hex"),
-        ),
-        markets: [...markets.values()],
+        home: createHash("sha256").update("ccm:push:home\0").update(home).digest("hex"),
+        commands: [...commands.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, path]) => [
+            name,
+            path === null
+              ? null
+              : createHash("sha256").update("ccm:push:command\0").update(path).digest("hex"),
+          ]),
+        captures: [...captures.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, v]) => [name, v && createHash("sha256").update(v).digest("hex")]),
+        existence: [...exists.entries()].sort(([a], [b]) => a.localeCompare(b)),
+        markets: [...markets.entries()].sort(([a], [b]) => a.localeCompare(b)),
         skills: facts.sharedSkillNames,
       }),
     )
@@ -281,11 +327,23 @@ export async function observeRemotePushTarget(input: {
     if (n !== basename(n) || !/^[A-Za-z0-9._@+-]+$/.test(n))
       throw new Error(`Invalid observation name: ${JSON.stringify(n)}`);
   const probe = buildRemotePushObservationProbe(input.incoming, queries);
-  const result = await (input.transport ?? defaultTransport).run(input.host, ["sh", "-c", probe], {
-    maxBuffer: MAX_PUSH_OBSERVATION_STDOUT_BYTES,
-    timeout: PUSH_OBSERVATION_TIMEOUT_MS,
-  });
-  if (result.exitCode !== 0)
-    throw new Error(`Remote push observation failed (${result.exitCode}): ${result.stderr.trim()}`);
+  const result = await (input.transport ?? defaultTransport).run(
+    input.host,
+    `sh -c ${shellQuote(probe)}`,
+    {
+      maxBuffer: MAX_PUSH_OBSERVATION_STDOUT_BYTES,
+      timeout: PUSH_OBSERVATION_TIMEOUT_MS,
+    },
+  );
+  if (result.exitCode !== 0) {
+    const stderr = [...result.stderr]
+      .map((character) => (hasControl(character) ? " " : character))
+      .join("")
+      .trim()
+      .slice(0, 512);
+    throw new Error(
+      `Remote push observation failed (${result.exitCode})${stderr ? `: ${stderr}` : ""}`,
+    );
+  }
   return parseRemotePushObservation(result.stdout, input.incoming, queries);
 }

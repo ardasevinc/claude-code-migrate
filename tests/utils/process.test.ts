@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 import { ProcessError, runInheritedProcess, runProcess } from "../../src/utils/process.ts";
 
 describe("process runner", () => {
+  it("terminates a process after timeoutMs", async () => {
+    const started = Date.now();
+    await expect(
+      runProcess(process.execPath, ["-e", "setInterval(()=>{},1000)"], { timeoutMs: 25 }),
+    ).rejects.toThrow("timed out after 25ms");
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
   it("executes an argv array without shell interpretation", async () => {
     const argument = "$(printf leaked); ' \" ; echo nope";
     const result = await runProcess(process.execPath, [

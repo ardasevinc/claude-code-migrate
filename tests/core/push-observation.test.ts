@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -45,8 +45,8 @@ describe("remote push observation", () => {
       },
     });
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[1]).toEqual(["sh", "-c", expect.any(String)]);
-    expect(String((calls[0]?.[1] as string[])[2])).not.toMatch(/command -v ['"]?codex/);
+    expect(calls[0]?.[1]).toEqual(expect.stringMatching(/^sh -c /));
+    expect(String(calls[0]?.[1])).not.toMatch(/command -v ['"]?codex/);
     expect(JSON.stringify(observed)).not.toContain("example.com");
   });
 
@@ -68,6 +68,73 @@ describe("remote push observation", () => {
       ["codex/skills/ü space/name", "file"],
     ]);
     expect(await readFile(join(dir, "ü space", "name"))).toEqual(before);
+  });
+
+  it("preserves symlink target trailing newlines and recognizes any execute bit", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-mode-"));
+    const dir = join(home, ".codex", "skills");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "executable"), "x", { mode: 0o710 });
+    await symlink("target\n\n", join(dir, "newline-link"));
+    const probe = buildRemotePushObservationProbe([incoming("codex/skills/new")]);
+    const result = await runProcess("sh", ["-c", probe], { env: { ...process.env, HOME: home } });
+    const observed = parseRemotePushObservation(result.stdout, [incoming("codex/skills/new")]);
+    expect(observed.inventory.find((x) => x.path.endsWith("executable"))?.mode).toBe(0o755);
+    expect(observed.inventory.find((x) => x.path.endsWith("newline-link"))).toMatchObject({
+      size: Buffer.byteLength("target\n\n"),
+      sha256: createHash("sha256")
+        .update("ccm:inventory:symlink-target\0")
+        .update("target\n\n")
+        .digest("hex"),
+    });
+  });
+
+  it("inventories current-size plugin packs above the capture cap and skips .git", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-pack-"));
+    const root = join(home, ".codex", ".tmp", "plugins");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, "pack"), "");
+    await truncate(join(root, "pack"), 5 * 1024 * 1024);
+    await writeFile(join(root, ".git", "large-pack"), "ignored");
+    const wanted = incoming("codex/.tmp/plugins/pack");
+    const result = await runProcess("sh", ["-c", buildRemotePushObservationProbe([wanted])], {
+      env: { ...process.env, HOME: home },
+    });
+    const observed = parseRemotePushObservation(result.stdout, [wanted]);
+    expect(observed.inventory).toHaveLength(1);
+    expect(observed.inventory[0]?.size).toBe(5 * 1024 * 1024);
+  });
+
+  it("uses a dash sentinel for missing commands and binds paths and HOME into state", () => {
+    const query = { commandNames: ["missing"] };
+    const missing = `CMD\t${e("missing")}\t-`;
+    const first = parseRemotePushObservation(envelope(missing), [], query);
+    expect(first.facts.commandPaths.get("missing")).toBeNull();
+    const resolved = `CMD\t${e("missing")}\t${e("/usr/bin/missing")}`;
+    expect(parseRemotePushObservation(envelope(resolved), [], query).pushStateFingerprint).not.toBe(
+      first.pushStateFingerprint,
+    );
+    expect(
+      parseRemotePushObservation(
+        envelope(missing).replace(e("/home/me"), e("/home/else")),
+        [],
+        query,
+      ).pushStateFingerprint,
+    ).not.toBe(first.pushStateFingerprint);
+  });
+
+  it("rejects non-canonical absolute paths and unsolicited or duplicate skills", () => {
+    expect(() =>
+      parseRemotePushObservation(envelope().replace(e("/home/me"), e("//home/me")), []),
+    ).toThrow("remote HOME");
+    expect(() => parseRemotePushObservation(envelope(`SKILL\t${e("demo")}`), [])).toThrow(
+      "Unexpected SKILL",
+    );
+    expect(() =>
+      parseRemotePushObservation(envelope(`SKILL\t${e("demo")}`, `SKILL\t${e("demo")}`), [], {
+        sharedSkillNames: true,
+      }),
+    ).toThrow("Invalid SKILL");
   });
 
   it("captures exact bounded bytes and validates their hash", () => {
