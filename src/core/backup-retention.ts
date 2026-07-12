@@ -18,6 +18,10 @@ function isBackupNameForDir(name: string, dirPath: string): boolean {
   return /^\d+$/.test(name.slice(prefix.length));
 }
 
+function backupSequence(name: string, dirPath: string): bigint {
+  return BigInt(name.slice(getBackupPrefix(dirPath).length));
+}
+
 export async function pruneLocalBackups(
   dirPath: string,
   keep = DEFAULT_BACKUP_RETENTION,
@@ -29,7 +33,11 @@ export async function pruneLocalBackups(
       (entry) => (entry.isDirectory() || entry.isFile()) && isBackupNameForDir(entry.name, dirPath),
     )
     .map((entry) => entry.name)
-    .sort((a, b) => b.localeCompare(a));
+    .sort((a, b) => {
+      const left = backupSequence(a, dirPath);
+      const right = backupSequence(b, dirPath);
+      return left === right ? 0 : left > right ? -1 : 1;
+    });
 
   const staleBackups = backupNames.slice(keep);
 

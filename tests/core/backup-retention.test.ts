@@ -41,6 +41,29 @@ describe("backup retention", () => {
     }
   });
 
+  it("orders variable-width backup sequences numerically", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-backup-numeric-test-"));
+    try {
+      const targetDir = join(rootDir, ".codex");
+      await mkdir(targetDir);
+      for (const sequence of ["2", "3", "4", "5", "6", "1783809965808"])
+        await mkdir(`${targetDir}.backup-${sequence}`);
+
+      await pruneLocalBackups(targetDir, 5);
+
+      expect((await readdir(rootDir)).sort()).toEqual([
+        ".codex",
+        ".codex.backup-1783809965808",
+        ".codex.backup-3",
+        ".codex.backup-4",
+        ".codex.backup-5",
+        ".codex.backup-6",
+      ]);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it("generates valid shell syntax for remote backup pruning", () => {
     const command = buildRemoteBackupPruneCommand("/home/arda/.codex");
 
