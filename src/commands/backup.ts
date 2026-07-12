@@ -1,16 +1,16 @@
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "../config/loader.ts";
 import { getEnabledProviders, resolveBackupArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
 import { executePlannedBackup, planBackup } from "../core/plan-backup.ts";
 import { BlockedError, UsageError } from "../errors.ts";
+import { createRuntimeContext, type RuntimeContext } from "../runtime/context.ts";
 import type { BackupOptions, FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 
-function expandPath(path: string): string {
+function expandPath(path: string, home: string): string {
   if (path.startsWith("~/")) {
-    return path.replace("~", homedir());
+    return path.replace("~", home);
   }
 
   return resolve(path);
@@ -20,6 +20,7 @@ export async function backupCommand(
   arg1: string | undefined,
   arg2: string | undefined,
   options: BackupOptions,
+  context: RuntimeContext = createRuntimeContext(),
 ): Promise<void> {
   if (options.json && !options.dryRun) {
     throw new UsageError("--json currently requires --dry-run");
@@ -40,7 +41,7 @@ export async function backupCommand(
     });
   }
 
-  const operationDate = new Date();
+  const operationDate = context.now();
   const timestamp = operationDate.toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const defaultFilename = `ccm-backup-${timestamp}.tar.gz`;
 
@@ -48,13 +49,13 @@ export async function backupCommand(
   let outputIdentity: string;
 
   if (outputArg) {
-    outputPath = expandPath(outputArg);
+    outputPath = expandPath(outputArg, context.home);
     outputIdentity = outputPath;
     if (!outputPath.endsWith(".tar.gz")) {
       outputPath = join(outputPath, defaultFilename);
     }
   } else {
-    const backupDir = expandPath(config.backup.path);
+    const backupDir = expandPath(config.backup.path, context.home);
     outputIdentity = backupDir;
     outputPath = join(backupDir, defaultFilename);
   }
@@ -65,6 +66,7 @@ export async function backupCommand(
     includeClaudeMcpConfig: config.providers.claude.mcp_config,
     dryRun: options.dryRun,
     quiet: options.json,
+    context,
   });
 
   if (files.length === 0) {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { collectFiles } from "../../src/core/collector.ts";
+import { createRuntimeContext } from "../../src/runtime/context.ts";
 
 let rootDir = "";
 
@@ -74,6 +75,35 @@ afterEach(async () => {
 });
 
 describe("collector multi-provider", () => {
+  it("derives default paths from the provided runtime context per call", async () => {
+    const firstHome = join(rootDir, "first-home");
+    const secondHome = join(rootDir, "second-home");
+    await mkdir(join(firstHome, ".claude"), { recursive: true });
+    await mkdir(join(secondHome, ".claude"), { recursive: true });
+    await writeFixtureFile(join(firstHome, ".claude", "CLAUDE.md"), "first");
+    await writeFixtureFile(join(secondHome, ".claude", "CLAUDE.md"), "second");
+
+    const collectFrom = (home: string) =>
+      collectFiles({
+        providers: ["claude"],
+        includeClaudeSettingsLocal: false,
+        includeClaudeMcpConfig: false,
+        quiet: true,
+        context: createRuntimeContext({ home }),
+      });
+
+    const [first, second] = await Promise.all([collectFrom(firstHome), collectFrom(secondHome)]);
+    expect(first.map((entry) => entry.sourcePath)).toContain(
+      join(firstHome, ".claude", "CLAUDE.md"),
+    );
+    expect(first.map((entry) => entry.sourcePath)).not.toContain(
+      join(secondHome, ".claude", "CLAUDE.md"),
+    );
+    expect(second.map((entry) => entry.sourcePath)).toContain(
+      join(secondHome, ".claude", "CLAUDE.md"),
+    );
+  });
+
   it("collects claude + shared and excludes claude symlinked shared skills", async () => {
     const files = await collectFiles({
       providers: ["claude"],

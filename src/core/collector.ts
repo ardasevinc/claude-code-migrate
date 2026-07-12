@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
-import { DEFAULT_COLLECTION_PATHS, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../config/providers.ts";
+import { collectionPathsForHome, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../config/providers.ts";
+import { createRuntimeContext } from "../runtime/context.ts";
 import type { CollectionPaths, CollectorOptions, FileEntry, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { discoverCodexLocalMarketplaceSources, getConfiguredCodexPluginNames } from "./codex.ts";
@@ -499,8 +500,9 @@ async function collectSharedAgentsFiles(paths: CollectionPaths): Promise<FileEnt
 }
 
 export async function collectFiles(options: CollectorOptions): Promise<FileEntry[]> {
+  const context = options.context ?? createRuntimeContext();
   const paths: CollectionPaths = {
-    ...DEFAULT_COLLECTION_PATHS,
+    ...collectionPathsForHome(context.home),
     ...options.paths,
   };
 

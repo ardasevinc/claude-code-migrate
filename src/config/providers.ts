@@ -29,15 +29,20 @@ export const SHARED_SKILL_LOCK_PATH = join(SHARED_AGENTS_DIR, ".skill-lock.json"
 export const SHARED_ARCHIVE_PREFIX = "shared/agents";
 export const SHARED_MANAGED_ENTRIES = ["skills", "lazy-skills", ".skill-lock.json"];
 
-export const DEFAULT_COLLECTION_PATHS: CollectionPaths = {
-  claudeDir: CLAUDE_DIR,
-  codexDir: CODEX_DIR,
-  claudeMcpConfigPath: CLAUDE_MCP_CONFIG_PATH,
-  sharedAgentsDir: SHARED_AGENTS_DIR,
-  sharedSkillsDir: SHARED_SKILLS_DIR,
-  sharedLazySkillsDir: SHARED_LAZY_SKILLS_DIR,
-  sharedSkillLockPath: SHARED_SKILL_LOCK_PATH,
-};
+export function collectionPathsForHome(home: string): CollectionPaths {
+  const sharedAgentsDir = join(home, ".agents");
+  return {
+    claudeDir: join(home, ".claude"),
+    codexDir: join(home, ".codex"),
+    claudeMcpConfigPath: join(home, ".claude.json"),
+    sharedAgentsDir,
+    sharedSkillsDir: join(sharedAgentsDir, "skills"),
+    sharedLazySkillsDir: join(sharedAgentsDir, "lazy-skills"),
+    sharedSkillLockPath: join(sharedAgentsDir, ".skill-lock.json"),
+  };
+}
+
+export const DEFAULT_COLLECTION_PATHS: CollectionPaths = collectionPathsForHome(home);
 
 export const PROVIDERS: Record<ProviderName, ProviderDefinition> = {
   claude: {

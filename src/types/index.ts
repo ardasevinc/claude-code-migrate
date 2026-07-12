@@ -1,3 +1,5 @@
+import type { RuntimeContext } from "../runtime/context.ts";
+
 export type ProviderName = "claude" | "codex";
 
 export interface Config {
@@ -107,6 +109,7 @@ export interface CollectorOptions {
   dryRun?: boolean;
   quiet?: boolean;
   paths?: Partial<CollectionPaths>;
+  context?: RuntimeContext;
 }
 
 export interface PushOptions {
