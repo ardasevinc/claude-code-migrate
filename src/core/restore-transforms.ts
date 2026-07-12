@@ -39,6 +39,19 @@ export interface RestoreTransformResult {
   readonly warnings: readonly string[];
 }
 
+/** Removes only trust grants from Codex hook state tables, preserving all other state. */
+export function stripAllCodexHookTrust(rawConfig: string): string {
+  let inHookState = false;
+  return rawConfig
+    .split(/(?<=\n)/)
+    .filter((line) => {
+      const header = line.match(/^\s*\[([^\]]+)]/);
+      if (header) inHookState = header[1]?.startsWith("hooks.state.") ?? false;
+      return !(inHookState && /^\s*trusted_hash\s*=/.test(line));
+    })
+    .join("");
+}
+
 function text(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("utf8");
 }
@@ -144,6 +157,7 @@ export async function transformRestoreInputs(
   let codexHooks = inputs.codexHooks ? text(inputs.codexHooks) : undefined;
   const warnings: string[] = [];
   if (codexConfig !== undefined) {
+    codexConfig = stripAllCodexHookTrust(codexConfig);
     const marketplaces = await rewriteCodexMarketplaceSources(codexConfig, async (source) =>
       facts.marketplacePayloads.get(source.name)
         ? join(paths.codexDir, ".ccm", "marketplaces", source.name)

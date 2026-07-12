@@ -36,6 +36,7 @@ import {
   MAX_RESTORE_OBSERVATION_FILE_BYTES,
   resolveLocalHookCandidate,
 } from "./restore-observation.ts";
+import { stripAllCodexHookTrust } from "./restore-transforms.ts";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -270,6 +271,10 @@ export async function restoreArchive(
       const codexConfigPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "config.toml");
       const codexHooksPath = join(DEFAULT_COLLECTION_PATHS.codexDir, "hooks.json");
       if (await exists(codexConfigPath)) {
+        const configWithoutHookTrust = stripAllCodexHookTrust(
+          await readFile(codexConfigPath, "utf8"),
+        );
+        await writeFile(codexConfigPath, configWithoutHookTrust, "utf8");
         const normalized = await normalizeLocalCodexMarketplaceSources(
           codexConfigPath,
           DEFAULT_COLLECTION_PATHS.codexDir,

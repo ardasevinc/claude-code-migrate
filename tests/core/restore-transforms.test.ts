@@ -4,6 +4,7 @@ import { fingerprint } from "../../src/core/migration-plan.ts";
 import {
   deriveRestoreObservationQueries,
   mergeClaudeMcpStrict,
+  stripAllCodexHookTrust,
   transformRestoreInputs,
 } from "../../src/core/restore-transforms.ts";
 
@@ -13,6 +14,25 @@ const missingMcp = {
 } as const;
 
 describe("restore transforms", () => {
+  it("strips every hook trust grant while preserving enabled state", () => {
+    const config = `[hooks.state."/one:stop:0:0"]
+enabled = true
+trusted_hash = "sha256:one"
+
+[hooks.state."/two:stop:0:1"]
+trusted_hash = "sha256:two"
+enabled = false
+
+[unrelated]
+trusted_hash = "keep"
+`;
+    const stripped = stripAllCodexHookTrust(config);
+    expect(stripped).not.toContain("sha256:one");
+    expect(stripped).not.toContain("sha256:two");
+    expect(stripped).toContain("enabled = true");
+    expect(stripped).toContain('trusted_hash = "keep"');
+  });
+
   it("strictly merges Claude MCP bytes and preserves the full target document", () => {
     const merged = mergeClaudeMcpStrict(Buffer.from('{"mcpServers":{"new":{"command":"new"}}}'), {
       exists: true,

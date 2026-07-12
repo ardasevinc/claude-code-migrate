@@ -41,12 +41,26 @@ export interface PlannedRestore {
   readonly plan: MigrationPlan;
 }
 
+type RestoreActionBinding =
+  | { readonly kind: "transform-stage"; readonly config?: Uint8Array; readonly hooks?: Uint8Array }
+  | { readonly kind: "write-mcp"; readonly bytes: Uint8Array }
+  | {
+      readonly kind: "overlay-group";
+      readonly logicalGroup: string;
+      readonly entries: readonly InventoryEntry[];
+    }
+  | { readonly kind: "symlink-view"; readonly entries: readonly InventoryEntry[] };
+
 interface RestorePlanResources {
   readonly archivePath: string;
   readonly paths: CollectionPaths;
-  readonly captured: RestoreTransformInputs;
+  readonly transformed: RestoreTransformInputs;
   readonly observation: RestoreTargetObservation;
-  readonly steps: readonly string[];
+  readonly selectedInventory: readonly InventoryEntry[];
+  readonly stagedIncoming: readonly InventoryEntry[];
+  readonly stagedFinal: readonly InventoryEntry[];
+  readonly archiveSha256: string;
+  readonly actionBindings: ReadonlyMap<string, RestoreActionBinding>;
 }
 
 const resources = new WeakMap<PlannedRestore, RestorePlanResources>();
@@ -54,6 +68,16 @@ const captures = new Set(["claude/.mcp-config.json", "codex/config.toml", "codex
 
 function endpoint(domain: string, value: string): EndpointRef {
   return `endpoint_${createHash("sha256").update(`ccm:${domain}\0${value}`).digest("hex")}`;
+}
+
+function opaqueRef(kind: string, logical: string): string {
+  return `restore-${kind}-${createHash("sha256").update(`ccm:restore:${kind}\0${logical}`).digest("hex")}`;
+}
+
+function sameBytes(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
+  return left === undefined
+    ? right === undefined
+    : right !== undefined && Buffer.from(left).equals(right);
 }
 
 function inventoryEntry(path: string, mode: number, bytes: Uint8Array): InventoryEntry {
@@ -106,8 +130,8 @@ function groupAction(
       : group.path.startsWith("codex/")
         ? "codex"
         : "shared",
-    sourceRef: `archive-${group.path.replaceAll("/", "-")}`,
-    targetRef: `local-${group.path.replaceAll("/", "-")}`,
+    sourceRef: opaqueRef("source", group.path),
+    targetRef: opaqueRef("target", group.path),
     beforeFingerprint: inventoryFingerprint(
       target.filter(
         (entry) => entry.path === group.path || entry.path.startsWith(`${group.path}/`),
@@ -202,11 +226,15 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
   if (transformed.codexConfig || transformed.codexHooks)
     actions.push({
       operation: "transform",
-      disposition: "update",
+      disposition:
+        sameBytes(transformed.codexConfig, captured.codexConfig) &&
+        sameBytes(transformed.codexHooks, captured.codexHooks)
+          ? "unchanged"
+          : "update",
       phase: "materialize",
       scope: "codex",
-      sourceRef: "captured-codex-inputs",
-      targetRef: "staged-codex-inputs",
+      sourceRef: opaqueRef("source", "codex-transform-inputs"),
+      targetRef: opaqueRef("target", "codex-transform-stage"),
       afterFingerprint: inventoryFingerprint(
         stagedIncoming.filter(
           (entry) => entry.path === "codex/config.toml" || entry.path === "codex/hooks.json",
@@ -218,11 +246,15 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
   if (transformed.claudeMcp)
     actions.push({
       operation: "merge-json",
-      disposition: observation.claudeMcp.exists ? "merge" : "create",
-      phase: "materialize",
+      disposition: observation.claudeMcp.exists
+        ? sameBytes(transformed.claudeMcp, observation.claudeMcp.bytes)
+          ? "unchanged"
+          : "merge"
+        : "create",
+      phase: "commit",
       scope: "claude",
-      sourceRef: "captured-claude-mcp",
-      targetRef: "staged-claude-mcp",
+      sourceRef: opaqueRef("source", "claude-mcp-archive-member"),
+      targetRef: opaqueRef("target", "claude-mcp-config"),
       beforeFingerprint: observation.claudeMcp.fingerprint,
       afterFingerprint: fingerprint("restore-claude-mcp-output-v1", {
         sha256: bytesSha256(transformed.claudeMcp),
@@ -231,7 +263,7 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
       reversibility: "reversible",
       policyProvenance: ["strict-json-merge.default"],
     });
-  const materializeIds = actions.map(deriveActionId);
+  const materializeActions = actions.filter((action) => action.phase === "materialize");
   const overlayGroups = groupManagedTopLevelEntries(
     stagedIncoming.filter((entry) => entry.path !== "claude/.mcp-config.json"),
   );
@@ -251,11 +283,17 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
   ) {
     symlinkAction = {
       operation: "symlink",
-      disposition: "update",
+      disposition:
+        inventoryFingerprint(
+          observation.inventory.filter((entry) => entry.path.startsWith("claude/skills/")),
+        ) ===
+        inventoryFingerprint(staged.filter((entry) => entry.path.startsWith("claude/skills/")))
+          ? "unchanged"
+          : "update",
       phase: "post-commit",
       scope: "claude",
-      sourceRef: "shared-skills-view",
-      targetRef: "claude-shared-skills-view",
+      sourceRef: opaqueRef("source", "shared-skills-view"),
+      targetRef: opaqueRef("target", "claude-shared-skills-view"),
       afterFingerprint: inventoryFingerprint(
         staged.filter((entry) => entry.path.startsWith("claude/skills/")),
       ),
@@ -267,8 +305,9 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
   const dependencies: PlanDependency[] = [];
   for (const action of actions) {
     const id = deriveActionId(action);
-    if (action.phase === "commit") {
-      for (const dependency of materializeIds.filter((candidate) => candidate !== id))
+    if (action.operation === "overlay") {
+      for (const materialize of materializeActions.filter((item) => item.scope === action.scope)) {
+        const dependency = deriveActionId(materialize);
         dependencies.push({
           id: `dep-${dependencies.length + 1}`,
           ownerActionId: id,
@@ -278,6 +317,7 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
           status: "satisfied",
           resolution: "resolved",
         });
+      }
     }
   }
   if (symlinkAction) {
@@ -301,7 +341,11 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
     executionModel: "local-staged-overlay",
     sourceEndpointRef: endpoint("restore-source", scan.archive.archiveSha256),
     targetEndpointRef: endpoint("restore-target", observation.targetFingerprint),
-    sourceFingerprint: inventoryFingerprint(incoming),
+    sourceFingerprint: fingerprint("restore-source-v1", {
+      archiveSha256: scan.archive.archiveSha256,
+      providers,
+      inventory: inventoryFingerprint(incoming),
+    }),
     targetFingerprint: observation.targetFingerprint,
     stagedPostFingerprint: inventoryFingerprint(staged),
     preconditions: [
@@ -336,12 +380,53 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
     createdAt: input.createdAt ?? input.context.now().toISOString(),
   });
   const planned = Object.freeze({ plan });
+  const actionBindings = new Map<string, RestoreActionBinding>();
+  for (const action of actions) {
+    const id = deriveActionId(action);
+    if (action.operation === "transform") {
+      actionBindings.set(id, {
+        kind: "transform-stage",
+        config: transformed.codexConfig && Buffer.from(transformed.codexConfig),
+        hooks: transformed.codexHooks && Buffer.from(transformed.codexHooks),
+      });
+    } else if (action.operation === "merge-json") {
+      actionBindings.set(id, {
+        kind: "write-mcp",
+        bytes: Buffer.from(transformed.claudeMcp as Uint8Array),
+      });
+    } else if (action.operation === "overlay") {
+      const group = overlayGroups.find(
+        (item) => opaqueRef("target", item.path) === action.targetRef,
+      );
+      if (!group) throw new Error("Missing restore overlay action binding");
+      actionBindings.set(id, {
+        kind: "overlay-group",
+        logicalGroup: group.path,
+        entries: canonicalInventory(group.entries).map((entry) => Object.freeze({ ...entry })),
+      });
+    } else if (action.operation === "symlink") {
+      actionBindings.set(id, {
+        kind: "symlink-view",
+        entries: canonicalInventory(staged.filter((entry) => entry.type === "symlink")).map(
+          (entry) => Object.freeze({ ...entry }),
+        ),
+      });
+    }
+  }
   resources.set(planned, {
     archivePath: input.archivePath,
     paths: { ...input.paths },
-    captured,
+    transformed: {
+      claudeMcp: transformed.claudeMcp && Buffer.from(transformed.claudeMcp),
+      codexConfig: transformed.codexConfig && Buffer.from(transformed.codexConfig),
+      codexHooks: transformed.codexHooks && Buffer.from(transformed.codexHooks),
+    },
     observation,
-    steps: actions.map((action) => action.targetRef),
+    selectedInventory: canonicalInventory(incoming).map((entry) => Object.freeze({ ...entry })),
+    stagedIncoming: canonicalInventory(stagedIncoming).map((entry) => Object.freeze({ ...entry })),
+    stagedFinal: canonicalInventory(staged).map((entry) => Object.freeze({ ...entry })),
+    archiveSha256: scan.archive.archiveSha256,
+    actionBindings,
   });
   return planned;
 }
