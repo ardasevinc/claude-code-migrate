@@ -2,6 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { readVerifiedArchive } from "../../src/core/archiver.ts";
 import { executePlannedBackup, planBackup } from "../../src/core/plan-backup.ts";
 
 describe("backup migration planning", () => {
@@ -85,7 +86,7 @@ describe("backup migration planning", () => {
     }
   });
 
-  it("does not overwrite a target that changes during staging", async () => {
+  it("unconditionally replaces an in-place target change under force", async () => {
     const root = await mkdtemp(join(tmpdir(), "ccm-plan-backup-target-race-test-"));
     try {
       const sourcePath = join(root, "config.toml");
@@ -102,10 +103,37 @@ describe("backup migration planning", () => {
         },
       });
 
+      await expect(executePlannedBackup(planned)).resolves.toBe(outputPath);
+      await expect(readVerifiedArchive(outputPath)).resolves.toMatchObject({
+        integrity: "verified",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks a target that becomes a directory before force publication", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ccm-plan-backup-kind-race-test-"));
+    try {
+      const sourcePath = join(root, "config.toml");
+      const outputPath = join(root, "backup.tar.gz");
+      await writeFile(sourcePath, "model = 'planned'\n");
+      await writeFile(outputPath, "old archive\n");
+      const planned = await planBackup({
+        files: [{ sourcePath, relativePath: "codex/config.toml", isSymlink: false }],
+        outputPath,
+        providers: ["codex"],
+        force: true,
+        beforePublishTestHook: async () => {
+          await rm(outputPath);
+          await mkdir(outputPath);
+        },
+      });
+
       await expect(executePlannedBackup(planned)).rejects.toThrow(
         "Backup target changed during archive creation",
       );
-      expect(await readFile(outputPath, "utf8")).toBe("concurrent replacement\n");
+      expect((await lstat(outputPath)).isDirectory()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -149,11 +177,18 @@ describe("backup migration planning", () => {
       providers: ["codex" as const],
       force: false,
       outputSource: "default" as const,
+      outputIdentity: "/tmp/default-backup-directory",
     };
     const first = await planBackup({ ...base, outputPath: "/tmp/backup-one.tar.gz" });
     const second = await planBackup({ ...base, outputPath: "/tmp/backup-two.tar.gz" });
+    const otherDirectory = await planBackup({
+      ...base,
+      outputPath: "/var/tmp/backup-one.tar.gz",
+      outputIdentity: "/var/tmp/default-backup-directory",
+    });
     expect(first.plan.id).toBe(second.plan.id);
     expect(first.plan.target.ref).toBe(second.plan.target.ref);
+    expect(first.plan.target.ref).not.toBe(otherDirectory.plan.target.ref);
   });
 
   it("rejects an unsealed lookalike plan", async () => {

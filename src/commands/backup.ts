@@ -45,14 +45,17 @@ export async function backupCommand(
   const defaultFilename = `ccm-backup-${timestamp}.tar.gz`;
 
   let outputPath: string;
+  let outputIdentity: string;
 
   if (outputArg) {
     outputPath = expandPath(outputArg);
+    outputIdentity = outputPath;
     if (!outputPath.endsWith(".tar.gz")) {
       outputPath = join(outputPath, defaultFilename);
     }
   } else {
     const backupDir = expandPath(config.backup.path);
+    outputIdentity = backupDir;
     outputPath = join(backupDir, defaultFilename);
   }
 
@@ -75,7 +78,7 @@ export async function backupCommand(
     force: options.force,
     createdAt: operationDate.toISOString(),
     outputSource: outputArg === undefined ? "default" : "explicit",
-    outputIdentity: outputArg,
+    outputIdentity,
   });
 
   if (options.dryRun) {

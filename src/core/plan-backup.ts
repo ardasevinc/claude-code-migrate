@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { lstat } from "node:fs/promises";
 import type { FileEntry, ProviderName } from "../types/index.ts";
 import { BlockedError } from "../errors.ts";
 import { createArchive } from "./archiver.ts";
@@ -46,16 +47,22 @@ function endpointRef(domain: string, value: string): EndpointRef {
   return `endpoint_${createHash("sha256").update(`ccm:${domain}\0${value}`).digest("hex")}`;
 }
 
-async function targetFingerprint(path: string): Promise<PlanFingerprint> {
+async function fileSha256(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function targetFingerprint(path: string, observeContent: boolean): Promise<PlanFingerprint> {
   const stat = await lstat(path).catch(() => null);
   if (!stat) return fingerprint("backup-target-v1", { exists: false });
   if (!stat.isFile()) return fingerprint("backup-target-v1", { exists: true, type: "other" });
-  const bytes = await readFile(path);
+  if (!observeContent) return fingerprint("backup-target-v1", { exists: true, type: "file" });
   return fingerprint("backup-target-v1", {
     exists: true,
     type: "file",
-    size: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
+    size: stat.size,
+    sha256: await fileSha256(path),
   });
 }
 
@@ -68,12 +75,11 @@ async function targetKind(path: string): Promise<"missing" | "file" | "other"> {
 export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup> {
   const inventory = await inventoryFromFileEntries(input.files);
   const sourceFingerprint = inventoryFingerprint(inventory);
-  const observedTarget = await targetFingerprint(input.outputPath);
+  const observedTarget = await targetFingerprint(input.outputPath, !input.force);
   const missingTarget = fingerprint("backup-target-v1", { exists: false });
   const observedTargetKind = await targetKind(input.outputPath);
   const targetAvailable =
     observedTargetKind === "missing" || (input.force && observedTargetKind === "file");
-  const expectedTarget = input.force ? observedTarget : missingTarget;
   const outputSource = input.outputSource ?? "explicit";
   const plan = createMigrationPlan({
     kind: "backup",
@@ -82,7 +88,7 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
     sourceEndpointRef: endpointRef("backup-source", sourceFingerprint),
     targetEndpointRef:
       outputSource === "default"
-        ? endpointRef("backup-target", "output:default")
+        ? endpointRef("backup-target-default", input.outputIdentity ?? input.outputPath)
         : endpointRef("backup-target", input.outputIdentity ?? input.outputPath),
     sourceFingerprint,
     targetFingerprint: observedTarget,
@@ -92,14 +98,15 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
         id: "target-available",
         required: true,
         status: targetAvailable ? "satisfied" : "failed",
-        reasonCode:
-          observedTargetKind === "other"
+        reasonCode: input.force
+          ? observedTargetKind === "other"
             ? "target-not-file"
-            : targetAvailable
-              ? "target-available"
-              : "target-exists",
-        expectedFingerprint: expectedTarget,
-        observedFingerprint: observedTarget,
+            : "force-unconditional"
+          : targetAvailable
+            ? "target-available"
+            : "target-exists",
+        expectedFingerprint: input.force ? undefined : missingTarget,
+        observedFingerprint: input.force ? undefined : observedTarget,
       },
     ],
     actions: [
@@ -113,7 +120,7 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
         beforeFingerprint: observedTarget,
         afterFingerprint: sourceFingerprint,
         reversibility: "reversible",
-        policyProvenance: [input.force ? "force.cli" : "no-replace.default"],
+        policyProvenance: [input.force ? "force-unconditional.cli" : "no-replace.default"],
       },
     ],
     dependencies: [],
@@ -121,7 +128,7 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
     policies: [
       {
         code: "archive-replacement",
-        valueCode: input.force ? "force" : "no-replace",
+        valueCode: input.force ? "force-unconditional" : "no-replace",
         provenance: input.force ? "cli" : "default",
       },
       {
@@ -166,11 +173,11 @@ export async function executePlannedBackup(planned: PlannedBackup): Promise<stri
   if (sourceFingerprint !== planned.plan.sourceFingerprint) {
     throw new BlockedError("Backup source changed after planning");
   }
-  const observedTarget = await targetFingerprint(sealed.outputPath);
-  const targetPrecondition = planned.plan.preconditions.find(
-    (item) => item.id === "target-available",
-  );
-  if (observedTarget !== targetPrecondition?.expectedFingerprint) {
+  const targetKindBeforeStaging = await targetKind(sealed.outputPath);
+  if (
+    targetKindBeforeStaging === "other" ||
+    (!sealed.force && targetKindBeforeStaging !== "missing")
+  ) {
     throw new BlockedError("Backup target changed after planning");
   }
   await createArchive([...sealed.files], sealed.outputPath, {
@@ -182,8 +189,8 @@ export async function executePlannedBackup(planned: PlannedBackup): Promise<stri
       if (currentSource !== planned.plan.sourceFingerprint) {
         throw new BlockedError("Backup source changed during archive creation");
       }
-      const currentTarget = await targetFingerprint(sealed.outputPath);
-      if (currentTarget !== targetPrecondition?.expectedFingerprint) {
+      const currentTargetKind = await targetKind(sealed.outputPath);
+      if (currentTargetKind === "other" || (!sealed.force && currentTargetKind !== "missing")) {
         throw new BlockedError("Backup target changed during archive creation");
       }
       const stagedFingerprint = inventoryFingerprint(archiveInventory(archive.files));
