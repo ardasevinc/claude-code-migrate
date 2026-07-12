@@ -1,6 +1,3 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { FileEntry } from "../types/index.ts";
 import type { CodexPluginPolicy } from "../types/index.ts";
@@ -24,7 +21,7 @@ import {
   mergeCodexPluginPolicies,
 } from "./codex-plugin-policy.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
-import { validateArchive } from "./archiver.ts";
+import { readVerifiedArchive } from "./archiver.ts";
 import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
@@ -114,12 +111,6 @@ async function backupDirectoryIfExists(
   }
 }
 
-async function sha256File(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest("hex");
-}
-
 export function parseRemoteWorkspace(raw: string): string {
   const workspace = raw.trim();
   if (
@@ -131,6 +122,12 @@ export function parseRemoteWorkspace(raw: string): string {
     throw new Error("Remote did not return a safe temporary workspace");
   }
   return workspace;
+}
+
+export function assertUploadedArchiveDigest(expected: string, actual: string): void {
+  if (actual.trim() !== expected) {
+    throw new Error("Uploaded archive checksum mismatch");
+  }
 }
 
 export function buildRemoteManagedBackupCommand(
@@ -414,7 +411,7 @@ export async function pushArchive(
   let mutationStarted = false;
 
   try {
-    await validateArchive(archivePath);
+    const verifiedArchive = await readVerifiedArchive(archivePath);
     const remoteHome = await getRemoteHome(host);
     const workspaceResult = await runRemote(
       host,
@@ -438,8 +435,7 @@ export async function pushArchive(
     const remoteAgentsDir = join(remoteHome, ".agents");
     const remoteMcpPath = join(remoteHome, ".claude.json");
 
-    const archiveSize = (await stat(archivePath)).size;
-    log.info(`Uploading ${formatBytes(archiveSize)} archive to ${host}...`);
+    log.info(`Uploading ${formatBytes(verifiedArchive.compressedBytes)} archive to ${host}...`);
     const remoteSpec = `${host}:${remoteTempArchive}`;
     const hasLocalRsync = (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
     const hasRemoteRsync =
@@ -452,15 +448,12 @@ export async function pushArchive(
       await runInheritedProcess("scp", buildArchiveUploadArgs(archivePath, remoteSpec, false));
     }
 
-    const localArchiveHash = await sha256File(archivePath);
     const remoteHashResult = await runRemote(
       host,
       `chmod 600 ${shellQuote(remoteTempArchive)} && if command -v sha256sum >/dev/null 2>&1; then sha256sum ${shellQuote(remoteTempArchive)} | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 ${shellQuote(remoteTempArchive)} | awk '{print $1}'; else exit 127; fi`,
       { quiet: true },
     );
-    if (remoteHashResult.stdout.trim() !== localArchiveHash) {
-      throw new Error("Uploaded archive checksum mismatch");
-    }
+    assertUploadedArchiveDigest(verifiedArchive.archiveSha256, remoteHashResult.stdout);
 
     log.info("Extracting on remote...");
     await runRemote(

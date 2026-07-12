@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import type { FileEntry } from "../../src/types/index.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  assertUploadedArchiveDigest,
   buildArchiveUploadArgs,
   buildClaudeSharedSkillSymlinkCommand,
   buildRemoteManagedBackupCommand,
@@ -18,6 +19,15 @@ afterEach(() => {
 });
 
 describe("ssh helpers", () => {
+  it("binds the uploaded archive to the digest produced during verification", () => {
+    const verifiedDigest = "a".repeat(64);
+
+    expect(() => assertUploadedArchiveDigest(verifiedDigest, `${verifiedDigest}\n`)).not.toThrow();
+    expect(() => assertUploadedArchiveDigest(verifiedDigest, "b".repeat(64))).toThrow(
+      "Uploaded archive checksum mismatch",
+    );
+  });
+
   it("uses rsync progress when available and falls back to scp", () => {
     expect(
       buildArchiveUploadArgs("/tmp/archive;touch nope", "host:/tmp/archive.tar.gz", true),

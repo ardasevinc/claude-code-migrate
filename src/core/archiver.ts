@@ -143,9 +143,9 @@ export async function extractArchive(
   }
 }
 
-export async function validateArchive(archivePath: string): Promise<void> {
+export async function readVerifiedArchive(archivePath: string): Promise<VerifiedArchive> {
   try {
-    await verifyArchive(archivePath);
+    return await verifyArchive(archivePath);
   } catch (error) {
     if (error instanceof BlockedError) throw error;
     if (error instanceof Error) {
@@ -153,6 +153,10 @@ export async function validateArchive(archivePath: string): Promise<void> {
     }
     throw new BlockedError("Archive is invalid or unreadable", { cause: error });
   }
+}
+
+export async function validateArchive(archivePath: string): Promise<void> {
+  await readVerifiedArchive(archivePath);
 }
 
 export function validateArchiveEntryPaths(entries: string[]): void {
