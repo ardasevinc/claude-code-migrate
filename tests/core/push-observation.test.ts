@@ -105,6 +105,21 @@ describe("remote push observation", () => {
     expect(observed.inventory[0]?.size).toBe(5 * 1024 * 1024);
   });
 
+  it("skips provider never-migrate subtrees", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-never-"));
+    const root = join(home, ".codex", "skills");
+    await mkdir(join(root, ".system"), { recursive: true });
+    await writeFile(join(root, ".system", "private"), "ignored");
+    await writeFile(join(root, "kept"), "yes");
+    const wanted = incoming("codex/skills/new");
+    const result = await runProcess("sh", ["-c", buildRemotePushObservationProbe([wanted])], {
+      env: { ...process.env, HOME: home },
+    });
+    expect(
+      parseRemotePushObservation(result.stdout, [wanted]).inventory.map((entry) => entry.path),
+    ).toEqual(["codex/skills/kept"]);
+  });
+
   it("uses a dash sentinel for missing commands and binds paths and HOME into state", () => {
     const query = { commandNames: ["missing"] };
     const missing = `CMD\t${e("missing")}\t-`;
