@@ -69,6 +69,27 @@ export interface ArchiveManifestV2 {
 export type ArchiveManifest = LegacyArchiveManifest | ArchiveManifestV2;
 export type Manifest = LegacyArchiveManifest;
 
+export interface VerifiedArchiveFile {
+  path: string;
+  size: number;
+  mode: number;
+  sha256?: string;
+}
+
+export interface VerifiedArchive {
+  format: "v1" | "v2";
+  integrity: "verified" | "unavailable";
+  providers: ProviderName[];
+  producerVersion: string;
+  createdAt: string;
+  archiveSha256: string;
+  compressedBytes: number;
+  expandedBytes: number;
+  payloadBytes: number;
+  entryCount: number;
+  files: VerifiedArchiveFile[];
+}
+
 export interface CollectionPaths {
   claudeDir: string;
   codexDir: string;
