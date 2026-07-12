@@ -13,6 +13,7 @@ import type {
   PrivateRestoreTargetFacts,
   RestoreObservationQueries,
 } from "./restore-observation.ts";
+import { parseJsonWithoutDuplicateKeys } from "./strict-json.ts";
 
 interface ConfigPaths {
   notify?: string[];
@@ -57,7 +58,7 @@ function text(bytes: Uint8Array): string {
 }
 
 function strictRecord(raw: string, label: string): Record<string, unknown> {
-  const parsed = JSON.parse(raw) as unknown;
+  const parsed = parseJsonWithoutDuplicateKeys(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`${label} must be a JSON object`);
   }
@@ -153,6 +154,9 @@ export async function transformRestoreInputs(
   facts: PrivateRestoreTargetFacts,
   paths: CollectionPaths,
 ): Promise<RestoreTransformResult> {
+  const claudeMcp = inputs.claudeMcp
+    ? mergeClaudeMcpStrict(inputs.claudeMcp, targetMcp)
+    : undefined;
   let codexConfig = inputs.codexConfig ? text(inputs.codexConfig) : undefined;
   let codexHooks = inputs.codexHooks ? text(inputs.codexHooks) : undefined;
   const warnings: string[] = [];
@@ -189,7 +193,7 @@ export async function transformRestoreInputs(
     warnings.push(...host.warnings);
   }
   return {
-    claudeMcp: inputs.claudeMcp ? mergeClaudeMcpStrict(inputs.claudeMcp, targetMcp) : undefined,
+    claudeMcp,
     codexConfig: codexConfig === undefined ? undefined : Buffer.from(codexConfig),
     codexHooks: codexHooks === undefined ? undefined : Buffer.from(codexHooks),
     warnings,

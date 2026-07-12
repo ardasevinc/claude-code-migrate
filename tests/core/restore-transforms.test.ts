@@ -48,6 +48,26 @@ trusted_hash = "keep"
     );
   });
 
+  it.each([
+    ['{"mcpServers":{},"mcpServers":{}}', undefined],
+    ['{"mcpServers":{"demo":{"command":"one","command":"two"}}}', undefined],
+    ['{"mcpServers":{}}', '{"theme":"one","theme":"two","mcpServers":{}}'],
+    ['{"mcpServers":{}}', '{"mcpServers":{"demo":{"command":"one","command":"two"}}}'],
+  ])("rejects duplicate keys in incoming and target MCP JSON", (incoming, target) => {
+    expect(() =>
+      mergeClaudeMcpStrict(
+        Buffer.from(incoming),
+        target === undefined
+          ? missingMcp
+          : {
+              exists: true,
+              bytes: Buffer.from(target),
+              fingerprint: fingerprint("test", { target }),
+            },
+      ),
+    ).toThrow("Duplicate JSON object key");
+  });
+
   it("derives all host queries before applying transforms", () => {
     const queries = deriveRestoreObservationQueries({
       codexConfig: Buffer.from(`notify = ["/Users/source/bin/notify"]
