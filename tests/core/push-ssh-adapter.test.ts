@@ -45,7 +45,11 @@ async function fixture() {
     run: async (_host, command, options = {}) => {
       commands.push(command);
       return runProcess("sh", ["-c", command], {
-        env: { ...process.env, HOME: home },
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        },
         nothrow: options.nothrow,
         maxBuffer: options.maxBuffer,
         timeoutMs: options.timeout,
@@ -215,6 +219,30 @@ describe("SSH remote push helper adapter", () => {
     await session.cleanup();
   });
 
+  it("rejects a missing sealed command path as BlockedError, not a runtime TypeError", async () => {
+    const f = await fixture();
+    await expect(
+      f.adapter.prepare({
+        archivePath: f.archive,
+        archiveSha256: f.sha,
+        archiveSize: f.archiveSize,
+        stagedInventory: f.stagedInventory,
+        observationRequest: f.request,
+        observation: f.observation,
+        actions: [
+          {
+            action: { id: "effect" } as never,
+            binding: {
+              kind: "plugin-add",
+              pluginId: "demo@test",
+              codexCommand: undefined as unknown as string,
+            },
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BlockedError);
+  });
+
   it("interrupt cleanup cancels, aborts, and cleans only after terminal rollback", async () => {
     const f = await fixture();
     const session = await f.adapter.prepare({
@@ -353,7 +381,8 @@ describe("SSH remote push helper adapter", () => {
 
   it("reconciles double-lost inflight effect responses through final status", async () => {
     const f = await fixture();
-    const codex = join(f.home, "codex");
+    const codex = join(f.home, "bin", "codex");
+    await mkdir(join(f.home, "bin"), { recursive: true });
     await writeFile(codex, "#!/bin/sh\nexit 0\n");
     await chmod(codex, 0o755);
     const base = {
@@ -363,6 +392,8 @@ describe("SSH remote push helper adapter", () => {
     };
     const request = { ...base, requestIdentity: pushObservationRequestIdentity(base) };
     const observation = await f.adapter.observe(request);
+    const codexCommand = observation.facts.commandPaths.get("codex");
+    expect(codexCommand).toBe(await realpath(codex));
     let effectLosses = 0;
     let statusReads = 0;
     const transport: PushSshTransport = {
@@ -412,7 +443,7 @@ describe("SSH remote push helper adapter", () => {
     const binding = {
       kind: "plugin-add" as const,
       pluginId: "demo@test",
-      codexCommand: observation.facts.commandPaths.get("codex") as string,
+      codexCommand: codexCommand as string,
     };
     const session = await createSshPushExecutionAdapter({ transport }).prepare({
       archivePath: f.archive,
@@ -432,7 +463,8 @@ describe("SSH remote push helper adapter", () => {
 
   it("does not advance the local effect cursor for a semantic-invalid response", async () => {
     const f = await fixture();
-    const codex = join(f.home, "codex");
+    const codex = join(f.home, "bin", "codex");
+    await mkdir(join(f.home, "bin"), { recursive: true });
     await writeFile(codex, "#!/bin/sh\nexit 0\n");
     await chmod(codex, 0o755);
     const base = {
@@ -442,6 +474,8 @@ describe("SSH remote push helper adapter", () => {
     };
     const request = { ...base, requestIdentity: pushObservationRequestIdentity(base) };
     const observation = await f.adapter.observe(request);
+    const codexCommand = observation.facts.commandPaths.get("codex");
+    expect(codexCommand).toBe(await realpath(codex));
     const transport: PushSshTransport = {
       ...f.transport,
       run: async (host, command, options) => {
@@ -487,7 +521,7 @@ describe("SSH remote push helper adapter", () => {
     const binding = {
       kind: "plugin-add" as const,
       pluginId: "demo@test",
-      codexCommand: observation.facts.commandPaths.get("codex") as string,
+      codexCommand: codexCommand as string,
     };
     const session = await createSshPushExecutionAdapter({ transport }).prepare({
       archivePath: f.archive,

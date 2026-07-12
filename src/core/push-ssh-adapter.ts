@@ -89,7 +89,8 @@ function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function safeAbsolute(path: string, label: string): string {
+function safeAbsolute(path: unknown, label: string): string {
+  if (typeof path !== "string") throw new BlockedError(`Invalid ${label}`);
   const hasControl = [...path].some((character) => {
     const code = character.charCodeAt(0);
     return code < 0x20 || code === 0x7f;
@@ -108,7 +109,8 @@ function safeAbsolute(path: string, label: string): string {
   return path;
 }
 
-function safeLogical(path: string): string {
+function safeLogical(path: unknown): string {
+  if (typeof path !== "string") throw new BlockedError("Invalid sealed logical group");
   if (
     !/^(?:claude|codex|shared\/agents)\/[A-Za-z0-9._+@/-]+$/.test(path) ||
     path.split("/").some((part) => part === "." || part === "..")
