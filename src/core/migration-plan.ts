@@ -9,10 +9,11 @@ export type JsonValue =
 export type PlanFingerprint = `fp_${string}`;
 export type PlanId = `plan_${string}`;
 export type ActionId = `action_${string}`;
+export type EndpointRef = `endpoint_${string}`;
 
 export interface RedactedEndpoint {
   readonly kind: "source" | "target";
-  readonly fingerprint: PlanFingerprint;
+  readonly ref: EndpointRef;
 }
 export type MigrationKind = "backup" | "push" | "restore";
 export type LogicalRef = string;
@@ -43,7 +44,7 @@ export interface PlanDependency {
 
 export interface PlanPolicy {
   readonly code: SymbolicCode;
-  readonly value: JsonValue;
+  readonly valueCode: SymbolicCode;
   readonly provenance: "default" | "profile" | "cli" | "runtime";
 }
 
@@ -71,7 +72,7 @@ export interface MigrationAction {
 
 export type MigrationPlanStatus = "ready" | "blocked" | "noop";
 export interface MigrationPlan {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 1;
   readonly id: PlanId;
   readonly kind: MigrationKind;
   readonly providers: readonly ProviderName[];
@@ -97,8 +98,8 @@ export interface MigrationPlanInput
     MigrationPlan,
     "schemaVersion" | "id" | "status" | "source" | "target" | "actions" | "createdAt"
   > {
-  readonly sourceEndpoint: string;
-  readonly targetEndpoint: string;
+  readonly sourceEndpointRef: EndpointRef;
+  readonly targetEndpointRef: EndpointRef;
   readonly actions: readonly MigrationActionInput[];
   readonly createdAt?: string;
 }
@@ -136,17 +137,28 @@ const SAFE_REF = /^[a-z][a-z0-9]*(?:[/:._-][a-z0-9]+)*$/;
 function assertSafe(value: string, kind: string, pattern = SAFE_CODE): void {
   if (!pattern.test(value)) throw new Error(`${kind} must be a safe symbolic value: ${value}`);
 }
-function endpoint(kind: RedactedEndpoint["kind"], raw: string): RedactedEndpoint {
-  if (!raw) throw new Error(`${kind} endpoint must not be empty`);
-  return { kind, fingerprint: fingerprint(`endpoint:${kind}`, raw) };
+function endpoint(kind: RedactedEndpoint["kind"], ref: EndpointRef): RedactedEndpoint {
+  if (!/^endpoint_[a-f0-9]{32,64}$/.test(ref))
+    throw new Error(`${kind} endpoint ref must be an opaque endpoint token`);
+  return { kind, ref };
+}
+export function deriveActionId(
+  input: Pick<MigrationActionInput, "operation" | "scope" | "targetRef">,
+): ActionId {
+  return `action_${digest("ccm:action-id", {
+    operation: input.operation,
+    scope: input.scope,
+    targetRef: input.targetRef,
+  })}`;
 }
 function buildAction(input: MigrationActionInput): MigrationAction {
   assertSafe(input.targetRef, "targetRef", SAFE_REF);
   if (input.sourceRef) assertSafe(input.sourceRef, "sourceRef", SAFE_REF);
   for (const code of input.policyProvenance) assertSafe(code, "policy provenance");
   return {
-    id: `action_${digest("ccm:action-id", { operation: input.operation, scope: input.scope, targetRef: input.targetRef })}`,
+    id: deriveActionId(input),
     ...input,
+    policyProvenance: [...input.policyProvenance].sort(),
   };
 }
 
@@ -223,30 +235,46 @@ export function createMigrationPlan(input: MigrationPlanInput): MigrationPlan {
     assertSafe(item.reasonCode, "precondition reason code");
   });
   for (const item of input.warnings) assertSafe(item.code, "warning code");
-  for (const item of input.policies) assertSafe(item.code, "policy code");
+  for (const item of input.policies) {
+    assertSafe(item.code, "policy code");
+    assertSafe(item.valueCode, "policy value code");
+  }
   validateUnique(
     input.preconditions.map((item) => item.id),
     "precondition",
   );
+  validateUnique(
+    input.warnings.map((item) => item.code),
+    "warning",
+  );
+  validateUnique(
+    input.policies.map((item) => item.code),
+    "policy",
+  );
+  const providers = [...input.providers].sort();
+  const preconditions = [...input.preconditions].sort((a, b) => a.id.localeCompare(b.id));
+  const dependencies = [...input.dependencies].sort((a, b) => a.id.localeCompare(b.id));
+  const warnings = [...input.warnings].sort((a, b) => a.code.localeCompare(b.code));
+  const policies = [...input.policies].sort((a, b) => a.code.localeCompare(b.code));
   const actions = input.actions.map(buildAction);
-  validateGraph(actions, input.dependencies);
+  validateGraph(actions, dependencies);
   const semantic = {
-    schemaVersion: 2 as const,
+    schemaVersion: 1 as const,
     kind: input.kind,
-    providers: input.providers,
+    providers,
     profile: input.profile,
     executionModel: input.executionModel,
-    source: endpoint("source", input.sourceEndpoint),
-    target: endpoint("target", input.targetEndpoint),
+    source: endpoint("source", input.sourceEndpointRef),
+    target: endpoint("target", input.targetEndpointRef),
     sourceFingerprint: input.sourceFingerprint,
     targetFingerprint: input.targetFingerprint,
     stagedPostFingerprint: input.stagedPostFingerprint,
-    preconditions: input.preconditions,
+    preconditions,
     actions,
-    dependencies: input.dependencies,
-    warnings: input.warnings,
-    policies: input.policies,
-    status: derivePlanStatus(actions, input.preconditions, input.dependencies),
+    dependencies,
+    warnings,
+    policies,
+    status: derivePlanStatus(actions, preconditions, dependencies),
   };
   return deepFreeze({ ...semantic, id: `plan_${digest("ccm:plan-id", semantic)}`, createdAt });
 }

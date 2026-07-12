@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalJson,
   createMigrationPlan,
+  deriveActionId,
   diffMigrationPlans,
   fingerprint,
   type MigrationPlanInput,
@@ -25,8 +26,8 @@ const base = (overrides: Partial<MigrationPlanInput> = {}): MigrationPlanInput =
   providers: ["claude", "codex"],
   profile: "portable",
   executionModel: "staged-v1",
-  sourceEndpoint: "secret-source",
-  targetEndpoint: "secret-target",
+  sourceEndpointRef: "endpoint_0123456789abcdef0123456789abcdef",
+  targetEndpointRef: "endpoint_fedcba9876543210fedcba9876543210",
   sourceFingerprint: fp("source"),
   targetFingerprint: fp("target"),
   stagedPostFingerprint: fp("post"),
@@ -36,7 +37,7 @@ const base = (overrides: Partial<MigrationPlanInput> = {}): MigrationPlanInput =
   actions: [action],
   dependencies: [],
   warnings: [{ code: "content.changed" }],
-  policies: [{ code: "conflict", value: "merge", provenance: "cli" }],
+  policies: [{ code: "conflict", valueCode: "merge", provenance: "cli" }],
   createdAt: "2026-07-12T12:00:00Z",
   ...overrides,
 });
@@ -45,9 +46,9 @@ describe("migration plan contract", () => {
   it("canonicalizes, redacts and freezes", () => {
     expect(canonicalJson({ z: 1, a: 2 })).toBe('{"a":2,"z":1}');
     const plan = createMigrationPlan(base());
-    expect(JSON.stringify(plan)).not.toContain("secret-source");
+    expect(JSON.stringify(plan)).not.toContain("example.com");
     expect(Object.isFrozen(plan.actions)).toBe(true);
-    expect(plan.schemaVersion).toBe(2);
+    expect(plan.schemaVersion).toBe(1);
   });
 
   it("keeps ids deterministic with action identity independent of mutable planning results", () => {
@@ -67,6 +68,71 @@ describe("migration plan contract", () => {
       removed: [],
       changedActions: [first.actions[0]?.id],
     });
+    expect(deriveActionId(action)).toBe(first.actions[0]?.id);
+  });
+
+  it("canonicalizes unordered plan collections without changing authoritative action order", () => {
+    const secondAction = { ...action, targetRef: "codex/second" } as const;
+    const thirdAction = { ...action, targetRef: "codex/third" } as const;
+    const firstId = deriveActionId(action);
+    const unordered = base({
+      providers: ["codex", "claude"],
+      preconditions: [
+        { id: "z-ready", required: false, status: "unknown", reasonCode: "state.unknown" },
+        { id: "a-ready", required: true, status: "satisfied", reasonCode: "state.ready" },
+      ],
+      warnings: [{ code: "z.warning" }, { code: "a.warning" }],
+      policies: [
+        { code: "z-policy", valueCode: "preserve", provenance: "default" },
+        { code: "a-policy", valueCode: "merge", provenance: "cli" },
+      ],
+      actions: [action, secondAction, thirdAction],
+      dependencies: [
+        {
+          id: "z-dependency",
+          ownerActionId: deriveActionId(thirdAction),
+          dependsOnActionId: firstId,
+          type: "ordering",
+          required: true,
+          status: "satisfied",
+          resolution: "resolved",
+        },
+        {
+          id: "a-dependency",
+          ownerActionId: deriveActionId(secondAction),
+          dependsOnActionId: firstId,
+          type: "data",
+          required: true,
+          status: "satisfied",
+          resolution: "resolved",
+        },
+      ],
+    });
+    const reordered = base({
+      ...unordered,
+      providers: [...unordered.providers].reverse(),
+      preconditions: [...unordered.preconditions].reverse(),
+      warnings: [...unordered.warnings].reverse(),
+      policies: [...unordered.policies].reverse(),
+      dependencies: [...unordered.dependencies].reverse(),
+    });
+    expect(createMigrationPlan(unordered).id).toBe(createMigrationPlan(reordered).id);
+  });
+
+  it("rejects raw or guessable endpoint identities and arbitrary policy payloads", () => {
+    expect(() =>
+      createMigrationPlan(base({ sourceEndpointRef: "endpoint_source-host-canary.example.com" })),
+    ).toThrow("source endpoint ref");
+    expect(() =>
+      createMigrationPlan(base({ targetEndpointRef: "endpoint_ssh://user:secret@host" })),
+    ).toThrow("target endpoint ref");
+    expect(() =>
+      createMigrationPlan(
+        base({
+          policies: [{ code: "conflict", valueCode: "raw secret value!", provenance: "cli" }],
+        }),
+      ),
+    ).toThrow("policy value code");
   });
 
   it("derives blocked and noop only from binding readiness rules", () => {
