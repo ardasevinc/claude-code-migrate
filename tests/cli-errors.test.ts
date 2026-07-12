@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -114,5 +114,40 @@ describe("CLI errors", () => {
 
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("missing required argument");
+  });
+
+  it("rejects forbidden archive payloads before mutating auth", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-cli-"));
+    const codexDir = join(home, ".codex");
+    const sourceDir = join(home, "archive-source");
+    const archive = join(home, "forbidden.tar.gz");
+    await mkdir(codexDir, { recursive: true });
+    await mkdir(join(sourceDir, "codex"), { recursive: true });
+    await writeFile(join(codexDir, "auth.json"), "original-auth", "utf8");
+    await writeFile(join(sourceDir, "codex", "auth.json"), "incoming-auth", "utf8");
+    await writeFile(
+      join(sourceDir, ".ccm-manifest.json"),
+      JSON.stringify({
+        version: "1.8.2",
+        timestamp: new Date().toISOString(),
+        sourceHost: "fixture",
+        claudeVersion: null,
+        providers: ["codex"],
+        files: [
+          {
+            sourcePath: "/source/auth.json",
+            relativePath: "codex/auth.json",
+            isSymlink: false,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    await execFileAsync("tar", ["-czf", archive, "-C", sourceDir, "."]);
+
+    const result = await runCli(["restore", archive], home);
+
+    expect(result.exitCode).toBe(3);
+    expect(await readFile(join(codexDir, "auth.json"), "utf8")).toBe("original-auth");
   });
 });

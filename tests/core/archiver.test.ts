@@ -113,7 +113,7 @@ describe("archiver", () => {
       await mkdir(sourceDir);
       await expect(
         createArchive(
-          [{ sourcePath: sourceDir, relativePath: "codex/not-a-file", isSymlink: false }],
+          [{ sourcePath: sourceDir, relativePath: "codex/config.toml", isSymlink: false }],
           join(rootDir, "backup.tar.gz"),
         ),
       ).rejects.toThrow("Archive source is not a regular file");
@@ -182,6 +182,72 @@ describe("archiver", () => {
 
       await expect(extractArchive(archivePath, join(rootDir, "extract"))).rejects.toThrow(
         "Archive manifest is invalid",
+      );
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects forbidden and undeclared archive members before extraction", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-policy-test-"));
+    try {
+      const sourceDir = join(rootDir, "source");
+      const archivePath = join(rootDir, "forbidden.tar.gz");
+      await mkdir(join(sourceDir, "codex"), { recursive: true });
+      await writeFile(join(sourceDir, "codex", "auth.json"), '{"token":"secret"}', "utf8");
+      await writeFile(
+        join(sourceDir, ".ccm-manifest.json"),
+        JSON.stringify({
+          version: "1.8.2",
+          timestamp: new Date().toISOString(),
+          sourceHost: "fixture",
+          claudeVersion: null,
+          providers: ["codex"],
+          files: [
+            {
+              sourcePath: "/source/auth.json",
+              relativePath: "codex/auth.json",
+              isSymlink: false,
+            },
+          ],
+        }),
+        "utf8",
+      );
+      await runCommand(`tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`, {
+        quiet: true,
+      });
+
+      await expect(validateArchive(archivePath)).rejects.toThrow("not managed by ccm");
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects allowed payload files omitted from the manifest", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-membership-test-"));
+    try {
+      const sourceDir = join(rootDir, "source");
+      const archivePath = join(rootDir, "undeclared.tar.gz");
+      await mkdir(join(sourceDir, "codex"), { recursive: true });
+      await writeFile(join(sourceDir, "codex", "config.toml"), 'model = "test"', "utf8");
+      await writeFile(
+        join(sourceDir, ".ccm-manifest.json"),
+        JSON.stringify({
+          version: "1.8.2",
+          timestamp: new Date().toISOString(),
+          sourceHost: "fixture",
+          claudeVersion: null,
+          providers: ["codex"],
+          files: [],
+        }),
+        "utf8",
+      );
+      await runCommand(`tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`, {
+        quiet: true,
+      });
+
+      await expect(validateArchive(archivePath)).rejects.toThrow(
+        "Archive members do not match the manifest",
       );
     } finally {
       await rm(rootDir, { recursive: true, force: true });

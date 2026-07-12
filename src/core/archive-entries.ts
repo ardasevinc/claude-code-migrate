@@ -1,4 +1,5 @@
 import { isAbsolute, posix, win32 } from "node:path";
+import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
 import type { FileEntry } from "../types/index.ts";
 
 const RESERVED_ARCHIVE_PATHS = new Set([".ccm-manifest.json"]);
@@ -29,6 +30,97 @@ export function validateArchiveFileEntries(files: FileEntry[]): void {
     if (destinations.has(path)) {
       throw new Error(`Duplicate archive destination: ${path}`);
     }
+    if (!isAllowedManagedPath(path, false)) {
+      throw new Error(`Archive destination is not managed by ccm: ${path}`);
+    }
     destinations.add(path);
   }
+}
+
+export function validateArchiveMemberPaths(paths: string[]): string[] {
+  const normalizedPaths: string[] = [];
+
+  for (const rawPath of paths) {
+    const directory = rawPath.endsWith("/");
+    const path = rawPath.replace(/^\.\//, "").replace(/\/$/, "");
+    if (!path) continue;
+    if (path === ".ccm-manifest.json") {
+      if (directory) throw new Error("Archive manifest must be a regular file");
+      normalizedPaths.push(path);
+      continue;
+    }
+    if (!isAllowedManagedPath(path, directory)) {
+      throw new Error(`Archive member is not managed by ccm: ${path}`);
+    }
+    normalizedPaths.push(path);
+  }
+
+  return normalizedPaths;
+}
+
+function isAllowedManagedPath(path: string, directory: boolean): boolean {
+  const [root, ...rest] = path.split("/");
+  if ((root === "claude" || root === "codex") && rest.length === 0) return directory;
+
+  if (root === "claude") {
+    return matchesManagedEntry(
+      rest.join("/"),
+      [
+        ...PROVIDERS.claude.alwaysInclude,
+        ...PROVIDERS.claude.includeIfExists,
+        "settings.local.json",
+        ".mcp-config.json",
+      ],
+      new Set(["agents", "skills", "hooks"]),
+      directory,
+    );
+  }
+
+  if (root === "codex") {
+    const relativePath = rest.join("/");
+    if (
+      (PROVIDERS.codex.neverMigratePaths ?? []).some(
+        (excluded) => relativePath === excluded || relativePath.startsWith(`${excluded}/`),
+      )
+    ) {
+      return false;
+    }
+    return matchesManagedEntry(
+      relativePath,
+      [
+        ...PROVIDERS.codex.alwaysInclude,
+        ...PROVIDERS.codex.includeIfExists,
+        ".ccm",
+        ".tmp/plugins",
+        ".tmp/plugins.sha",
+      ],
+      new Set(["agents", "rules", "skills", ".ccm", ".tmp/plugins"]),
+      directory,
+    );
+  }
+
+  if (root !== "shared") return false;
+  if (rest.length === 0) return directory;
+  if (rest[0] !== "agents") return false;
+  if (rest.length === 1) return directory;
+  return matchesManagedEntry(
+    rest.slice(1).join("/"),
+    SHARED_MANAGED_ENTRIES,
+    new Set(["skills", "lazy-skills"]),
+    directory,
+  );
+}
+
+function matchesManagedEntry(
+  path: string,
+  entries: string[],
+  directoryEntries: Set<string>,
+  directory: boolean,
+): boolean {
+  return entries.some(
+    (entry) =>
+      (path === entry && (!directory || directoryEntries.has(entry))) ||
+      (directoryEntries.has(entry) && path.startsWith(`${entry}/`)) ||
+      (directory && entry.startsWith(`${path}/`)),
+  );
 }

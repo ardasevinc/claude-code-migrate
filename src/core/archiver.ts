@@ -19,8 +19,8 @@ import { BlockedError } from "../errors.ts";
 import type { FileEntry, Manifest, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
-import { runProcess } from "../utils/process.ts";
-import { validateArchiveFileEntries } from "./archive-entries.ts";
+import { ProcessError, runProcess } from "../utils/process.ts";
+import { validateArchiveFileEntries, validateArchiveMemberPaths } from "./archive-entries.ts";
 import { getClaudeVersion } from "./version-checker.ts";
 
 const MANIFEST_FILENAME = ".ccm-manifest.json";
@@ -127,14 +127,7 @@ export async function extractArchive(archivePath: string, destDir: string): Prom
   const manifestPath = join(destDir, MANIFEST_FILENAME);
 
   if (await exists(manifestPath)) {
-    try {
-      const raw = await readFile(manifestPath, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      assertLegacyManifest(parsed);
-      return parsed;
-    } catch (error) {
-      throw new BlockedError("Archive manifest is invalid", { cause: error });
-    }
+    return parseLegacyManifest(await readFile(manifestPath, "utf8"));
   }
 
   throw new BlockedError("Archive manifest is missing");
@@ -192,9 +185,46 @@ export async function validateArchive(archivePath: string): Promise<void> {
         throw new BlockedError(`Unsafe archive entry type: ${type ?? "unknown"}`);
       }
     }
+    validateArchiveMemberPaths(entries);
+
+    const manifest = await readLegacyManifestFromArchive(archivePath);
+    const archiveFiles = entries
+      .filter((entry) => !entry.endsWith("/"))
+      .map((entry) => entry.replace(/^\.\//, ""))
+      .filter((entry) => entry !== MANIFEST_FILENAME)
+      .sort();
+    const declaredFiles = manifest.files.map((file) => file.relativePath).sort();
+    if (
+      archiveFiles.length !== declaredFiles.length ||
+      archiveFiles.some((path, index) => path !== declaredFiles[index])
+    ) {
+      throw new BlockedError("Archive members do not match the manifest");
+    }
   } catch (error) {
     if (error instanceof BlockedError) throw error;
+    if (error instanceof Error && !(error instanceof ProcessError)) {
+      throw new BlockedError(error.message, { cause: error });
+    }
     throw new BlockedError("Archive is invalid or unreadable", { cause: error });
+  }
+}
+
+async function readLegacyManifestFromArchive(archivePath: string): Promise<Manifest> {
+  for (const path of [`./${MANIFEST_FILENAME}`, MANIFEST_FILENAME]) {
+    const result = await runProcess("tar", ["-xOzf", archivePath, path], { nothrow: true });
+    if (result.exitCode === 0 && result.stdout.trim()) return parseLegacyManifest(result.stdout);
+  }
+  throw new BlockedError("Archive manifest is missing");
+}
+
+function parseLegacyManifest(raw: string): Manifest {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    assertLegacyManifest(parsed);
+    return parsed;
+  } catch (error) {
+    if (error instanceof BlockedError) throw error;
+    throw new BlockedError("Archive manifest is invalid", { cause: error });
   }
 }
 
