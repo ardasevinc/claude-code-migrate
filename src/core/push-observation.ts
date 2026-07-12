@@ -67,6 +67,51 @@ export interface PushTargetObservation {
   readonly inventory: readonly InventoryEntry[];
   readonly facts: PrivatePushTargetFacts;
   readonly pushStateFingerprint: PlanFingerprint;
+  readonly requestIdentity?: PlanFingerprint;
+}
+
+export type PushState = Omit<PushTargetObservation, "pushStateFingerprint">;
+
+/** Canonical fingerprint for both observed and projected push state. */
+export function pushStateFingerprint(state: PushState): PlanFingerprint {
+  const factsDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        home: createHash("sha256").update("ccm:push:home\0").update(state.facts.home).digest("hex"),
+        commands: [...state.facts.commandPaths.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, path]) => [
+            name,
+            path === null
+              ? null
+              : createHash("sha256").update("ccm:push:command\0").update(path).digest("hex"),
+          ]),
+        captures: [...state.facts.captures.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, value]) => [
+            name,
+            value && createHash("sha256").update(value).digest("hex"),
+          ]),
+        existence: [...state.facts.pathExistence.entries()].sort(([a], [b]) => a.localeCompare(b)),
+        markets: [...state.facts.marketplacePayloads.entries()].sort(([a], [b]) =>
+          a.localeCompare(b),
+        ),
+        skills: [...state.facts.sharedSkillNames].sort(),
+        codexPluginList: {
+          ...state.facts.codexPluginList,
+          installed: [...state.facts.codexPluginList.installed].sort(),
+          available: [...state.facts.codexPluginList.available].sort(),
+        },
+      }),
+    )
+    .digest("hex");
+  return fingerprint("push-state-v1", {
+    inventory: inventoryFingerprint(state.inventory),
+    os: state.capabilities.os,
+    arch: state.capabilities.arch,
+    gui: state.capabilities.gui,
+    factsDigest,
+  });
 }
 
 const defaultTransport: PushObservationTransport = {
@@ -126,8 +171,14 @@ function validateExistencePath(path: string): void {
 export function buildRemotePushObservationProbe(
   incoming: readonly InventoryEntry[],
   queries: PushObservationQueries = {},
+  inventoryRoots?: readonly string[],
 ): string {
-  const roots = groupManagedTopLevelEntries(incoming).map((group) => group.path);
+  const roots = (
+    inventoryRoots ?? groupManagedTopLevelEntries(incoming).map((group) => group.path)
+  ).filter((path) => path !== "claude/.mcp-config.json");
+  const commandNames = [
+    ...new Set([...(queries.commandNames ?? []), ...(queries.codexPluginList ? ["codex"] : [])]),
+  ].sort();
   const encoded = (values: readonly string[]) => values.map((v) => q(b64(v))).join(" ");
   return `set -eu
 emit(){ printf '%s' "$1"; shift; for field do printf '\\t%s' "$field"; done; printf '\\n'; }
@@ -140,7 +191,7 @@ home=\${HOME-}; case "$home" in /*) ;; *) exit 41;; esac; case "$home" in *'/../
 printf 'CCM_PUSH_OBSERVATION\\t1\\n'; emit HOME "$(printf '%s' "$home"|enc)"
 os=$(uname -s); arch=$(uname -m); emit OS "$(printf '%s' "$os"|enc)"; emit ARCH "$(printf '%s' "$arch"|enc)"
 gui=false; [ "$(uname -s)" = Darwin ] && [ -n "\${DISPLAY-}\${WAYLAND_DISPLAY-}\${TERM_PROGRAM-}" ] && gui=true; emit GUI "$gui"
-for x in ${encoded([...new Set(queries.commandNames ?? [])].sort())}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); case "$p" in /*) ;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$n" "$home/.local/bin/$n" "$home/bin/$n" "/usr/local/bin/$n" "/usr/bin/$n"; do if [ -x "$c" ]; then p=$c; break; fi; done; fi; if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
+codex_path=; for x in ${encoded(commandNames)}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); case "$p" in /*) ;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$n" "$home/.local/bin/$n" "$home/bin/$n" "/usr/local/bin/$n" "/usr/bin/$n"; do if [ -x "$c" ]; then p=$c; break; fi; done; fi; [ "$n" = codex ] && codex_path=$p; if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
 for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); case "$p" in '~/'*) live="$home/\${p#??}";; *) live=$p;; esac; v=false; [ -e "$live" ] || [ -L "$live" ] && v=true; emit EXISTS "$x" "$v"; done
 for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
 for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "$x"); case "$i" in claude-mcp) p="$home/.claude.json";; codex-config) p="$home/.codex/config.toml";; *) exit 44;; esac; if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
@@ -148,7 +199,7 @@ walk(){ ( logical=$1; live=$2; [ -e "$live" ] || [ -L "$live" ] || return 0; n=\
 for x in ${encoded(roots)}; do l=$(dec "$x"); case "$l" in claude/*) p="$home/.claude/\${l#claude/}";; codex/*) p="$home/.codex/\${l#codex/}";; shared/agents/*) p="$home/.agents/\${l#shared/agents/}";; *) exit 44;; esac; walk "$l" "$p"; done
 for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
 ${queries.sharedSkillNames ? `if [ -d "$home/.agents/skills" ] && [ ! -L "$home/.agents/skills" ]; then for p in "$home/.agents/skills"/*; do [ -d "$p" ] && [ ! -L "$p" ] || continue; emit SKILL "$(printf '%s' "\${p##*/}"|enc)"; done; fi` : ":"}
-${queries.codexPluginList ? `codex=$(command -v codex 2>/dev/null || true); if [ -z "$codex" ]; then emit PLUGINS missing; elif output=$("$codex" plugin list --available --json 2>/dev/null); then z=$(printf '%s' "$output"|wc -c|tr -d ' '); [ "$z" -le ${MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES} ] || exit 45; emit PLUGINS ok "$(printf '%s' "$output"|enc)"; else emit PLUGINS failed; fi` : ":"}
+${queries.codexPluginList ? `if [ -z "$codex_path" ]; then emit PLUGINS missing; elif output=$("$codex_path" plugin list --available --json 2>/dev/null); then z=$(printf '%s' "$output"|wc -c|tr -d ' '); [ "$z" -le ${MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES} ] || exit 45; emit PLUGINS ok "$(printf '%s' "$output"|enc)"; else emit PLUGINS failed; fi` : ":"}
 printf 'END\\n'`;
 }
 
@@ -189,6 +240,8 @@ export function parseRemotePushObservation(
   stdout: string,
   incoming: readonly InventoryEntry[],
   queries: PushObservationQueries = {},
+  inventoryRoots?: readonly string[],
+  requestIdentity?: PlanFingerprint,
 ): PushTargetObservation {
   if (Buffer.byteLength(stdout) > MAX_PUSH_OBSERVATION_STDOUT_BYTES)
     throw new Error("Push observation stdout cap exceeded");
@@ -279,10 +332,15 @@ export function parseRemotePushObservation(
       )
         throw new Error("Invalid Codex plugin list schema");
       const record = parsed as { installed?: unknown; available?: unknown };
+      const installed = parsePluginIds(record.installed, "installed");
+      const installedSet = new Set(installed);
+      const available = parsePluginIds(record.available, "available").filter(
+        (id) => !installedSet.has(id),
+      );
       codexPluginList = {
         status: "ok",
-        installed: parsePluginIds(record.installed, "installed"),
-        available: parsePluginIds(record.available, "available"),
+        installed,
+        available,
       };
     } else if (kind === "CAPTURE" && f.length === 4) {
       const k = decode(f[0] ?? ""),
@@ -333,7 +391,11 @@ export function parseRemotePushObservation(
   if (!home || !os || !arch || gui === undefined) throw new Error("Incomplete push observation");
   if (queries.codexPluginList && !codexPluginList) throw new Error("Missing PLUGINS");
   validateAbsolute(home, "remote HOME");
-  const requested = new Set(groupManagedTopLevelEntries(incoming).map((g) => g.path));
+  const requested = new Set(
+    (inventoryRoots ?? groupManagedTopLevelEntries(incoming).map((group) => group.path)).filter(
+      (path) => path !== "claude/.mcp-config.json",
+    ),
+  );
   const canon = canonicalInventory(inventory);
   for (const e of canon)
     if (![...requested].some((r) => e.path === r || e.path.startsWith(`${r}/`)))
@@ -347,7 +409,11 @@ export function parseRemotePushObservation(
     if (actual.size !== want.length || want.some((k) => !actual.has(k)))
       throw new Error(`Missing or unexpected ${label}`);
   };
-  requireKeys(commands, queries.commandNames ?? [], "CMD");
+  requireKeys(
+    commands,
+    [...(queries.commandNames ?? []), ...(queries.codexPluginList ? ["codex"] : [])],
+    "CMD",
+  );
   requireKeys(exists, queries.pathExistence ?? [], "EXISTS");
   requireKeys(
     captures,
@@ -373,39 +439,11 @@ export function parseRemotePushObservation(
     sharedSkillNames: [...new Set(skills)].sort(),
     codexPluginList: codexPluginList ?? { status: "missing", installed: [], available: [] },
   };
-  const factsDigest = createHash("sha256")
-    .update(
-      JSON.stringify({
-        home: createHash("sha256").update("ccm:push:home\0").update(home).digest("hex"),
-        commands: [...commands.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([name, path]) => [
-            name,
-            path === null
-              ? null
-              : createHash("sha256").update("ccm:push:command\0").update(path).digest("hex"),
-          ]),
-        captures: [...captures.entries()]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([name, v]) => [name, v && createHash("sha256").update(v).digest("hex")]),
-        existence: [...exists.entries()].sort(([a], [b]) => a.localeCompare(b)),
-        markets: [...markets.entries()].sort(([a], [b]) => a.localeCompare(b)),
-        skills: facts.sharedSkillNames,
-        codexPluginList: facts.codexPluginList,
-      }),
-    )
-    .digest("hex");
+  const state = { capabilities, inventory: canon, facts };
   return {
-    capabilities,
-    inventory: canon,
-    facts,
-    pushStateFingerprint: fingerprint("push-target-v1", {
-      inventory: inventoryFingerprint(canon),
-      os,
-      arch,
-      gui,
-      factsDigest,
-    }),
+    ...state,
+    pushStateFingerprint: pushStateFingerprint(state),
+    requestIdentity,
   };
 }
 
@@ -413,6 +451,8 @@ export async function observeRemotePushTarget(input: {
   readonly host: string;
   readonly incoming: readonly InventoryEntry[];
   readonly queries?: PushObservationQueries;
+  readonly inventoryRoots?: readonly string[];
+  readonly requestIdentity?: PlanFingerprint;
   readonly transport?: PushObservationTransport;
 }): Promise<PushTargetObservation> {
   parseSshTarget(input.host);
@@ -426,7 +466,7 @@ export async function observeRemotePushTarget(input: {
   for (const n of [...(queries.commandNames ?? []), ...(queries.marketplaceNames ?? [])])
     if (n !== basename(n) || !/^[A-Za-z0-9._@+-]+$/.test(n))
       throw new Error(`Invalid observation name: ${JSON.stringify(n)}`);
-  const probe = buildRemotePushObservationProbe(input.incoming, queries);
+  const probe = buildRemotePushObservationProbe(input.incoming, queries, input.inventoryRoots);
   const result = await (input.transport ?? defaultTransport).run(
     input.host,
     `sh -c ${shellQuote(probe)}`,
@@ -445,5 +485,11 @@ export async function observeRemotePushTarget(input: {
       `Remote push observation failed (${result.exitCode})${stderr ? `: ${stderr}` : ""}`,
     );
   }
-  return parseRemotePushObservation(result.stdout, input.incoming, queries);
+  return parseRemotePushObservation(
+    result.stdout,
+    input.incoming,
+    queries,
+    input.inventoryRoots,
+    input.requestIdentity,
+  );
 }

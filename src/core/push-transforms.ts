@@ -89,6 +89,7 @@ export function derivePushObservationQueries(
     commandNames: [...commands].sort(),
     captureIds: captures.sort(),
     marketplaceNames: [...markets].sort(),
+    sharedSkillNames: true,
     codexPluginList: inputs.codexConfig !== undefined,
   };
 }

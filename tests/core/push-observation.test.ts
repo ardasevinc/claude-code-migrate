@@ -212,7 +212,7 @@ describe("remote push observation", () => {
     expect(observed.facts.codexPluginList).toEqual({
       status: "ok",
       installed: ["a@market"],
-      available: ["a@market", "z@market"],
+      available: ["z@market"],
     });
   });
 
