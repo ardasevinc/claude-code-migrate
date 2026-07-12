@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -60,6 +60,11 @@ function v2(body = "model = 'gpt-5'\n") {
 }
 
 describe("archive operator commands", () => {
+  it("leaves process exit ownership at the CLI boundary", async () => {
+    const source = await readFile(join(projectRoot, "src", "commands", "archive.ts"), "utf8");
+    expect(source).not.toContain("process.exit");
+  });
+
   it("inspects v2 archives as one redacted ANSI-free JSON object", async () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-inspect-"));
     const archivePath = await makeArchive(home, v2());

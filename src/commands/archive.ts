@@ -1,7 +1,7 @@
 import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { verifyArchive } from "../core/archive-reader.ts";
-import { BlockedError } from "../errors.ts";
+import { BlockedError, ReportedCliError } from "../errors.ts";
 import type { VerifiedArchive } from "../types/index.ts";
 
 interface ArchiveCommandOptions {
@@ -41,7 +41,7 @@ export async function verifyCommand(
   else
     console.log("Archive is valid, but integrity verification is unavailable for legacy archives.");
 
-  if (!valid) process.exitCode = 1;
+  if (!valid) throw new ReportedCliError(1);
 }
 
 async function readArchive(
@@ -55,8 +55,7 @@ async function readArchive(
   } catch (error) {
     if (json) {
       console.log(JSON.stringify({ valid: false, error: "Archive is invalid or unreadable" }));
-      process.exitCode = 3;
-      return undefined;
+      throw new ReportedCliError(3, { cause: error });
     }
     throw new BlockedError("Archive is invalid or unreadable", { cause: error });
   }

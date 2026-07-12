@@ -11,6 +11,13 @@ export class CliError extends Error {
   }
 }
 
+export class ReportedCliError extends CliError {
+  constructor(exitCode: CcmExitCode, options?: ErrorOptions) {
+    super("", exitCode, options);
+    this.name = "ReportedCliError";
+  }
+}
+
 export class UsageError extends CliError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, 2, options);
