@@ -79,6 +79,6 @@ export async function backupCommand(
     return;
   }
 
-  await createArchive(files, outputPath, { force: options.force });
+  await createArchive(files, outputPath, { providers, force: options.force });
   log.info(`Backup contains ${files.length} files`);
 }

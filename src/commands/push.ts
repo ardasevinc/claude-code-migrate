@@ -107,7 +107,7 @@ export async function pushCommand(
   let unregisterInterruptCleanup: (() => void) | undefined;
 
   try {
-    await createArchive(files, tempArchive);
+    await createArchive(files, tempArchive, { providers });
     unregisterInterruptCleanup = registerInterruptCleanup(async () => {
       await rm(tempWorkspace, { recursive: true, force: true });
     });

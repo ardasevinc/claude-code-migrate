@@ -1,4 +1,15 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -54,10 +65,12 @@ describe("archiver", () => {
       ];
 
       const archivePath = join(rootDir, "ccm-test.tar.gz");
-      await createArchive(files, archivePath);
+      await createArchive(files, archivePath, { providers: ["claude", "codex"] });
       const manifest = await extractArchive(archivePath, extractDir);
 
-      expect(manifest?.version).toBe(packageMetadata.version);
+      expect(manifest.format).toBe("v2");
+      expect(manifest.integrity).toBe("verified");
+      expect(manifest.producerVersion).toBe(packageMetadata.version);
       expect(manifest?.providers).toEqual(["claude", "codex"]);
       expect(await readFile(join(extractDir, "claude", "CLAUDE.md"), "utf8")).toBe("claude\n");
       expect(await readFile(join(extractDir, "codex", "AGENTS.md"), "utf8")).toBe("codex\n");
@@ -72,17 +85,77 @@ describe("archiver", () => {
     }
   });
 
+  it("writes a minimal sorted v2 manifest from normalized staged bytes", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-v2-test-"));
+    try {
+      const executable = join(rootDir, "executable");
+      const config = join(rootDir, "config");
+      await writeFile(executable, "#!/bin/sh\n", "utf8");
+      await chmod(executable, 0o711);
+      await writeFile(config, 'model = "test"\n', "utf8");
+      await chmod(config, 0o600);
+      const archivePath = join(rootDir, "backup.tar.gz");
+      await createArchive(
+        [
+          {
+            sourcePath: executable,
+            relativePath: "shared/agents/skills/z-tool/SKILL.md",
+            isSymlink: false,
+          },
+          { sourcePath: config, relativePath: "codex/config.toml", isSymlink: false },
+        ],
+        archivePath,
+        { providers: ["codex"] },
+      );
+
+      const result = await runCommand(`tar -xOzf ${shellQuote(archivePath)} ./.ccm-manifest.json`, {
+        quiet: true,
+      });
+      const manifest = JSON.parse(result.stdout);
+      expect(Object.keys(manifest).sort()).toEqual([
+        "createdAt",
+        "files",
+        "formatVersion",
+        "producer",
+        "providers",
+      ]);
+      expect(JSON.stringify(manifest)).not.toContain(rootDir);
+      expect(JSON.stringify(manifest)).not.toContain("sourcePath");
+      expect(JSON.stringify(manifest)).not.toContain("sourceHost");
+      expect(JSON.stringify(manifest)).not.toContain("originalSymlinkTarget");
+      expect(JSON.stringify(manifest)).not.toContain('model = "test"');
+      expect(manifest.providers).toEqual(["codex"]);
+      expect(manifest.files.map((file: { path: string }) => file.path)).toEqual([
+        "codex/config.toml",
+        "shared/agents/skills/z-tool/SKILL.md",
+      ]);
+      expect(manifest.files[0]).toEqual({
+        path: "codex/config.toml",
+        type: "file",
+        size: Buffer.byteLength('model = "test"\n'),
+        mode: 0o644,
+        sha256: createHash("sha256").update('model = "test"\n').digest("hex"),
+      });
+      expect(manifest.files[1].mode).toBe(0o755);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it("publishes archives privately and does not clobber existing output by default", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-publish-test-"));
     const archivePath = join(rootDir, "backup.tar.gz");
     try {
       await writeFile(archivePath, "existing", "utf8");
-      await expect(createArchive(await fixture(rootDir), archivePath)).rejects.toThrow(
-        `Archive already exists: ${archivePath}`,
-      );
+      await expect(
+        createArchive(await fixture(rootDir), archivePath, { providers: ["codex"] }),
+      ).rejects.toThrow(`Archive already exists: ${archivePath}`);
       expect(await readFile(archivePath, "utf8")).toBe("existing");
 
-      await createArchive(await fixture(rootDir), archivePath, { force: true });
+      await createArchive(await fixture(rootDir), archivePath, {
+        providers: ["codex"],
+        force: true,
+      });
       expect((await stat(archivePath)).mode & 0o777).toBe(0o600);
       expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
     } finally {
@@ -98,10 +171,34 @@ describe("archiver", () => {
       const files: FileEntry[] = [
         { sourcePath: join(rootDir, "missing"), relativePath: "codex/missing", isSymlink: false },
       ];
-      await expect(createArchive(files, archivePath, { force: true })).rejects.toThrow();
+      await expect(
+        createArchive(files, archivePath, { providers: ["codex"], force: true }),
+      ).rejects.toThrow();
       expect(await readFile(archivePath, "utf8")).toBe("existing");
       expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
     } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes only after the temporary archive passes self-verification", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-verify-test-"));
+    const archivePath = join(rootDir, "backup.tar.gz");
+    const binDir = join(rootDir, "bin");
+    const originalPath = process.env.PATH;
+    try {
+      await mkdir(binDir);
+      const fakeTar = join(binDir, "tar");
+      await writeFile(fakeTar, '#!/bin/sh\nprintf "not an archive" > "$2"\n', "utf8");
+      await chmod(fakeTar, 0o755);
+      process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+
+      await expect(
+        createArchive(await fixture(rootDir), archivePath, { providers: ["codex"] }),
+      ).rejects.toThrow();
+      await expect(stat(archivePath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      process.env.PATH = originalPath;
       await rm(rootDir, { recursive: true, force: true });
     }
   });
@@ -115,6 +212,7 @@ describe("archiver", () => {
         createArchive(
           [{ sourcePath: sourceDir, relativePath: "codex/config.toml", isSymlink: false }],
           join(rootDir, "backup.tar.gz"),
+          { providers: ["codex"] },
         ),
       ).rejects.toThrow("Archive source is not a regular file");
       expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
@@ -128,8 +226,8 @@ describe("archiver", () => {
     const archivePath = join(rootDir, "backup.tar.gz");
     try {
       const results = await Promise.allSettled([
-        createArchive(await fixture(rootDir, "first\n"), archivePath),
-        createArchive(await fixture(rootDir, "second\n"), archivePath),
+        createArchive(await fixture(rootDir, "first\n"), archivePath, { providers: ["codex"] }),
+        createArchive(await fixture(rootDir, "second\n"), archivePath, { providers: ["codex"] }),
       ]);
       expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
       expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
@@ -145,16 +243,17 @@ describe("archiver", () => {
     try {
       const sourceDir = join(rootDir, "source");
       await mkdir(sourceDir);
-      await writeFile(join(sourceDir, "target"), "safe\n", "utf8");
-      await symlink("target", join(sourceDir, "link"));
+      await mkdir(join(sourceDir, "codex"));
+      await writeFile(join(sourceDir, "codex", "config.toml"), "safe\n", "utf8");
+      await symlink("config.toml", join(sourceDir, "codex", "AGENTS.md"));
 
       const archivePath = join(rootDir, "unsafe.tar.gz");
       await runCommand(
-        `tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} target link`,
+        `COPYFILE_DISABLE=1 tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} codex/config.toml codex/AGENTS.md`,
         { quiet: true },
       );
 
-      await expect(validateArchive(archivePath)).rejects.toThrow("Unsafe archive entry type: l");
+      await expect(validateArchive(archivePath)).rejects.toThrow("Unsafe archive entry type");
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
@@ -176,9 +275,12 @@ describe("archiver", () => {
       const archivePath = join(rootDir, "malformed.tar.gz");
       await mkdir(sourceDir);
       await writeFile(join(sourceDir, ".ccm-manifest.json"), "{}", "utf8");
-      await runCommand(`tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`, {
-        quiet: true,
-      });
+      await runCommand(
+        `COPYFILE_DISABLE=1 tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`,
+        {
+          quiet: true,
+        },
+      );
 
       await expect(extractArchive(archivePath, join(rootDir, "extract"))).rejects.toThrow(
         "Archive manifest is invalid",
@@ -213,9 +315,12 @@ describe("archiver", () => {
         }),
         "utf8",
       );
-      await runCommand(`tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`, {
-        quiet: true,
-      });
+      await runCommand(
+        `COPYFILE_DISABLE=1 tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`,
+        {
+          quiet: true,
+        },
+      );
 
       await expect(validateArchive(archivePath)).rejects.toThrow("not managed by ccm");
     } finally {
@@ -242,9 +347,12 @@ describe("archiver", () => {
         }),
         "utf8",
       );
-      await runCommand(`tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`, {
-        quiet: true,
-      });
+      await runCommand(
+        `COPYFILE_DISABLE=1 tar -czf ${shellQuote(archivePath)} -C ${shellQuote(sourceDir)} .`,
+        {
+          quiet: true,
+        },
+      );
 
       await expect(validateArchive(archivePath)).rejects.toThrow(
         "Archive members do not match the manifest",
