@@ -33,6 +33,7 @@ const MANIFEST_FILENAME = ".ccm-manifest.json";
 export interface CreateArchiveOptions {
   providers: ProviderName[];
   force?: boolean;
+  beforePublish?: (archive: VerifiedArchive) => Promise<void>;
 }
 
 export async function createArchive(
@@ -104,7 +105,8 @@ export async function createArchive(
       env: { ...process.env, COPYFILE_DISABLE: "1" },
     });
     await chmod(tempArchive, 0o600);
-    await verifyArchive(tempArchive);
+    const verifiedArchive = await verifyArchive(tempArchive);
+    await options.beforePublish?.(verifiedArchive);
 
     if (options.force) {
       await rename(tempArchive, outputPath);

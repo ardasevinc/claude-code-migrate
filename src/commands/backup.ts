@@ -21,6 +21,9 @@ export async function backupCommand(
   arg2: string | undefined,
   options: BackupOptions,
 ): Promise<void> {
+  if (options.json && !options.dryRun) {
+    throw new UsageError("--json currently requires --dry-run");
+  }
   const config = await loadConfig();
   const enabledProviders = getEnabledProviders(config);
 
@@ -37,7 +40,8 @@ export async function backupCommand(
     });
   }
 
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const operationDate = new Date();
+  const timestamp = operationDate.toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const defaultFilename = `ccm-backup-${timestamp}.tar.gz`;
 
   let outputPath: string;
@@ -52,34 +56,27 @@ export async function backupCommand(
     outputPath = join(backupDir, defaultFilename);
   }
 
-  const collect = () =>
-    collectFiles({
-      providers,
-      includeClaudeSettingsLocal: config.providers.claude.settings_local,
-      includeClaudeMcpConfig: config.providers.claude.mcp_config,
-      dryRun: options.dryRun,
-    });
-  let files: FileEntry[];
-  if (options.json) {
-    const originalLog = console.log;
-    const originalWarn = console.warn;
-    console.log = () => undefined;
-    console.warn = () => undefined;
-    try {
-      files = await collect();
-    } finally {
-      console.log = originalLog;
-      console.warn = originalWarn;
-    }
-  } else {
-    files = await collect();
-  }
+  const files: FileEntry[] = await collectFiles({
+    providers,
+    includeClaudeSettingsLocal: config.providers.claude.settings_local,
+    includeClaudeMcpConfig: config.providers.claude.mcp_config,
+    dryRun: options.dryRun,
+    quiet: options.json,
+  });
 
   if (files.length === 0) {
     throw new BlockedError("No files to backup");
   }
 
-  const planned = await planBackup({ files, outputPath, providers, force: options.force });
+  const planned = await planBackup({
+    files,
+    outputPath,
+    providers,
+    force: options.force,
+    createdAt: operationDate.toISOString(),
+    outputSource: outputArg === undefined ? "default" : "explicit",
+    outputIdentity: outputArg,
+  });
 
   if (options.dryRun) {
     if (options.json) {

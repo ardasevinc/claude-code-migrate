@@ -3,7 +3,6 @@ import { lstat, readFile } from "node:fs/promises";
 import type { FileEntry, ProviderName } from "../types/index.ts";
 import { BlockedError } from "../errors.ts";
 import { createArchive } from "./archiver.ts";
-import { readVerifiedArchive } from "./archiver.ts";
 import {
   inventoryFingerprint,
   inventoryFromFileEntries,
@@ -22,6 +21,7 @@ interface BackupPlanResources {
   readonly outputPath: string;
   readonly providers: readonly ProviderName[];
   readonly force: boolean;
+  readonly beforePublishTestHook?: () => Promise<void>;
 }
 
 export interface PlannedBackup {
@@ -34,6 +34,10 @@ export interface PlanBackupInput {
   readonly providers: readonly ProviderName[];
   readonly force: boolean;
   readonly createdAt?: string;
+  readonly outputSource?: "default" | "explicit";
+  readonly outputIdentity?: string;
+  /** Deterministic race seam for tests. Not represented in the public plan. */
+  readonly beforePublishTestHook?: () => Promise<void>;
 }
 
 const resources = new WeakMap<PlannedBackup, BackupPlanResources>();
@@ -55,18 +59,31 @@ async function targetFingerprint(path: string): Promise<PlanFingerprint> {
   });
 }
 
+async function targetKind(path: string): Promise<"missing" | "file" | "other"> {
+  const stat = await lstat(path).catch(() => null);
+  if (!stat) return "missing";
+  return stat.isFile() ? "file" : "other";
+}
+
 export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup> {
   const inventory = await inventoryFromFileEntries(input.files);
   const sourceFingerprint = inventoryFingerprint(inventory);
   const observedTarget = await targetFingerprint(input.outputPath);
   const missingTarget = fingerprint("backup-target-v1", { exists: false });
-  const targetAvailable = input.force || observedTarget === missingTarget;
+  const observedTargetKind = await targetKind(input.outputPath);
+  const targetAvailable =
+    observedTargetKind === "missing" || (input.force && observedTargetKind === "file");
+  const expectedTarget = input.force ? observedTarget : missingTarget;
+  const outputSource = input.outputSource ?? "explicit";
   const plan = createMigrationPlan({
     kind: "backup",
     providers: input.providers,
     executionModel: "local-atomic-publication",
     sourceEndpointRef: endpointRef("backup-source", sourceFingerprint),
-    targetEndpointRef: endpointRef("backup-target", input.outputPath),
+    targetEndpointRef:
+      outputSource === "default"
+        ? endpointRef("backup-target", "output:default")
+        : endpointRef("backup-target", input.outputIdentity ?? input.outputPath),
     sourceFingerprint,
     targetFingerprint: observedTarget,
     stagedPostFingerprint: sourceFingerprint,
@@ -75,8 +92,13 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
         id: "target-available",
         required: true,
         status: targetAvailable ? "satisfied" : "failed",
-        reasonCode: targetAvailable ? "target-available" : "target-exists",
-        expectedFingerprint: observedTarget,
+        reasonCode:
+          observedTargetKind === "other"
+            ? "target-not-file"
+            : targetAvailable
+              ? "target-available"
+              : "target-exists",
+        expectedFingerprint: expectedTarget,
         observedFingerprint: observedTarget,
       },
     ],
@@ -102,6 +124,11 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
         valueCode: input.force ? "force" : "no-replace",
         provenance: input.force ? "cli" : "default",
       },
+      {
+        code: "output-source",
+        valueCode: outputSource,
+        provenance: outputSource === "explicit" ? "cli" : "default",
+      },
     ],
     createdAt: input.createdAt,
   });
@@ -111,6 +138,7 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
     outputPath: input.outputPath,
     providers: [...input.providers],
     force: input.force,
+    beforePublishTestHook: input.beforePublishTestHook,
   });
   return planned;
 }
@@ -139,17 +167,30 @@ export async function executePlannedBackup(planned: PlannedBackup): Promise<stri
     throw new BlockedError("Backup source changed after planning");
   }
   const observedTarget = await targetFingerprint(sealed.outputPath);
-  if (observedTarget !== planned.plan.targetFingerprint) {
+  const targetPrecondition = planned.plan.preconditions.find(
+    (item) => item.id === "target-available",
+  );
+  if (observedTarget !== targetPrecondition?.expectedFingerprint) {
     throw new BlockedError("Backup target changed after planning");
   }
   await createArchive([...sealed.files], sealed.outputPath, {
     providers: [...sealed.providers],
     force: sealed.force,
+    beforePublish: async (archive) => {
+      await sealed.beforePublishTestHook?.();
+      const currentSource = inventoryFingerprint(await inventoryFromFileEntries(sealed.files));
+      if (currentSource !== planned.plan.sourceFingerprint) {
+        throw new BlockedError("Backup source changed during archive creation");
+      }
+      const currentTarget = await targetFingerprint(sealed.outputPath);
+      if (currentTarget !== targetPrecondition?.expectedFingerprint) {
+        throw new BlockedError("Backup target changed during archive creation");
+      }
+      const stagedFingerprint = inventoryFingerprint(archiveInventory(archive.files));
+      if (stagedFingerprint !== planned.plan.stagedPostFingerprint) {
+        throw new BlockedError("Staged archive does not match the planned backup");
+      }
+    },
   });
-  const archive = await readVerifiedArchive(sealed.outputPath);
-  const publishedFingerprint = inventoryFingerprint(archiveInventory(archive.files));
-  if (publishedFingerprint !== planned.plan.stagedPostFingerprint) {
-    throw new BlockedError("Published archive does not match the planned backup");
-  }
   return sealed.outputPath;
 }

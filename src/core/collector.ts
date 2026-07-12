@@ -299,6 +299,7 @@ async function collectFilteredCuratedMarketplace(
   pluginNames: Set<string>,
   entries: FileEntry[],
   archivePrefix: string,
+  quiet = false,
 ): Promise<void> {
   for (const filename of ["marketplace.json", "api_marketplace.json"]) {
     const sourcePath = join(curatedRoot, ".agents", "plugins", filename);
@@ -319,7 +320,7 @@ async function collectFilteredCuratedMarketplace(
         mcpServersOnly: `${JSON.stringify(marketplace, null, 2)}\n`,
       });
     } catch {
-      log.warn(`[codex] Invalid curated marketplace metadata, skipping: ${sourcePath}`);
+      if (!quiet) log.warn(`[codex] Invalid curated marketplace metadata, skipping: ${sourcePath}`);
     }
   }
 }
@@ -342,7 +343,7 @@ async function collectProviderFiles(
   const entries: FileEntry[] = [];
 
   if (!(await exists(basePath))) {
-    log.warn(`[${providerName}] Provider directory not found: ${basePath}`);
+    if (!options.quiet) log.warn(`[${providerName}] Provider directory not found: ${basePath}`);
     return entries;
   }
 
@@ -360,7 +361,7 @@ async function collectProviderFiles(
     const fullPath = join(basePath, item);
 
     if (!(await exists(fullPath))) {
-      if (!options.dryRun) {
+      if (!options.dryRun && !options.quiet) {
         log.warn(`[${providerName}] Missing required: ${item}`);
       }
       continue;
@@ -385,7 +386,7 @@ async function collectProviderFiles(
     if (options.includeClaudeMcpConfig && (await exists(paths.claudeMcpConfigPath))) {
       const { mcpServers, warnings } = await extractMcpServers(paths.claudeMcpConfigPath);
 
-      if (warnings.length > 0) {
+      if (warnings.length > 0 && !options.quiet) {
         log.warn("[claude] MCP servers with paths that may not work on remote:");
         for (const warning of warnings) {
           log.warn(`  ${warning}`);
@@ -407,7 +408,7 @@ async function collectProviderFiles(
     const codexConfigPath = join(basePath, "config.toml");
     const warnings = await detectCodexMcpPathWarnings(codexConfigPath);
 
-    if (warnings.length > 0) {
+    if (warnings.length > 0 && !options.quiet) {
       log.warn("[codex] MCP servers with paths that may not work on remote:");
       for (const warning of warnings) {
         log.warn(`  ${warning}`);
@@ -416,9 +417,10 @@ async function collectProviderFiles(
 
     for (const marketplaceSource of await discoverCodexLocalMarketplaceSources(codexConfigPath)) {
       if (!(await isDirectory(marketplaceSource.source))) {
-        log.warn(
-          `[codex] Marketplace source not found, skipping: ${marketplaceSource.name} (${marketplaceSource.source})`,
-        );
+        if (!options.quiet)
+          log.warn(
+            `[codex] Marketplace source not found, skipping: ${marketplaceSource.name} (${marketplaceSource.source})`,
+          );
         continue;
       }
 
@@ -448,6 +450,7 @@ async function collectProviderFiles(
         configuredPluginNames,
         entries,
         curatedArchivePrefix,
+        options.quiet,
       );
       await collectPath(join(basePath, ".tmp", "plugins.sha"), entries, context);
       for (const pluginName of configuredPluginNames) {

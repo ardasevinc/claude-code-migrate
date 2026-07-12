@@ -105,6 +105,7 @@ export interface CollectorOptions {
   includeClaudeSettingsLocal: boolean;
   includeClaudeMcpConfig: boolean;
   dryRun?: boolean;
+  quiet?: boolean;
   paths?: Partial<CollectionPaths>;
 }
 
