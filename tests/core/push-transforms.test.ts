@@ -1,10 +1,17 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fingerprint } from "../../src/core/migration-plan.ts";
-import type { PushTargetObservation } from "../../src/core/push-observation.ts";
+import {
+  observeRemotePushTarget,
+  type PushTargetObservation,
+} from "../../src/core/push-observation.ts";
 import {
   derivePushObservationQueries,
   transformPushInputs,
 } from "../../src/core/push-transforms.ts";
+import { runProcess } from "../../src/utils/process.ts";
 
 function observation(
   overrides: Partial<PushTargetObservation["facts"]> = {},
@@ -20,6 +27,7 @@ function observation(
       captures: new Map(),
       marketplacePayloads: new Map(),
       sharedSkillNames: [],
+      codexPluginList: { status: "missing", installed: [], available: [] },
       ...overrides,
     },
   };
@@ -49,6 +57,7 @@ command = "/Users/source/demo"
     expect(queries.pathExistence).toEqual(["/Users/source/demo", "/Users/source/notify"]);
     expect(queries.commandNames).toEqual(expect.arrayContaining(["demo", "guard", "special"]));
     expect(queries.marketplaceNames).toEqual(["local"]);
+    expect(queries.codexPluginList).toBe(true);
   });
 
   it("merges MCP strictly and adapts config, marketplaces, hooks, and trust from facts", async () => {
@@ -132,5 +141,59 @@ trusted_hash = "sha256:source"
         }),
       ),
     ).rejects.toThrow("Duplicate JSON object key");
+  });
+
+  it("derives and observes HOME paths without trusting an unknown remote cwd", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-push-transform-observe-"));
+    const bin = join(home, ".bun", "bin");
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "demo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await writeFile(join(home, ".codex", "config.toml"), "");
+    const config = Buffer.from(`notify = ["../notify"]
+[mcp_servers.home]
+command = "~/.bun/bin/demo"
+[mcp_servers.relative]
+command = "./scripts/gone"
+`);
+    const queries = derivePushObservationQueries({ codexConfig: config });
+    expect(queries.pathExistence).toEqual(["~/.bun/bin/demo"]);
+    expect(queries.pathExistence).not.toContain("./scripts/gone");
+    const observed = await observeRemotePushTarget({
+      host: "test-host",
+      incoming: [],
+      queries,
+      transport: {
+        async run(_host, argvCommand, options) {
+          return runProcess("/bin/sh", ["-c", argvCommand], {
+            env: { HOME: home, PATH: "/usr/bin:/bin" },
+            maxBuffer: options.maxBuffer,
+            timeoutMs: options.timeout,
+          });
+        },
+      },
+    });
+    expect(observed.facts.commandPaths.get("demo")).toBe(join(bin, "demo"));
+    expect(observed.facts.pathExistence.get("~/.bun/bin/demo")).toBe(true);
+    const transformed = await transformPushInputs({ codexConfig: config }, observed);
+    const output = Buffer.from(transformed.codexConfig ?? []).toString();
+    expect(output).toContain(`command = ${JSON.stringify(join(bin, "demo"))}`);
+    expect(output).not.toContain("mcp_servers.relative");
+    expect(output).not.toContain("notify =");
+  });
+
+  it("is deterministic and does not mutate input bytes or observed facts", async () => {
+    const config = Buffer.from(`[mcp_servers.demo]\ncommand = "/Users/source/demo"\n`);
+    const original = Buffer.from(config);
+    const facts = observation({
+      commandPaths: new Map([["demo", "/usr/bin/demo"]]),
+      pathExistence: new Map([["/Users/source/demo", false]]),
+    });
+    const commandsBefore = [...facts.facts.commandPaths];
+    const first = await transformPushInputs({ codexConfig: config }, facts);
+    const second = await transformPushInputs({ codexConfig: config }, facts);
+    expect(first).toEqual(second);
+    expect(config).toEqual(original);
+    expect([...facts.facts.commandPaths]).toEqual(commandsBefore);
   });
 });

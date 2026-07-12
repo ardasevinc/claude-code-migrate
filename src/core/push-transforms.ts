@@ -3,17 +3,17 @@ import { parse } from "smol-toml";
 import { collectionPathsForHome } from "../config/providers.ts";
 import type { CodexPluginPolicy } from "../types/index.ts";
 import {
-  applyCodexPluginPolicies,
-  codexPluginPolicyCommandNames,
-  mergeCodexPluginPolicies,
-  type CodexPluginPolicyDecision,
-} from "./codex-plugin-policy.ts";
-import {
   adaptCodexConfigForHost,
   getCodexLocalMarketplaceSources,
   rewriteCodexMarketplaceSources,
 } from "./codex.ts";
 import { adaptCodexHooksForHost } from "./codex-hooks.ts";
+import {
+  applyCodexPluginPolicies,
+  type CodexPluginPolicyDecision,
+  codexPluginPolicyCommandNames,
+  mergeCodexPluginPolicies,
+} from "./codex-plugin-policy.ts";
 import { getCodexMcpCommandPathCandidates, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 import type { PushObservationQueries, PushTargetObservation } from "./push-observation.ts";
 import { mergeClaudeMcpStrict, stripAllCodexHookTrust } from "./restore-transforms.ts";
@@ -60,10 +60,16 @@ export function derivePushObservationQueries(
     for (const candidate of getCodexMcpCommandPathCandidates(raw))
       commands.add(candidate.binaryName);
     const config = parse(raw) as unknown as HostConfig;
-    if (typeof config.notify?.[0] === "string" && PATH_PATTERN.test(config.notify[0]))
+    if (
+      typeof config.notify?.[0] === "string" &&
+      (config.notify[0].startsWith("/") || config.notify[0].startsWith("~/"))
+    )
       paths.add(config.notify[0]);
     for (const server of Object.values(config.mcp_servers ?? config.mcpServers ?? {}))
-      if (typeof server.command === "string" && PATH_PATTERN.test(server.command))
+      if (
+        typeof server.command === "string" &&
+        (server.command.startsWith("/") || server.command.startsWith("~/"))
+      )
         paths.add(server.command);
   }
   if (inputs.codexHooks) {
@@ -83,6 +89,7 @@ export function derivePushObservationQueries(
     commandNames: [...commands].sort(),
     captureIds: captures.sort(),
     marketplaceNames: [...markets].sort(),
+    codexPluginList: inputs.codexConfig !== undefined,
   };
 }
 
@@ -141,7 +148,12 @@ export async function transformPushInputs(
       config = adapted.configContent;
       warnings.push(...adapted.warnings);
     }
-    const host = await adaptCodexConfigForHost(config, async (path) => exists(target.facts, path));
+    const host = await adaptCodexConfigForHost(
+      config,
+      async (path) =>
+        path.startsWith("./") || path.startsWith("../") ? false : exists(target.facts, path),
+      { removeUnresolvedRelativePaths: true },
+    );
     config = host.content;
     warnings.push(...host.warnings);
     const remoteConfig = target.facts.captures.get("codex-config");

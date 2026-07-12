@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
+import { type ProcessResult, runProcess } from "../utils/process.ts";
+import { shellQuote } from "../utils/shell.ts";
+import type { HostCapabilities } from "./codex-plugin-policy.ts";
 import {
   canonicalInventory,
   groupManagedTopLevelEntries,
-  inventoryFingerprint,
   type InventoryEntry,
+  inventoryFingerprint,
 } from "./inventory.ts";
 import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
 import { parseSshTarget } from "./ssh-target.ts";
-import { runProcess, type ProcessResult } from "../utils/process.ts";
-import { shellQuote } from "../utils/shell.ts";
-import type { HostCapabilities } from "./codex-plugin-policy.ts";
 
 export const MAX_PUSH_OBSERVATION_ENTRIES = 100_000;
 export const MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES = 4 * 1024 * 1024;
@@ -18,6 +18,7 @@ export const MAX_PUSH_OBSERVATION_CAPTURE_TOTAL_BYTES = 32 * 1024 * 1024;
 export const MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES = 1024 * 1024 * 1024;
 export const MAX_PUSH_OBSERVATION_INVENTORY_TOTAL_BYTES = 4 * 1024 * 1024 * 1024;
 export const MAX_PUSH_OBSERVATION_STDOUT_BYTES = 64 * 1024 * 1024;
+export const MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES = 1024 * 1024;
 export const PUSH_OBSERVATION_TIMEOUT_MS = 60_000;
 
 export interface PushObservationQueries {
@@ -28,6 +29,7 @@ export interface PushObservationQueries {
   readonly captureIds?: readonly PushCaptureId[];
   readonly marketplaceNames?: readonly string[];
   readonly sharedSkillNames?: boolean;
+  readonly codexPluginList?: boolean;
 }
 
 export type PushCaptureId = "claude-mcp" | "codex-config";
@@ -47,6 +49,17 @@ export interface PrivatePushTargetFacts {
   readonly captures: ReadonlyMap<string, Uint8Array | null>;
   readonly marketplacePayloads: ReadonlyMap<string, boolean>;
   readonly sharedSkillNames: readonly string[];
+  readonly codexPluginList:
+    | {
+        readonly status: "missing" | "failed";
+        readonly installed: readonly [];
+        readonly available: readonly [];
+      }
+    | {
+        readonly status: "ok";
+        readonly installed: readonly string[];
+        readonly available: readonly string[];
+      };
 }
 
 export interface PushTargetObservation {
@@ -91,6 +104,24 @@ function validateAbsolute(path: string, label: string): void {
     throw new Error(`Invalid ${label}: ${JSON.stringify(path)}`);
 }
 
+function validateExistencePath(path: string): void {
+  if (!path.startsWith("~/")) {
+    validateAbsolute(path, "query path");
+    return;
+  }
+  const relative = path.slice(2);
+  if (
+    Buffer.byteLength(path) > 4096 ||
+    relative.length === 0 ||
+    path.endsWith("/") ||
+    path.includes("//") ||
+    path.includes("\\") ||
+    hasControl(path) ||
+    relative.split("/").some((part) => part === "." || part === "..")
+  )
+    throw new Error(`Invalid query path: ${JSON.stringify(path)}`);
+}
+
 /** One probe with no explicit writes. Reads may update atime; re-observation seals shell TOCTOU at apply time. */
 export function buildRemotePushObservationProbe(
   incoming: readonly InventoryEntry[],
@@ -109,15 +140,36 @@ home=\${HOME-}; case "$home" in /*) ;; *) exit 41;; esac; case "$home" in *'/../
 printf 'CCM_PUSH_OBSERVATION\\t1\\n'; emit HOME "$(printf '%s' "$home"|enc)"
 os=$(uname -s); arch=$(uname -m); emit OS "$(printf '%s' "$os"|enc)"; emit ARCH "$(printf '%s' "$arch"|enc)"
 gui=false; [ "$(uname -s)" = Darwin ] && [ -n "\${DISPLAY-}\${WAYLAND_DISPLAY-}\${TERM_PROGRAM-}" ] && gui=true; emit GUI "$gui"
-for x in ${encoded([...new Set(queries.commandNames ?? [])].sort())}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
-for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); v=false; [ -e "$p" ] || [ -L "$p" ] && v=true; emit EXISTS "$x" "$v"; done
+for x in ${encoded([...new Set(queries.commandNames ?? [])].sort())}; do n=$(dec "$x"); p=$(command -v "$n" 2>/dev/null || true); case "$p" in /*) ;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$n" "$home/.local/bin/$n" "$home/bin/$n" "/usr/local/bin/$n" "/usr/bin/$n"; do if [ -x "$c" ]; then p=$c; break; fi; done; fi; if [ -n "$p" ]; then emit CMD "$x" "$(printf '%s' "$p"|enc)"; else emit CMD "$x" -; fi; done
+for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); case "$p" in '~/'*) live="$home/\${p#??}";; *) live=$p;; esac; v=false; [ -e "$live" ] || [ -L "$live" ] && v=true; emit EXISTS "$x" "$v"; done
 for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
 for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "$x"); case "$i" in claude-mcp) p="$home/.claude.json";; codex-config) p="$home/.codex/config.toml";; *) exit 44;; esac; if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
 walk(){ ( logical=$1; live=$2; [ -e "$live" ] || [ -L "$live" ] || return 0; n=\${live##*/}; [ "$n" = .git ] && return 0; case "$logical" in codex/skills/.system|codex/skills/.system/*) return 0;; esac; if [ -L "$live" ]; then t=$(readlink "$live"; printf x); t=\${t%x}; z=$(printf '%s' "$t"|wc -c|tr -d ' '); h=$(printf 'ccm:inventory:symlink-target\\0%s' "$t"|hash); emit ENTRY "$(printf '%s' "$logical"|enc)" symlink 755 "$z" "$h"; elif [ -f "$live" ]; then z=$(size "$live"); [ "$z" -le ${MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES} ] || exit 42; m=$(mode "$live"); if [ $((0$m & 0111)) -ne 0 ]; then m=755; else m=644; fi; emit ENTRY "$(printf '%s' "$logical"|enc)" file "$m" "$z" "$(hash <"$live")"; elif [ -d "$live" ]; then for c in "$live"/* "$live"/.[!.]* "$live"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; n=\${c##*/}; walk "$logical/$n" "$c"; done; else exit 43; fi; ); }
 for x in ${encoded(roots)}; do l=$(dec "$x"); case "$l" in claude/*) p="$home/.claude/\${l#claude/}";; codex/*) p="$home/.codex/\${l#codex/}";; shared/agents/*) p="$home/.agents/\${l#shared/agents/}";; *) exit 44;; esac; walk "$l" "$p"; done
 for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
 ${queries.sharedSkillNames ? `if [ -d "$home/.agents/skills" ] && [ ! -L "$home/.agents/skills" ]; then for p in "$home/.agents/skills"/*; do [ -d "$p" ] && [ ! -L "$p" ] || continue; emit SKILL "$(printf '%s' "\${p##*/}"|enc)"; done; fi` : ":"}
+${queries.codexPluginList ? `codex=$(command -v codex 2>/dev/null || true); if [ -z "$codex" ]; then emit PLUGINS missing; elif output=$("$codex" plugin list --available --json 2>/dev/null); then z=$(printf '%s' "$output"|wc -c|tr -d ' '); [ "$z" -le ${MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES} ] || exit 45; emit PLUGINS ok "$(printf '%s' "$output"|enc)"; else emit PLUGINS failed; fi` : ":"}
 printf 'END\\n'`;
+}
+
+function parsePluginIds(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`Invalid Codex plugin list ${field}`);
+  const ids = value.map((item) => {
+    if (!item || typeof item !== "object" || Object.keys(item).some((key) => key !== "pluginId"))
+      throw new Error(`Invalid Codex plugin list ${field}`);
+    const id = (item as { pluginId?: unknown }).pluginId;
+    if (
+      typeof id !== "string" ||
+      id.length === 0 ||
+      Buffer.byteLength(id) > 512 ||
+      hasControl(id) ||
+      !/^[A-Za-z0-9._+-]+@[A-Za-z0-9._+-]+$/.test(id)
+    )
+      throw new Error(`Invalid Codex plugin ID`);
+    return id;
+  });
+  if (new Set(ids).size !== ids.length) throw new Error(`Duplicate Codex plugin ID`);
+  return ids.sort();
 }
 
 function decode(value: string): string {
@@ -154,6 +206,7 @@ export function parseRemotePushObservation(
     captures = new Map<string, Uint8Array | null>(),
     markets = new Map<string, boolean>();
   const skills: string[] = [];
+  let codexPluginList: PrivatePushTargetFacts["codexPluginList"] | undefined;
   let captureTotal = 0,
     inventoryTotal = 0;
   const singleton = new Set<string>();
@@ -199,6 +252,38 @@ export function parseRemotePushObservation(
       const k = decode(f[0] ?? "");
       if (captures.has(k)) throw new Error("Duplicate CAPTURE");
       captures.set(k, null);
+    } else if (
+      kind === "PLUGINS" &&
+      queries.codexPluginList &&
+      f.length === 1 &&
+      /^(missing|failed)$/.test(f[0] ?? "")
+    ) {
+      if (codexPluginList) throw new Error("Duplicate PLUGINS");
+      codexPluginList = { status: f[0] as "missing" | "failed", installed: [], available: [] };
+    } else if (kind === "PLUGINS" && queries.codexPluginList && f.length === 2 && f[0] === "ok") {
+      if (codexPluginList) throw new Error("Duplicate PLUGINS");
+      const raw = decode(f[1] ?? "");
+      if (Buffer.byteLength(raw) > MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES)
+        throw new Error("Codex plugin list cap exceeded");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new Error("Invalid Codex plugin list JSON");
+      }
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        Object.keys(parsed).some((key) => key !== "installed" && key !== "available")
+      )
+        throw new Error("Invalid Codex plugin list schema");
+      const record = parsed as { installed?: unknown; available?: unknown };
+      codexPluginList = {
+        status: "ok",
+        installed: parsePluginIds(record.installed, "installed"),
+        available: parsePluginIds(record.available, "available"),
+      };
     } else if (kind === "CAPTURE" && f.length === 4) {
       const k = decode(f[0] ?? ""),
         n = Number(f[1]),
@@ -246,6 +331,7 @@ export function parseRemotePushObservation(
       throw new Error("Push observation budget exceeded");
   }
   if (!home || !os || !arch || gui === undefined) throw new Error("Incomplete push observation");
+  if (queries.codexPluginList && !codexPluginList) throw new Error("Missing PLUGINS");
   validateAbsolute(home, "remote HOME");
   const requested = new Set(groupManagedTopLevelEntries(incoming).map((g) => g.path));
   const canon = canonicalInventory(inventory);
@@ -285,6 +371,7 @@ export function parseRemotePushObservation(
     captures,
     marketplacePayloads: markets,
     sharedSkillNames: [...new Set(skills)].sort(),
+    codexPluginList: codexPluginList ?? { status: "missing", installed: [], available: [] },
   };
   const factsDigest = createHash("sha256")
     .update(
@@ -304,6 +391,7 @@ export function parseRemotePushObservation(
         existence: [...exists.entries()].sort(([a], [b]) => a.localeCompare(b)),
         markets: [...markets.entries()].sort(([a], [b]) => a.localeCompare(b)),
         skills: facts.sharedSkillNames,
+        codexPluginList: facts.codexPluginList,
       }),
     )
     .digest("hex");
@@ -330,8 +418,8 @@ export async function observeRemotePushTarget(input: {
   parseSshTarget(input.host);
   canonicalInventory(input.incoming);
   const queries = input.queries ?? {};
-  for (const p of [...(queries.pathExistence ?? []), ...(queries.capturePaths ?? [])])
-    validateAbsolute(p, "query path");
+  for (const p of queries.pathExistence ?? []) validateExistencePath(p);
+  for (const p of queries.capturePaths ?? []) validateAbsolute(p, "query path");
   for (const id of queries.captureIds ?? [])
     if (id !== "claude-mcp" && id !== "codex-config")
       throw new Error(`Invalid push capture ID: ${JSON.stringify(id)}`);

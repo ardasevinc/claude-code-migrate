@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,8 +7,8 @@ import type { InventoryEntry } from "../../src/core/inventory.ts";
 import {
   buildRemotePushObservationProbe,
   observeRemotePushTarget,
-  parseRemotePushObservation,
   PUSH_OBSERVATION_TIMEOUT_MS,
+  parseRemotePushObservation,
 } from "../../src/core/push-observation.ts";
 import { runProcess } from "../../src/utils/process.ts";
 
@@ -142,6 +142,114 @@ describe("remote push observation", () => {
         query,
       ).pushStateFingerprint,
     ).not.toBe(first.pushStateFingerprint);
+  });
+
+  it("resolves commands from deterministic HOME fallbacks outside remote PATH", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-command-fallback-"));
+    const bin = join(home, ".bun", "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "demo"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const queries = { commandNames: ["demo"] };
+    const result = await runProcess(
+      "/bin/sh",
+      ["-c", buildRemotePushObservationProbe([], queries)],
+      {
+        env: { HOME: home, PATH: "/usr/bin:/bin" },
+      },
+    );
+    const observed = parseRemotePushObservation(result.stdout, [], queries);
+    expect(observed.facts.commandPaths.get("demo")).toBe(join(home, ".bun", "bin", "demo"));
+  });
+
+  it("resolves safe tilde existence queries against observed HOME", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-home-path-"));
+    await mkdir(join(home, "bin"));
+    await writeFile(join(home, "bin", "notify"), "ok");
+    const queries = { pathExistence: ["~/bin/notify", "~/bin/missing"] };
+    const result = await runProcess(
+      "/bin/sh",
+      ["-c", buildRemotePushObservationProbe([], queries)],
+      {
+        env: { HOME: home, PATH: "/usr/bin:/bin" },
+      },
+    );
+    const observed = parseRemotePushObservation(result.stdout, [], queries);
+    expect([...observed.facts.pathExistence]).toEqual([
+      ["~/bin/missing", false],
+      ["~/bin/notify", true],
+    ]);
+  });
+
+  it("rejects traversal in HOME-relative existence queries before transport", async () => {
+    await expect(
+      observeRemotePushTarget({
+        host: "test-host",
+        incoming: [],
+        queries: { pathExistence: ["~/../secret"] },
+        transport: {
+          async run() {
+            throw new Error("transport must not run");
+          },
+        },
+      }),
+    ).rejects.toThrow('Invalid query path: "~/../secret"');
+  });
+
+  it("observes a validated deterministic Codex plugin list in the same bounded probe", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-plugins-"));
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "codex"),
+      `#!/bin/sh\nprintf '%s' '{"available":[{"pluginId":"z@market"},{"pluginId":"a@market"}],"installed":[{"pluginId":"a@market"}]}'\n`,
+      { mode: 0o755 },
+    );
+    const queries = { codexPluginList: true };
+    const result = await runProcess("sh", ["-c", buildRemotePushObservationProbe([], queries)], {
+      env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    });
+    const observed = parseRemotePushObservation(result.stdout, [], queries);
+    expect(observed.facts.codexPluginList).toEqual({
+      status: "ok",
+      installed: ["a@market"],
+      available: ["a@market", "z@market"],
+    });
+  });
+
+  it("represents missing Codex and list failure explicitly", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-plugins-state-"));
+    const missingProbe = await runProcess(
+      "/bin/sh",
+      ["-c", buildRemotePushObservationProbe([], { codexPluginList: true })],
+      { env: { HOME: home, PATH: "/usr/bin:/bin" } },
+    );
+    expect(
+      parseRemotePushObservation(missingProbe.stdout, [], { codexPluginList: true }).facts
+        .codexPluginList.status,
+    ).toBe("missing");
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "codex"), "#!/bin/sh\nexit 9\n", { mode: 0o755 });
+    const failedProbe = await runProcess(
+      "/bin/sh",
+      ["-c", buildRemotePushObservationProbe([], { codexPluginList: true })],
+      { env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` } },
+    );
+    expect(
+      parseRemotePushObservation(failedProbe.stdout, [], { codexPluginList: true }).facts
+        .codexPluginList.status,
+    ).toBe("failed");
+  });
+
+  it("rejects malformed Codex plugin JSON, schema, IDs, and duplicate records", () => {
+    const query = { codexPluginList: true };
+    for (const raw of ["nope", "{}", '{"installed":[],"available":[{"pluginId":"bad id"}]}'])
+      expect(() =>
+        parseRemotePushObservation(envelope(`PLUGINS\tok\t${e(raw)}`), [], query),
+      ).toThrow();
+    expect(() =>
+      parseRemotePushObservation(envelope("PLUGINS\tmissing", "PLUGINS\tfailed"), [], query),
+    ).toThrow("Duplicate PLUGINS");
   });
 
   it("rejects non-canonical absolute paths and unsolicited or duplicate skills", () => {

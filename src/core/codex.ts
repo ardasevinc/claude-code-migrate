@@ -153,6 +153,7 @@ export async function rewriteCodexMarketplaceSources(
 export async function adaptCodexConfigForHost(
   rawConfig: string,
   pathExists: (path: string) => Promise<boolean>,
+  options: { removeUnresolvedRelativePaths?: boolean } = {},
 ): Promise<CodexHostAdaptation> {
   const parsed = parse(rawConfig) as unknown as CodexConfig;
   const changes: string[] = [];
@@ -163,7 +164,8 @@ export async function adaptCodexConfigForHost(
   if (
     typeof notifyCommand === "string" &&
     LOCAL_PATH_PATTERN.test(notifyCommand) &&
-    isClearlyNonPortableCodexPath(notifyCommand) &&
+    (isClearlyNonPortableCodexPath(notifyCommand) ||
+      (options.removeUnresolvedRelativePaths && isRelativeCodexPath(notifyCommand))) &&
     !(await pathExists(notifyCommand))
   ) {
     const nextContent = removeTopLevelTomlAssignment(content, "notify");
@@ -181,7 +183,8 @@ export async function adaptCodexConfigForHost(
     if (
       typeof command === "string" &&
       LOCAL_PATH_PATTERN.test(command) &&
-      isClearlyNonPortableCodexPath(command) &&
+      (isClearlyNonPortableCodexPath(command) ||
+        (options.removeUnresolvedRelativePaths && isRelativeCodexPath(command))) &&
       !(await pathExists(command))
     ) {
       const nextContent = removeTomlSectionTree(content, "mcp_servers", name);
@@ -277,6 +280,10 @@ function isClearlyNonPortableCodexPath(path: string): boolean {
     path.startsWith("/Users/") ||
     path.includes("/Codex Computer Use.app/")
   );
+}
+
+function isRelativeCodexPath(path: string): boolean {
+  return path.startsWith("~/") || path.startsWith("./") || path.startsWith("../");
 }
 
 function escapeRegExp(value: string): string {
