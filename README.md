@@ -69,6 +69,9 @@ bun add -g claude-code-migrate
 npm install -g claude-code-migrate
 ```
 
+ccm runs on Bun 1.3.14 or newer on macOS and Linux. npm is a supported installation channel;
+using `npm install` does not make the CLI compatible with the Node.js runtime.
+
 For local development from a checkout:
 
 ```bash
