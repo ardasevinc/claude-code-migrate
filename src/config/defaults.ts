@@ -19,4 +19,5 @@ export const DEFAULT_CONFIG: Config = {
   backup: {
     path: "~/backups/ccm",
   },
+  profiles: {},
 };

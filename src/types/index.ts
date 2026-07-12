@@ -21,6 +21,31 @@ export interface Config {
   backup: {
     path: string;
   };
+  profiles: Record<string, HostProfile>;
+}
+
+export type StructuredScalar = string | number | bigint | boolean | null | Date;
+export type StructuredValue =
+  | StructuredScalar
+  | StructuredValue[]
+  | { [key: string]: StructuredValue };
+
+export interface StructuredPatch {
+  unset?: string[];
+  set?: Record<string, StructuredValue>;
+}
+
+export interface HostProfile {
+  host: string;
+  claude_md?: string;
+  agents_md?: string;
+  claude?: {
+    settings?: StructuredPatch;
+  };
+  codex?: {
+    config?: StructuredPatch;
+    plugin_policies?: Record<string, CodexPluginPolicy>;
+  };
 }
 
 export type CodexPluginPolicyMode = "auto" | "always" | "never" | "preserve";

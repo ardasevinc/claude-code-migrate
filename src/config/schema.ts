@@ -27,4 +27,10 @@ enabled = true
 
 [backup]
 path = "~/backups/ccm"
+
+# Profiles are selected explicitly with ccm push --profile <name>.
+# [profiles.devbox]
+# host = "user@devbox"
+# claude_md = "profiles/devbox/CLAUDE.md"
+# agents_md = "profiles/devbox/AGENTS.md"
 `;

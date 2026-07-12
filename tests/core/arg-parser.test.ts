@@ -22,6 +22,7 @@ function makeConfig(enabled: ProviderName[]): Config {
       },
     },
     backup: { path: "~/backups/ccm" },
+    profiles: {},
   };
 }
 
