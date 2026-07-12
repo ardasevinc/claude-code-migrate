@@ -8,6 +8,7 @@ import {
   buildRemotePushObservationProbe,
   observeRemotePushTarget,
   parseRemotePushObservation,
+  PUSH_OBSERVATION_TIMEOUT_MS,
 } from "../../src/core/push-observation.ts";
 import { runProcess } from "../../src/utils/process.ts";
 
@@ -32,6 +33,9 @@ const envelope = (...records: string[]) =>
   ].join("\n");
 
 describe("remote push observation", () => {
+  it("allows a sixty-second managed-tree scan", () => {
+    expect(PUSH_OBSERVATION_TIMEOUT_MS).toBe(60_000);
+  });
   it("uses exactly one argv SSH transport call and does not invoke codex", async () => {
     const calls: unknown[][] = [];
     const observed = await observeRemotePushTarget({
@@ -74,12 +78,14 @@ describe("remote push observation", () => {
     const home = await mkdtemp(join(tmpdir(), "ccm-observe-mode-"));
     const dir = join(home, ".codex", "skills");
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, "executable"), "x", { mode: 0o710 });
+    await writeFile(join(dir, "special-only"), "x", { mode: 0o1400 });
+    await writeFile(join(dir, "special-executable"), "x", { mode: 0o1750 });
     await symlink("target\n\n", join(dir, "newline-link"));
     const probe = buildRemotePushObservationProbe([incoming("codex/skills/new")]);
     const result = await runProcess("sh", ["-c", probe], { env: { ...process.env, HOME: home } });
     const observed = parseRemotePushObservation(result.stdout, [incoming("codex/skills/new")]);
-    expect(observed.inventory.find((x) => x.path.endsWith("executable"))?.mode).toBe(0o755);
+    expect(observed.inventory.find((x) => x.path.endsWith("special-only"))?.mode).toBe(0o644);
+    expect(observed.inventory.find((x) => x.path.endsWith("special-executable"))?.mode).toBe(0o755);
     expect(observed.inventory.find((x) => x.path.endsWith("newline-link"))).toMatchObject({
       size: Buffer.byteLength("target\n\n"),
       sha256: createHash("sha256")

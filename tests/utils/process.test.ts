@@ -13,6 +13,15 @@ describe("process runner", () => {
     ).rejects.toThrow("timed out after 25ms");
     expect(Date.now() - started).toBeLessThan(1000);
   });
+  it("rejects a timed-out process even when its SIGTERM handler exits zero", async () => {
+    await expect(
+      runProcess(
+        process.execPath,
+        ["-e", "process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000)"],
+        { timeoutMs: 50 },
+      ),
+    ).rejects.toThrow("timed out after 50ms");
+  });
   it("executes an argv array without shell interpretation", async () => {
     const argument = "$(printf leaked); ' \" ; echo nope";
     const result = await runProcess(process.execPath, [

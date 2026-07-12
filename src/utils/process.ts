@@ -119,7 +119,9 @@ async function executeProcess(
       if (settled) return;
       settled = true;
 
-      if (result.exitCode === 0 && result.signal === null) {
+      if (result.error && !options.nothrow) {
+        reject(new ProcessError(command, result, cause));
+      } else if (result.exitCode === 0 && result.signal === null) {
         resolve(result);
       } else if (options.nothrow) {
         resolve(result);
