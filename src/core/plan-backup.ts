@@ -1,0 +1,155 @@
+import { createHash } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
+import type { FileEntry, ProviderName } from "../types/index.ts";
+import { BlockedError } from "../errors.ts";
+import { createArchive } from "./archiver.ts";
+import { readVerifiedArchive } from "./archiver.ts";
+import {
+  inventoryFingerprint,
+  inventoryFromFileEntries,
+  type InventoryEntry,
+} from "./inventory.ts";
+import {
+  createMigrationPlan,
+  fingerprint,
+  type EndpointRef,
+  type MigrationPlan,
+  type PlanFingerprint,
+} from "./migration-plan.ts";
+
+interface BackupPlanResources {
+  readonly files: readonly FileEntry[];
+  readonly outputPath: string;
+  readonly providers: readonly ProviderName[];
+  readonly force: boolean;
+}
+
+export interface PlannedBackup {
+  readonly plan: MigrationPlan;
+}
+
+export interface PlanBackupInput {
+  readonly files: readonly FileEntry[];
+  readonly outputPath: string;
+  readonly providers: readonly ProviderName[];
+  readonly force: boolean;
+  readonly createdAt?: string;
+}
+
+const resources = new WeakMap<PlannedBackup, BackupPlanResources>();
+
+function endpointRef(domain: string, value: string): EndpointRef {
+  return `endpoint_${createHash("sha256").update(`ccm:${domain}\0${value}`).digest("hex")}`;
+}
+
+async function targetFingerprint(path: string): Promise<PlanFingerprint> {
+  const stat = await lstat(path).catch(() => null);
+  if (!stat) return fingerprint("backup-target-v1", { exists: false });
+  if (!stat.isFile()) return fingerprint("backup-target-v1", { exists: true, type: "other" });
+  const bytes = await readFile(path);
+  return fingerprint("backup-target-v1", {
+    exists: true,
+    type: "file",
+    size: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+}
+
+export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup> {
+  const inventory = await inventoryFromFileEntries(input.files);
+  const sourceFingerprint = inventoryFingerprint(inventory);
+  const observedTarget = await targetFingerprint(input.outputPath);
+  const missingTarget = fingerprint("backup-target-v1", { exists: false });
+  const targetAvailable = input.force || observedTarget === missingTarget;
+  const plan = createMigrationPlan({
+    kind: "backup",
+    providers: input.providers,
+    executionModel: "local-atomic-publication",
+    sourceEndpointRef: endpointRef("backup-source", sourceFingerprint),
+    targetEndpointRef: endpointRef("backup-target", input.outputPath),
+    sourceFingerprint,
+    targetFingerprint: observedTarget,
+    stagedPostFingerprint: sourceFingerprint,
+    preconditions: [
+      {
+        id: "target-available",
+        required: true,
+        status: targetAvailable ? "satisfied" : "failed",
+        reasonCode: targetAvailable ? "target-available" : "target-exists",
+        expectedFingerprint: observedTarget,
+        observedFingerprint: observedTarget,
+      },
+    ],
+    actions: [
+      {
+        operation: "archive",
+        disposition: observedTarget === missingTarget ? "create" : "update",
+        phase: "commit",
+        scope: "shared",
+        sourceRef: "collected-managed-files",
+        targetRef: "local-backup-archive",
+        beforeFingerprint: observedTarget,
+        afterFingerprint: sourceFingerprint,
+        reversibility: "reversible",
+        policyProvenance: [input.force ? "force.cli" : "no-replace.default"],
+      },
+    ],
+    dependencies: [],
+    warnings: [],
+    policies: [
+      {
+        code: "archive-replacement",
+        valueCode: input.force ? "force" : "no-replace",
+        provenance: input.force ? "cli" : "default",
+      },
+    ],
+    createdAt: input.createdAt,
+  });
+  const planned = Object.freeze({ plan });
+  resources.set(planned, {
+    files: input.files.map((file) => Object.freeze({ ...file })),
+    outputPath: input.outputPath,
+    providers: [...input.providers],
+    force: input.force,
+  });
+  return planned;
+}
+
+function archiveInventory(
+  files: readonly { path: string; mode: number; size: number; sha256?: string }[],
+): readonly InventoryEntry[] {
+  return files.map((file) => {
+    if (!file.sha256) throw new BlockedError("Created archive does not provide payload hashes");
+    return {
+      path: file.path,
+      type: "file",
+      mode: (file.mode & 0o111) === 0 ? 0o644 : 0o755,
+      size: file.size,
+      sha256: file.sha256,
+    };
+  });
+}
+
+export async function executePlannedBackup(planned: PlannedBackup): Promise<string> {
+  const sealed = resources.get(planned);
+  if (!sealed) throw new BlockedError("Backup plan is not a sealed planner result");
+  if (planned.plan.status === "blocked") throw new BlockedError("Backup plan is blocked");
+  const sourceFingerprint = inventoryFingerprint(await inventoryFromFileEntries(sealed.files));
+  if (sourceFingerprint !== planned.plan.sourceFingerprint) {
+    throw new BlockedError("Backup source changed after planning");
+  }
+  const observedTarget = await targetFingerprint(sealed.outputPath);
+  if (observedTarget !== planned.plan.targetFingerprint) {
+    throw new BlockedError("Backup target changed after planning");
+  }
+  await createArchive([...sealed.files], sealed.outputPath, {
+    providers: [...sealed.providers],
+    force: sealed.force,
+  });
+  const archive = await readVerifiedArchive(sealed.outputPath);
+  const publishedFingerprint = inventoryFingerprint(archiveInventory(archive.files));
+  if (publishedFingerprint !== planned.plan.stagedPostFingerprint) {
+    throw new BlockedError("Published archive does not match the planned backup");
+  }
+  return sealed.outputPath;
+}

@@ -1,11 +1,11 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "../config/loader.ts";
-import { createArchive } from "../core/archiver.ts";
 import { getEnabledProviders, resolveBackupArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
+import { executePlannedBackup, planBackup } from "../core/plan-backup.ts";
 import { BlockedError, UsageError } from "../errors.ts";
-import type { BackupOptions } from "../types/index.ts";
+import type { BackupOptions, FileEntry } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 
 function expandPath(path: string): string {
@@ -52,33 +52,55 @@ export async function backupCommand(
     outputPath = join(backupDir, defaultFilename);
   }
 
-  const files = await collectFiles({
-    providers,
-    includeClaudeSettingsLocal: config.providers.claude.settings_local,
-    includeClaudeMcpConfig: config.providers.claude.mcp_config,
-    dryRun: options.dryRun,
-  });
+  const collect = () =>
+    collectFiles({
+      providers,
+      includeClaudeSettingsLocal: config.providers.claude.settings_local,
+      includeClaudeMcpConfig: config.providers.claude.mcp_config,
+      dryRun: options.dryRun,
+    });
+  let files: FileEntry[];
+  if (options.json) {
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    console.log = () => undefined;
+    console.warn = () => undefined;
+    try {
+      files = await collect();
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+    }
+  } else {
+    files = await collect();
+  }
 
   if (files.length === 0) {
     throw new BlockedError("No files to backup");
   }
 
-  if (options.dryRun) {
-    log.info(`Would create backup at: ${outputPath}`);
-    log.info(`Files to include (${files.length}):`);
+  const planned = await planBackup({ files, outputPath, providers, force: options.force });
 
-    for (const file of files) {
-      const symlinkNote = file.isSymlink ? ` (symlink -> ${file.originalSymlinkTarget})` : "";
-      const displayPath =
-        file.relativePath === "claude/.mcp-config.json"
-          ? "~/.claude.json (MCP)"
-          : file.relativePath;
-      log.file(displayPath, symlinkNote);
+  if (options.dryRun) {
+    if (options.json) {
+      console.log(JSON.stringify(planned.plan));
+      return;
     }
+    log.info(`Backup plan ${planned.plan.id} (${planned.plan.status})`);
+    log.info(`Files to include: ${files.length}`);
+
+    if (options.verbose)
+      for (const file of files) {
+        const displayPath =
+          file.relativePath === "claude/.mcp-config.json"
+            ? "~/.claude.json (MCP)"
+            : file.relativePath;
+        log.file(displayPath);
+      }
 
     return;
   }
 
-  await createArchive(files, outputPath, { providers, force: options.force });
+  await executePlannedBackup(planned);
   log.info(`Backup contains ${files.length} files`);
 }
