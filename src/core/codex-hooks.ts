@@ -57,7 +57,9 @@ export async function adaptCodexHooksForHost(
   rawConfig: string,
   targetHooksPath: string,
   resolveCommandPath: (binaryName: string) => Promise<string | null>,
+  options: { preserveVerifiedTrust?: boolean } = {},
 ): Promise<CodexHookAdaptation> {
+  const preserveVerifiedTrust = options.preserveVerifiedTrust ?? true;
   const hooksFile = JSON.parse(rawHooks) as HooksFile;
   const parsedConfig = parse(rawConfig) as unknown as CodexHookStateConfig;
   const states = parsedConfig.hooks?.state ?? {};
@@ -102,6 +104,7 @@ export async function adaptCodexHooksForHost(
         }
 
         if (
+          preserveVerifiedTrust &&
           sourceState.trusted_hash === originalHash &&
           !warnings.some((warning) =>
             warning.includes(`${eventName}[${groupIndex}].hooks[${handlerIndex}]`),

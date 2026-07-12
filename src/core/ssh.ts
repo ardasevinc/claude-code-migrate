@@ -287,6 +287,7 @@ async function adaptRemoteCodexHooks(
       );
       return result.exitCode === 0 ? result.stdout.trim() || null : null;
     },
+    { preserveVerifiedTrust: false },
   );
 
   for (const warning of adapted.warnings) {

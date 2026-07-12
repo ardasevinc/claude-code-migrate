@@ -234,6 +234,7 @@ export async function restoreArchive(
               }
               return null;
             },
+            { preserveVerifiedTrust: false },
           );
 
           for (const warning of hooksAdapted.warnings) {
