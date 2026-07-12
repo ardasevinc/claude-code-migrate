@@ -5,6 +5,7 @@ import { backupCommand } from "./commands/backup.ts";
 import { configCommand } from "./commands/config.ts";
 import { pushCommand } from "./commands/push.ts";
 import { restoreCommand } from "./commands/restore.ts";
+import { transactionsCommand } from "./commands/transactions.ts";
 
 export function createCli(): Command {
   const program = new Command();
@@ -62,6 +63,12 @@ export function createCli(): Command {
     .argument("<archive>", "Path to archive")
     .option("--json", "Print one JSON object", false)
     .action(verifyCommand);
+
+  program
+    .command("transactions")
+    .description("List durable local CCM transactions")
+    .option("--json", "Print one JSON object", false)
+    .action(transactionsCommand);
 
   program
     .command("restore")
