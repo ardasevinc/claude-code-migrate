@@ -146,8 +146,11 @@ export function overlayInventories(
 ): readonly InventoryOverlayEntry[] {
   const targetByPath = new Map(canonicalInventory(target).map((entry) => [entry.path, entry]));
   const incomingByPath = new Map(canonicalInventory(incoming).map((entry) => [entry.path, entry]));
-  const paths = [...new Set([...targetByPath.keys(), ...incomingByPath.keys()])].sort(bytesCompare);
-  return paths.map((path) => {
+  const combined = new Map(targetByPath);
+  for (const [path, entry] of incomingByPath) combined.set(path, entry);
+  const postInventory = canonicalInventory([...combined.values()]);
+  return postInventory.map((entry) => {
+    const path = entry.path;
     const before = targetByPath.get(path);
     const after = incomingByPath.get(path);
     if (after === undefined) return { entry: before as InventoryEntry, disposition: "preserve" };

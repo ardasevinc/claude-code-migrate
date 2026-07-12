@@ -127,6 +127,13 @@ describe("managed state inventory", () => {
     );
   });
 
+  it.each([
+    [[entry("codex/rules")], [entry("codex/rules/local.md")]],
+    [[entry("codex/rules/local.md")], [entry("codex/rules")]],
+  ])("rejects impossible parent-file overlays in either direction", (target, incoming) => {
+    expect(() => overlayInventories(target, incoming)).toThrow("file ancestor conflict");
+  });
+
   it("groups at managed action granularity and excludes anything callers omit", () => {
     const managed = [
       entry("codex/rules/a.md"),
