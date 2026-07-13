@@ -127,6 +127,10 @@ export interface PushExecutionAdapter {
       readonly binding: PushActionBinding;
     }[];
   }): Promise<PushExecutionSession>;
+  transportMetrics?(): {
+    readonly transferredBytes: number | null;
+    readonly reusedBytes: number | null;
+  };
 }
 export interface PushExecutionSession {
   apply(action: MigrationAction, binding: PushActionBinding): Promise<void>;
@@ -832,6 +836,9 @@ export async function executePlannedPush(
   let rollbackVerified = false;
   let failedEffects = false;
   let cleanupPending = false;
+  let transportMetrics:
+    | { readonly transferredBytes: number | null; readonly reusedBytes: number | null }
+    | undefined;
   let recoveryRequired = false;
   let receiptFinalizationError: unknown;
   const attemptedActions = new Set<string>();
@@ -1051,6 +1058,7 @@ export async function executePlannedPush(
     cleanupPending = true;
     failures.push(error);
   }
+  transportMetrics = adapter.transportMetrics?.();
   if (receipt && options.context) {
     const primary = failures[0];
     const outcome: Exclude<ExecutionReceiptOutcome, "started"> = completed
@@ -1082,6 +1090,12 @@ export async function executePlannedPush(
         ),
         ...(observed === undefined ? {} : { observedPostFingerprint: observed }),
         warnings: pushReceiptWarnings(primary, outcome, cleanupPending),
+        ...(transportMetrics?.transferredBytes == null
+          ? {}
+          : { transferredBytes: transportMetrics.transferredBytes }),
+        ...(transportMetrics?.reusedBytes == null
+          ? {}
+          : { reusedBytes: transportMetrics.reusedBytes }),
       });
     } catch (receiptError) {
       receiptFinalizationError = receiptError;

@@ -9,6 +9,7 @@ import {
   type ProcessResult,
   runInheritedProcess,
   runProcess,
+  runStreamingProcess,
 } from "../utils/process.ts";
 import { shellQuote } from "../utils/shell.ts";
 import type { InventoryEntry } from "./inventory.ts";
@@ -46,8 +47,14 @@ export interface PushSshTransport {
     localTree: string,
     host: string,
     remoteDirectory: string,
-    options?: { readonly linkDest?: string },
-  ): Promise<void>;
+    options?: { readonly linkDest?: string; readonly payloadBytes?: number },
+    // biome-ignore lint/suspicious/noConfusingVoidType: custom transports may omit optional measurements
+  ): Promise<PushTransportMetrics | void>;
+}
+
+export interface PushTransportMetrics {
+  readonly transferredBytes: number | null;
+  readonly reusedBytes: number | null;
 }
 
 const defaultTransport: PushSshTransport = {
@@ -67,12 +74,35 @@ const defaultTransport: PushSshTransport = {
     return (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
   },
   async syncTree(localTree, host, remoteDirectory, options = {}) {
-    await runInheritedProcess(
+    const result = await runStreamingProcess(
       "rsync",
       buildIncrementalRsyncArgs(localTree, `${host}:${remoteDirectory}`, options.linkDest),
+      { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024 },
     );
+    return parseRsyncTransportMetrics(`${result.stdout}\n${result.stderr}`, options.payloadBytes);
   },
 };
+
+export function parseRsyncTransportMetrics(
+  output: string,
+  payloadBytes: number | undefined,
+): PushTransportMetrics {
+  const matches = [
+    ...output.matchAll(/^(?:Literal data:\s*([0-9,]+) bytes|Unmatched data:\s*([0-9,]+) B)\r?$/gm),
+  ];
+  const match = matches.at(-1);
+  const raw = match?.[1] ?? match?.[2];
+  if (raw === undefined || payloadBytes === undefined)
+    return { transferredBytes: null, reusedBytes: null };
+  const transferredBytes = Number(raw.replaceAll(",", ""));
+  if (
+    !Number.isSafeInteger(transferredBytes) ||
+    transferredBytes < 0 ||
+    transferredBytes > payloadBytes
+  )
+    return { transferredBytes: null, reusedBytes: null };
+  return { transferredBytes, reusedBytes: payloadBytes - transferredBytes };
+}
 
 export function buildIncrementalRsyncArgs(
   localTree: string,
@@ -84,8 +114,9 @@ export function buildIncrementalRsyncArgs(
     "--delete",
     "--partial",
     "--partial-dir=.rsync-partial",
-    "--human-readable",
     "--progress",
+    "--stats",
+    "--exclude=/.ccm-manifest.json",
     ...(linkDest ? [`--link-dest=${linkDest}`] : []),
     `${localTree}/`,
     `${remoteDirectory}/`,
@@ -403,6 +434,10 @@ export function createSshPushExecutionAdapter(
   const transport = options.transport ?? defaultTransport;
   const helperPath = options.helperPath ?? HELPER_PATH;
   const mode = options.mode ?? "auto";
+  let transportMetrics: PushTransportMetrics = {
+    transferredBytes: null,
+    reusedBytes: null,
+  };
   if (mode !== "auto" && mode !== "rsync" && mode !== "archive")
     throw new BlockedError("Unknown push transport mode");
   const observe = async (
@@ -450,7 +485,9 @@ export function createSshPushExecutionAdapter(
   };
   return {
     observe,
+    transportMetrics: () => transportMetrics,
     async prepare(input) {
+      transportMetrics = { transferredBytes: null, reusedBytes: null };
       parseSshTarget(input.observationRequest.host);
       const { home, pythonPath } = validateObservation(input.observationRequest, input.observation);
       if (
@@ -525,6 +562,7 @@ export function createSshPushExecutionAdapter(
       let previousSnapshot: string | undefined;
       let snapshotSealed = false;
       let stagingRoot: string | undefined;
+      const payloadBytes = inventory.reduce((total, entry) => total + entry.size, 0);
       if (useIncremental) {
         const stagingCommand = `${shellQuote(pythonPath)} -I -B -c ${shellQuote(stagingBootstrapProgram())} ${shellQuote(home)} ${shellQuote(input.snapshotId as string)}`;
         let staged: ProcessResult;
@@ -621,17 +659,29 @@ export function createSshPushExecutionAdapter(
         try {
           await transport.upload(helperPath, host, join(workspace, "helper.py"), rsyncAvailable);
           if (useIncremental) {
-            if (!snapshotSealed)
-              await transport.syncTree?.(input.treePath as string, host, incomingPath as string, {
-                ...(previousSnapshot === undefined ? {} : { linkDest: previousSnapshot }),
-              });
-          } else
+            if (snapshotSealed)
+              transportMetrics = { transferredBytes: 0, reusedBytes: payloadBytes };
+            else {
+              const measured = await transport.syncTree?.(
+                input.treePath as string,
+                host,
+                incomingPath as string,
+                {
+                  ...(previousSnapshot === undefined ? {} : { linkDest: previousSnapshot }),
+                  payloadBytes,
+                },
+              );
+              transportMetrics = measured ?? { transferredBytes: null, reusedBytes: null };
+            }
+          } else {
             await transport.upload(
               input.archivePath,
               host,
               join(workspace, "archive.tar.gz"),
               rsyncAvailable,
             );
+            transportMetrics = { transferredBytes: input.archiveSize, reusedBytes: 0 };
+          }
           await transport.upload(
             manifestPath,
             host,

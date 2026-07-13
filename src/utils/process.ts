@@ -50,18 +50,27 @@ export async function runInheritedProcess(
   return executeProcess(command, args, options, "inherit");
 }
 
+/** Streams child output to this process while retaining only a bounded tail for parsing. */
+export async function runStreamingProcess(
+  command: string,
+  args: readonly string[] = [],
+  options: ProcessOptions = {},
+): Promise<ProcessResult> {
+  return executeProcess(command, args, options, "tee");
+}
+
 async function executeProcess(
   command: string,
   args: readonly string[],
   options: ProcessOptions,
-  stdio: "pipe" | "inherit",
+  stdio: "pipe" | "inherit" | "tee",
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       shell: false,
-      stdio,
+      stdio: stdio === "inherit" ? "inherit" : "pipe",
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -101,8 +110,19 @@ async function executeProcess(
           }, options.timeoutMs);
     timeout?.unref();
 
-    const capture = (chunks: Buffer[], chunk: Buffer) => {
+    const capture = (chunks: Buffer[], chunk: Buffer, stream: NodeJS.WriteStream) => {
       if (settled || bufferError) return;
+      if (stdio === "tee") {
+        stream.write(chunk);
+        chunks.push(chunk);
+        let tailBytes = chunks.reduce((total, item) => total + item.length, 0);
+        while (tailBytes > maxBuffer && chunks.length > 1) {
+          tailBytes -= chunks.shift()?.length ?? 0;
+        }
+        if (tailBytes > maxBuffer && chunks[0])
+          chunks[0] = chunks[0].subarray(chunks[0].length - maxBuffer);
+        return;
+      }
       bufferedBytes += chunk.length;
       if (bufferedBytes > maxBuffer) {
         bufferError = `output exceeded ${maxBuffer} byte buffer limit`;
@@ -112,8 +132,8 @@ async function executeProcess(
       chunks.push(chunk);
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk));
-    child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk));
+    child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk, process.stdout));
+    child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk, process.stderr));
 
     const finish = (result: ProcessResult, cause?: unknown) => {
       if (settled) return;

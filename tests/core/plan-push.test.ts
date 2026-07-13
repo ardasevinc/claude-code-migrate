@@ -248,6 +248,49 @@ describe("push migration planning", () => {
     }
   });
 
+  it("records measured transport bytes when preparation fails after transfer", async () => {
+    const receiptState = await receiptFixture();
+    try {
+      const target = observation();
+      const planned = await planPush({
+        files: [
+          {
+            sourcePath: "/unused/config",
+            relativePath: "codex/config.toml",
+            isSymlink: false,
+            mcpServersOnly: "model = 'test'\n",
+          },
+        ],
+        host: "target",
+        providers: ["codex"],
+        observation: target,
+      });
+      let metrics = { transferredBytes: null as number | null, reusedBytes: null as number | null };
+      await expect(
+        executePlannedPush(
+          planned,
+          {
+            observe: async (request) => ({ ...target, requestIdentity: request.requestIdentity }),
+            transportMetrics: () => metrics,
+            prepare: async () => {
+              metrics = { transferredBytes: 12, reusedBytes: 3 };
+              throw new Error("manifest upload failed");
+            },
+          },
+          { context: receiptState.context },
+        ),
+      ).rejects.toThrow("manifest upload failed");
+      expect(await receipts(receiptState)).toMatchObject([
+        {
+          outcome: "failed",
+          transport: { transferredBytes: 12, reusedBytes: 3 },
+        },
+      ]);
+    } finally {
+      await rm(receiptState.root, { recursive: true, force: true });
+    }
+  });
+
   it("blocks unresolved plugin effects instead of degrading to noop", async () => {
     const base = observation();
     const target = {
@@ -360,6 +403,7 @@ describe("push migration planning", () => {
     await executePlannedPush(
       planned,
       {
+        transportMetrics: () => ({ transferredBytes: 10, reusedBytes: 5 }),
         observe: async (request) => {
           observations += 1;
           if (observations === 1) return { ...target, requestIdentity: request.requestIdentity };
@@ -410,6 +454,7 @@ describe("push migration planning", () => {
       {
         outcome: "succeeded",
         observedPostFingerprint: planned.plan.stagedPostFingerprint,
+        transport: { transferredBytes: 10, reusedBytes: 5 },
       },
     ]);
 

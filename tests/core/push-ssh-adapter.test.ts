@@ -20,6 +20,7 @@ import {
   buildIncrementalRsyncArgs,
   createSshPushExecutionAdapter,
   type PushSshTransport,
+  parseRsyncTransportMetrics,
 } from "../../src/core/push-ssh-adapter.ts";
 import { BlockedError, ConnectivityError, ExecutionError } from "../../src/errors.ts";
 import { cleanupInterruptResources } from "../../src/utils/interrupt-cleanup.ts";
@@ -120,6 +121,35 @@ describe("SSH remote push helper adapter", () => {
   const helperOp = (command: string): string | undefined =>
     helperRequest(command)?.op as string | undefined;
 
+  it("parses GNU and openrsync payload metrics without guessing malformed output", () => {
+    expect(parseRsyncTransportMetrics("Literal data: 1,024 bytes", 4096)).toEqual({
+      transferredBytes: 1024,
+      reusedBytes: 3072,
+    });
+    expect(parseRsyncTransportMetrics("Unmatched data: 512 B", 4096)).toEqual({
+      transferredBytes: 512,
+      reusedBytes: 3584,
+    });
+    expect(parseRsyncTransportMetrics("Total sent: 99 B", 4096)).toEqual({
+      transferredBytes: null,
+      reusedBytes: null,
+    });
+    expect(parseRsyncTransportMetrics("Literal data: 4097 bytes", 4096)).toEqual({
+      transferredBytes: null,
+      reusedBytes: null,
+    });
+    expect(
+      parseRsyncTransportMetrics(
+        "Literal data: 0 bytes\n       7 100%\nLiteral data: 7 bytes\n",
+        7,
+      ),
+    ).toEqual({ transferredBytes: 7, reusedBytes: 0 });
+    expect(parseRsyncTransportMetrics("codex/rules/Literal data: 0 bytes\n", 7)).toEqual({
+      transferredBytes: null,
+      reusedBytes: null,
+    });
+  });
+
   it("uses a real rsync link-dest as the previous sealed snapshot", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-real-rsync-")));
     roots.push(root);
@@ -130,10 +160,20 @@ describe("SSH remote push helper adapter", () => {
     await Promise.all([
       writeFile(join(source, "unchanged"), "same"),
       writeFile(join(source, "changed"), "before"),
+      writeFile(join(source, ".ccm-manifest.json"), "descriptor bytes are not transport payload"),
     ]);
-    await runProcess("rsync", buildIncrementalRsyncArgs(source, previous));
+    const initial = await runProcess("rsync", buildIncrementalRsyncArgs(source, previous));
+    expect(parseRsyncTransportMetrics(initial.stdout, 10)).toEqual({
+      transferredBytes: 10,
+      reusedBytes: 0,
+    });
+    expect(await lstat(join(previous, ".ccm-manifest.json")).catch(() => null)).toBeNull();
     await writeFile(join(source, "changed"), "after");
-    await runProcess("rsync", buildIncrementalRsyncArgs(source, incoming, previous));
+    const delta = await runProcess("rsync", buildIncrementalRsyncArgs(source, incoming, previous));
+    expect(parseRsyncTransportMetrics(delta.stdout, 9)).toEqual({
+      transferredBytes: 5,
+      reusedBytes: 4,
+    });
     expect((await stat(join(incoming, "unchanged"))).ino).toBe(
       (await stat(join(previous, "unchanged"))).ino,
     );
@@ -168,10 +208,11 @@ describe("SSH remote push helper adapter", () => {
         throw new Error("archive mode must not probe local rsync");
       },
     };
-    const session = await createSshPushExecutionAdapter({
+    const archiveAdapter = createSshPushExecutionAdapter({
       transport: archiveTransport,
       mode: "archive",
-    }).prepare({
+    });
+    const session = await archiveAdapter.prepare({
       archivePath: f.archive,
       archiveSha256: f.sha,
       archiveSize: f.archiveSize,
@@ -180,10 +221,42 @@ describe("SSH remote push helper adapter", () => {
       observation: f.observation,
       actions: [{ action: f.action, binding: f.binding }],
     });
+    expect(archiveAdapter.transportMetrics?.()).toEqual({
+      transferredBytes: f.archiveSize,
+      reusedBytes: 0,
+    });
     await session.abort();
     await session.verifyRollback();
     await session.cleanup();
     expect(f.uploads.some((path) => path.endsWith("archive.tar.gz"))).toBe(true);
+  });
+
+  it("retains archive payload metrics when a later manifest upload fails", async () => {
+    const f = await fixture();
+    const transport: PushSshTransport = {
+      ...f.transport,
+      async upload(path, host, remotePath, useRsync) {
+        if (remotePath.endsWith("manifest.json")) throw new Error("manifest upload failed");
+        await f.transport.upload(path, host, remotePath, useRsync);
+      },
+    };
+    const adapter = createSshPushExecutionAdapter({ transport, mode: "archive" });
+
+    await expect(
+      adapter.prepare({
+        archivePath: f.archive,
+        archiveSha256: f.sha,
+        archiveSize: f.archiveSize,
+        stagedInventory: f.stagedInventory,
+        observationRequest: f.request,
+        observation: f.observation,
+        actions: [{ action: f.action, binding: f.binding }],
+      }),
+    ).rejects.toThrow("Remote push upload failed");
+    expect(adapter.transportMetrics?.()).toEqual({
+      transferredBytes: f.archiveSize,
+      reusedBytes: 0,
+    });
   });
 
   it("imports a sealed incremental tree without uploading the archive", async () => {
@@ -204,9 +277,13 @@ describe("SSH remote push helper adapter", () => {
         syncCalls += 1;
         linkDests.push(options?.linkDest);
         await cp(localTree, remoteDirectory, { recursive: true, force: true });
+        return options?.linkDest
+          ? { transferredBytes: 5, reusedBytes: 0 }
+          : { transferredBytes: 3, reusedBytes: 0 };
       },
     };
-    const session = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+    const adapter = createSshPushExecutionAdapter({ transport, mode: "rsync" });
+    const session = await adapter.prepare({
       archivePath: f.archive,
       archiveSha256: f.sha,
       archiveSize: f.archiveSize,
@@ -217,6 +294,7 @@ describe("SSH remote push helper adapter", () => {
       observation: f.observation,
       actions: [{ action: f.action, binding: f.binding }],
     });
+    expect(adapter.transportMetrics?.()).toEqual({ transferredBytes: 3, reusedBytes: 0 });
     await session.apply(f.action, f.binding);
     await session.commit();
     await session.verifyCommit();
@@ -231,7 +309,8 @@ describe("SSH remote push helper adapter", () => {
     const current = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).observe(
       f.request,
     );
-    const repeated = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+    const repeatedAdapter = createSshPushExecutionAdapter({ transport, mode: "rsync" });
+    const repeated = await repeatedAdapter.prepare({
       archivePath: f.archive,
       archiveSha256: f.sha,
       archiveSize: f.archiveSize,
@@ -242,6 +321,7 @@ describe("SSH remote push helper adapter", () => {
       observation: current,
       actions: [{ action: f.action, binding: f.binding }],
     });
+    expect(repeatedAdapter.transportMetrics?.()).toEqual({ transferredBytes: 0, reusedBytes: 3 });
     await repeated.abort();
     await repeated.verifyRollback();
     await repeated.cleanup();
@@ -259,7 +339,8 @@ describe("SSH remote push helper adapter", () => {
       },
     ];
     const changedId = "d".repeat(64);
-    const changed = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+    const changedAdapter = createSshPushExecutionAdapter({ transport, mode: "rsync" });
+    const changed = await changedAdapter.prepare({
       archivePath: f.archive,
       archiveSha256: f.sha,
       archiveSize: f.archiveSize,
@@ -269,6 +350,10 @@ describe("SSH remote push helper adapter", () => {
       observationRequest: f.request,
       observation: current,
       actions: [{ action: f.action, binding: f.binding }],
+    });
+    expect(changedAdapter.transportMetrics?.()).toEqual({
+      transferredBytes: 5,
+      reusedBytes: 0,
     });
     await changed.apply(f.action, f.binding);
     await changed.commit();
@@ -318,9 +403,12 @@ describe("SSH remote push helper adapter", () => {
     const incoming = join(f.home, ".cache/ccm/staging/v1/incoming", snapshotId);
     expect(await readFile(join(incoming, ".partial-canary"), "utf8")).toBe("partial");
     interrupt = false;
-    const session = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare(
-      input,
-    );
+    const retryAdapter = createSshPushExecutionAdapter({ transport, mode: "rsync" });
+    const session = await retryAdapter.prepare(input);
+    expect(retryAdapter.transportMetrics?.()).toEqual({
+      transferredBytes: null,
+      reusedBytes: null,
+    });
     await session.abort();
     await session.verifyRollback();
     await session.cleanup();

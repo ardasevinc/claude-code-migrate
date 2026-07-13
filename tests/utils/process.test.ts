@@ -2,8 +2,13 @@ import { spawn } from "node:child_process";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { ProcessError, runInheritedProcess, runProcess } from "../../src/utils/process.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+  ProcessError,
+  runInheritedProcess,
+  runProcess,
+  runStreamingProcess,
+} from "../../src/utils/process.ts";
 
 describe("process runner", () => {
   it("terminates a process after timeoutMs", async () => {
@@ -86,6 +91,22 @@ describe("process runner", () => {
     const result = await runInheritedProcess(process.execPath, ["-e", "process.exit(0)"]);
 
     expect(result).toEqual({ stdout: "", stderr: "", exitCode: 0, signal: null });
+  });
+
+  it("retains a bounded output tail while streaming", async () => {
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    let result: Awaited<ReturnType<typeof runStreamingProcess>> | undefined;
+    try {
+      result = await runStreamingProcess(
+        process.execPath,
+        ["-e", "process.stdout.write('12345')"],
+        { maxBuffer: 4 },
+      );
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(result).toEqual({ stdout: "2345", stderr: "", exitCode: 0, signal: null });
   });
 
   it("rejects captured output above the configured limit", async () => {
