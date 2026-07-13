@@ -42,6 +42,12 @@ export interface PushSshTransport {
   ): Promise<ProcessResult>;
   upload(localPath: string, host: string, remotePath: string, useRsync: boolean): Promise<void>;
   hasLocalRsync(): Promise<boolean>;
+  syncTree?(
+    localTree: string,
+    host: string,
+    remoteDirectory: string,
+    options?: { readonly linkDest?: string },
+  ): Promise<void>;
 }
 
 const defaultTransport: PushSshTransport = {
@@ -60,7 +66,33 @@ const defaultTransport: PushSshTransport = {
   async hasLocalRsync() {
     return (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
   },
+  async syncTree(localTree, host, remoteDirectory, options = {}) {
+    await runInheritedProcess(
+      "rsync",
+      buildIncrementalRsyncArgs(localTree, `${host}:${remoteDirectory}`, options.linkDest),
+    );
+  },
 };
+
+export function buildIncrementalRsyncArgs(
+  localTree: string,
+  remoteDirectory: string,
+  linkDest?: string,
+): string[] {
+  return [
+    "--archive",
+    "--delete",
+    "--partial",
+    "--partial-dir=.rsync-partial",
+    "--human-readable",
+    "--progress",
+    ...(linkDest ? [`--link-dest=${linkDest}`] : []),
+    `${localTree}/`,
+    `${remoteDirectory}/`,
+  ];
+}
+
+export type PushTransportMode = "auto" | "rsync" | "archive";
 
 type Canonical =
   | null
@@ -126,6 +158,13 @@ function safeWorkspace(path: string): string {
   return path;
 }
 
+function safeRemoteTransportPath(path: unknown, label: string): string {
+  const validated = safeAbsolute(path, label);
+  if (!/^\/[A-Za-z0-9._+@/-]+$/.test(validated))
+    throw new ExecutionError(`Remote ${label} is unsafe for transport framing`);
+  return validated;
+}
+
 function bootstrapProgram(): string {
   return [
     "import json,os,stat,tempfile",
@@ -182,6 +221,64 @@ function bootstrapCleanupProgram(): string {
     "assert (before.st_dev,before.st_ino)==(current.st_dev,current.st_ino)",
     "shutil.rmtree(w)",
   ].join(";");
+}
+
+function stagingBootstrapProgram(): string {
+  return [
+    "import fcntl,json,os,stat,sys",
+    "home=sys.argv[1]",
+    "snapshot=sys.argv[2]",
+    "assert len(snapshot)==64 and all(c in '0123456789abcdef' for c in snapshot)",
+    "assert os.path.realpath(home)==home",
+    "cache=os.environ.get('XDG_CACHE_HOME')",
+    "if not cache or not os.path.isabs(cache): cache=os.path.join(home,'.cache')",
+    "os.makedirs(cache,mode=0o700,exist_ok=True)",
+    "cache_info=os.lstat(cache)",
+    "assert os.path.realpath(cache)==cache and stat.S_ISDIR(cache_info.st_mode) and not stat.S_ISLNK(cache_info.st_mode) and cache_info.st_uid==os.geteuid()",
+    "current=cache",
+    "parts=['ccm','staging','v1']",
+    "for part in parts:",
+    " current=os.path.join(current,part)",
+    " os.makedirs(current,mode=0o700,exist_ok=True)",
+    " info=os.lstat(current)",
+    " assert stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)&0o077==0",
+    "base=current",
+    "lock_path=os.path.join(base,'.incoming.lock')",
+    "lock_fd=os.open(lock_path,os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),0o600)",
+    "lock_info=os.fstat(lock_fd)",
+    "assert stat.S_ISREG(lock_info.st_mode) and lock_info.st_uid==os.geteuid() and stat.S_IMODE(lock_info.st_mode)==0o600",
+    "fcntl.flock(lock_fd,fcntl.LOCK_EX)",
+    "incoming_root=os.path.join(base,'incoming')",
+    "ready_root=os.path.join(base,'ready')",
+    "for root in (incoming_root,ready_root):",
+    " os.makedirs(root,mode=0o700,exist_ok=True)",
+    " info=os.lstat(root)",
+    " assert stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)&0o077==0",
+    "ready=os.path.join(ready_root,snapshot)",
+    "sealed=os.path.isdir(ready) and not os.path.islink(ready)",
+    "incoming=os.path.join(incoming_root,snapshot)",
+    "incoming_names=[]",
+    "for name in os.listdir(incoming_root):",
+    " assert len(name)==64 and all(c in '0123456789abcdef' for c in name)",
+    " path=os.path.join(incoming_root,name)",
+    " info=os.lstat(path)",
+    " assert stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)&0o077==0",
+    " incoming_names.append(name)",
+    "if not sealed and snapshot not in incoming_names and len(incoming_names)>=4:",
+    " print(json.dumps({'error':'incoming-retention-full'},sort_keys=True,separators=(',',':')))",
+    " sys.exit(75)",
+    "if not sealed: os.makedirs(incoming,mode=0o700,exist_ok=True)",
+    "fcntl.flock(lock_fd,fcntl.LOCK_UN)",
+    "os.close(lock_fd)",
+    "candidates=[]",
+    "for name in os.listdir(ready_root):",
+    " if len(name)==64 and all(c in '0123456789abcdef' for c in name) and name!=snapshot:",
+    "  path=os.path.join(ready_root,name)",
+    "  info=os.lstat(path)",
+    "  if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode): candidates.append((info.st_mtime_ns,path))",
+    "previous=max(candidates)[1] if candidates else None",
+    "print(json.dumps({'incoming':ready if sealed else incoming,'previous':previous,'root':base,'sealed':sealed},sort_keys=True,separators=(',',':')))",
+  ].join("\n");
 }
 
 function canonicalResponse(stdout: string): Record<string, unknown> {
@@ -301,10 +398,13 @@ function manifestAction(input: {
 }
 
 export function createSshPushExecutionAdapter(
-  options: { transport?: PushSshTransport; helperPath?: string } = {},
+  options: { transport?: PushSshTransport; helperPath?: string; mode?: PushTransportMode } = {},
 ): PushExecutionAdapter {
   const transport = options.transport ?? defaultTransport;
   const helperPath = options.helperPath ?? HELPER_PATH;
+  const mode = options.mode ?? "auto";
+  if (mode !== "auto" && mode !== "rsync" && mode !== "archive")
+    throw new BlockedError("Unknown push transport mode");
   const observe = async (
     request: PushExecutionObservationRequest,
     observeOptions: { readonly mutationStarted?: boolean } = {},
@@ -394,6 +494,77 @@ export function createSshPushExecutionAdapter(
       }
 
       const host = input.observationRequest.host;
+      let rsyncAvailable = false;
+      if (mode !== "archive") {
+        const [localRsync, remoteRsync] = await Promise.all([
+          transport.hasLocalRsync(),
+          transport.run(host, "command -v rsync", {
+            nothrow: true,
+            quiet: true,
+            maxBuffer: 1024,
+            timeout: HELPER_TIMEOUT_MS,
+          }),
+        ]);
+        if (isConnectivityResult(remoteRsync))
+          throw new ConnectivityError("Remote rsync capability probe failed");
+        if (remoteRsync.exitCode !== 0 && remoteRsync.exitCode !== 1)
+          throw new ExecutionError("Remote rsync capability probe returned an invalid status");
+        if (
+          remoteRsync.exitCode === 0 &&
+          !/^\/[A-Za-z0-9._+@/-]*\/rsync\n$/.test(remoteRsync.stdout)
+        )
+          throw new ExecutionError("Remote rsync capability probe returned an invalid path");
+        rsyncAvailable = localRsync && remoteRsync.exitCode === 0;
+      }
+      if (mode === "rsync" && !rsyncAvailable)
+        throw new BlockedError("Rsync transport was requested but is unavailable");
+      const useIncremental = mode !== "archive" && rsyncAvailable;
+      if (useIncremental && (!input.treePath || !input.snapshotId || !transport.syncTree))
+        throw new BlockedError("Incremental transport requires a sealed staged tree");
+      let incomingPath: string | undefined;
+      let previousSnapshot: string | undefined;
+      let snapshotSealed = false;
+      let stagingRoot: string | undefined;
+      if (useIncremental) {
+        const stagingCommand = `${shellQuote(pythonPath)} -I -B -c ${shellQuote(stagingBootstrapProgram())} ${shellQuote(home)} ${shellQuote(input.snapshotId as string)}`;
+        let staged: ProcessResult;
+        try {
+          staged = await transport.run(host, stagingCommand, {
+            nothrow: true,
+            quiet: true,
+            maxBuffer: HELPER_RESPONSE_BYTES,
+            timeout: HELPER_TIMEOUT_MS,
+          });
+        } catch (error) {
+          throw transportError(error, "Remote incremental staging bootstrap", false);
+        }
+        if (isConnectivityResult(staged))
+          throw new ConnectivityError("Remote incremental staging bootstrap transport failed");
+        if (staged.exitCode === 75 && staged.stdout === '{"error":"incoming-retention-full"}\n')
+          throw new BlockedError(
+            "Incremental incoming retention is full; retry an existing snapshot or remove stale CCM staging",
+          );
+        if (staged.exitCode !== 0)
+          throw new ExecutionError(
+            `Remote incremental staging bootstrap failed (${staged.exitCode})`,
+          );
+        const descriptor = canonicalResponse(staged.stdout);
+        if (
+          Object.keys(descriptor).length !== 4 ||
+          typeof descriptor.incoming !== "string" ||
+          typeof descriptor.root !== "string" ||
+          typeof descriptor.sealed !== "boolean" ||
+          (descriptor.previous !== null && typeof descriptor.previous !== "string")
+        )
+          throw new ExecutionError("Invalid remote incremental staging descriptor");
+        incomingPath = safeRemoteTransportPath(descriptor.incoming, "incoming snapshot");
+        stagingRoot = safeRemoteTransportPath(descriptor.root, "staging root");
+        previousSnapshot =
+          descriptor.previous === null
+            ? undefined
+            : safeRemoteTransportPath(descriptor.previous, "previous snapshot");
+        snapshotSealed = descriptor.sealed;
+      }
       let workspace: string;
       try {
         const created = await runChecked(
@@ -428,33 +599,45 @@ export function createSshPushExecutionAdapter(
         const token = randomBytes(32).toString("hex");
         const manifest = {
           actions,
-          archiveSha256: input.archiveSha256,
+          ...(useIncremental
+            ? {
+                incomingPath: incomingPath as string,
+                inventory,
+                snapshotId: input.snapshotId as string,
+                stagingRoot: stagingRoot as string,
+                transport: "rsync",
+              }
+            : { archiveSha256: input.archiveSha256, transport: "archive" }),
           effects,
           home,
           token,
         } as const;
-        const manifestBytes = canonical(manifest);
+        const manifestBytes = canonical(manifest as unknown as Canonical);
         if (Buffer.byteLength(manifestBytes) > MAX_MANIFEST_BYTES)
           throw new BlockedError("Remote push manifest exceeds limit");
         const localRoot = await mkdtemp(join("/tmp", "ccm-push-manifest-"));
         const manifestPath = join(localRoot, "manifest.json");
         await writeFile(manifestPath, manifestBytes, { mode: 0o600 });
         try {
-          const remoteRsync = await transport.run(host, "command -v rsync", {
-            nothrow: true,
-            quiet: true,
-            maxBuffer: 1024,
-            timeout: HELPER_TIMEOUT_MS,
-          });
-          const useRsync = (await transport.hasLocalRsync()) && remoteRsync.exitCode === 0;
-          await transport.upload(helperPath, host, join(workspace, "helper.py"), useRsync);
+          await transport.upload(helperPath, host, join(workspace, "helper.py"), rsyncAvailable);
+          if (useIncremental) {
+            if (!snapshotSealed)
+              await transport.syncTree?.(input.treePath as string, host, incomingPath as string, {
+                ...(previousSnapshot === undefined ? {} : { linkDest: previousSnapshot }),
+              });
+          } else
+            await transport.upload(
+              input.archivePath,
+              host,
+              join(workspace, "archive.tar.gz"),
+              rsyncAvailable,
+            );
           await transport.upload(
-            input.archivePath,
+            manifestPath,
             host,
-            join(workspace, "archive.tar.gz"),
-            useRsync,
+            join(workspace, "manifest.json"),
+            rsyncAvailable,
           );
-          await transport.upload(manifestPath, host, join(workspace, "manifest.json"), useRsync);
         } catch (error) {
           throw transportError(error, "Remote push upload failed", false);
         } finally {

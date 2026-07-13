@@ -117,6 +117,8 @@ export interface PushExecutionAdapter {
     readonly archivePath: string;
     readonly archiveSha256: string;
     readonly archiveSize: number;
+    readonly treePath?: string;
+    readonly snapshotId?: string;
     readonly stagedInventory: readonly InventoryEntry[];
     readonly observationRequest: PushExecutionObservationRequest;
     readonly observation: PushTargetObservation;
@@ -885,6 +887,8 @@ export async function executePlannedPush(
         archivePath: staged.archivePath,
         archiveSha256: staged.archiveSha256,
         archiveSize: staged.archiveSize,
+        treePath: staged.treePath,
+        snapshotId: staged.snapshotId,
         stagedInventory: resource.stagedIncoming,
         observationRequest: resource.beforeRequest,
         observation: observed,

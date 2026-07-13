@@ -18,6 +18,13 @@ export async function pushCommand(
   arg2: string | undefined,
   options: PushOptions,
 ): Promise<void> {
+  if (
+    options.transport !== undefined &&
+    options.transport !== "auto" &&
+    options.transport !== "rsync" &&
+    options.transport !== "archive"
+  )
+    throw new UsageError("--transport must be auto, rsync, or archive");
   if (options.json && !options.dryRun) {
     throw new UsageError("--json currently requires --dry-run");
   }
@@ -116,7 +123,7 @@ export async function pushCommand(
     providers,
     policyOverrides,
   });
-  const adapter = createSshPushExecutionAdapter();
+  const adapter = createSshPushExecutionAdapter({ mode: options.transport ?? "auto" });
   const observation = await adapter.observe(preparedRequest);
   const planned = await planPush({
     files,

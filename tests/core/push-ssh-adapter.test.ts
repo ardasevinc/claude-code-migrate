@@ -5,20 +5,23 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BlockedError, ConnectivityError, ExecutionError } from "../../src/errors.ts";
+import { pushObservationRequestIdentity } from "../../src/core/push-observation-request.ts";
 import {
+  buildIncrementalRsyncArgs,
   createSshPushExecutionAdapter,
   type PushSshTransport,
 } from "../../src/core/push-ssh-adapter.ts";
-import { pushObservationRequestIdentity } from "../../src/core/push-observation-request.ts";
+import { BlockedError, ConnectivityError, ExecutionError } from "../../src/errors.ts";
 import { cleanupInterruptResources } from "../../src/utils/interrupt-cleanup.ts";
 import { runProcess } from "../../src/utils/process.ts";
 
@@ -27,11 +30,12 @@ afterEach(async () =>
   Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))),
 );
 
-async function fixture() {
+async function fixture(options: { readonly externalCache?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-ssh-adapter-")));
   roots.push(root);
   const home = join(root, "home");
   const source = join(root, "source");
+  const cacheHome = options.externalCache ? join(root, "xdg-cache") : join(home, ".cache");
   await mkdir(join(home, ".codex", "rules"), { recursive: true, mode: 0o700 });
   await mkdir(join(source, "codex", "rules"), { recursive: true });
   await writeFile(join(home, ".codex", "rules", "preserved.md"), "keep");
@@ -48,6 +52,7 @@ async function fixture() {
         env: {
           ...process.env,
           HOME: home,
+          XDG_CACHE_HOME: cacheHome,
           PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
         },
         nothrow: options.nothrow,
@@ -85,6 +90,8 @@ async function fixture() {
   const binding = { kind: "overlay-group" as const, logicalGroup: "codex/rules" };
   return {
     home,
+    cacheHome,
+    source,
     archive,
     archiveSize,
     sha: createHash("sha256").update(bytes).digest("hex"),
@@ -112,6 +119,290 @@ describe("SSH remote push helper adapter", () => {
   };
   const helperOp = (command: string): string | undefined =>
     helperRequest(command)?.op as string | undefined;
+
+  it("uses a real rsync link-dest as the previous sealed snapshot", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-real-rsync-")));
+    roots.push(root);
+    const source = join(root, "source");
+    const previous = join(root, "previous");
+    const incoming = join(root, "incoming");
+    await Promise.all([source, previous, incoming].map((path) => mkdir(path)));
+    await Promise.all([
+      writeFile(join(source, "unchanged"), "same"),
+      writeFile(join(source, "changed"), "before"),
+    ]);
+    await runProcess("rsync", buildIncrementalRsyncArgs(source, previous));
+    await writeFile(join(source, "changed"), "after");
+    await runProcess("rsync", buildIncrementalRsyncArgs(source, incoming, previous));
+    expect((await stat(join(incoming, "unchanged"))).ino).toBe(
+      (await stat(join(previous, "unchanged"))).ino,
+    );
+    expect((await stat(join(incoming, "changed"))).ino).not.toBe(
+      (await stat(join(previous, "changed"))).ino,
+    );
+  });
+
+  it("keeps archive fallback explicit and refuses unavailable forced rsync", async () => {
+    const f = await fixture();
+    await expect(
+      createSshPushExecutionAdapter({ transport: f.transport, mode: "rsync" }).prepare({
+        archivePath: f.archive,
+        archiveSha256: f.sha,
+        archiveSize: f.archiveSize,
+        treePath: f.source,
+        snapshotId: "a".repeat(64),
+        stagedInventory: f.stagedInventory,
+        observationRequest: f.request,
+        observation: f.observation,
+        actions: [{ action: f.action, binding: f.binding }],
+      }),
+    ).rejects.toThrow("requested but is unavailable");
+
+    const archiveTransport: PushSshTransport = {
+      ...f.transport,
+      async run(host, command, options) {
+        if (command === "command -v rsync") throw new Error("archive mode must not probe rsync");
+        return f.transport.run(host, command, options);
+      },
+      async hasLocalRsync() {
+        throw new Error("archive mode must not probe local rsync");
+      },
+    };
+    const session = await createSshPushExecutionAdapter({
+      transport: archiveTransport,
+      mode: "archive",
+    }).prepare({
+      archivePath: f.archive,
+      archiveSha256: f.sha,
+      archiveSize: f.archiveSize,
+      stagedInventory: f.stagedInventory,
+      observationRequest: f.request,
+      observation: f.observation,
+      actions: [{ action: f.action, binding: f.binding }],
+    });
+    await session.abort();
+    await session.verifyRollback();
+    await session.cleanup();
+    expect(f.uploads.some((path) => path.endsWith("archive.tar.gz"))).toBe(true);
+  });
+
+  it("imports a sealed incremental tree without uploading the archive", async () => {
+    const f = await fixture({ externalCache: true });
+    let syncCalls = 0;
+    const linkDests: Array<string | undefined> = [];
+    const transport: PushSshTransport = {
+      ...f.transport,
+      async run(host, command, options) {
+        if (command === "command -v rsync")
+          return { stdout: "/usr/bin/rsync\n", stderr: "", exitCode: 0, signal: null };
+        return f.transport.run(host, command, options);
+      },
+      async hasLocalRsync() {
+        return true;
+      },
+      async syncTree(localTree, _host, remoteDirectory, options) {
+        syncCalls += 1;
+        linkDests.push(options?.linkDest);
+        await cp(localTree, remoteDirectory, { recursive: true, force: true });
+      },
+    };
+    const session = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+      archivePath: f.archive,
+      archiveSha256: f.sha,
+      archiveSize: f.archiveSize,
+      treePath: f.source,
+      snapshotId: "a".repeat(64),
+      stagedInventory: f.stagedInventory,
+      observationRequest: f.request,
+      observation: f.observation,
+      actions: [{ action: f.action, binding: f.binding }],
+    });
+    await session.apply(f.action, f.binding);
+    await session.commit();
+    await session.verifyCommit();
+    await session.cleanup();
+    expect(f.uploads.some((path) => path.endsWith("archive.tar.gz"))).toBe(false);
+    expect(await readFile(join(f.home, ".codex/rules/incoming.md"), "utf8")).toBe("new");
+    const snapshotId = "a".repeat(64);
+    expect(await lstat(join(f.cacheHome, "ccm/staging/v1/ready", snapshotId))).toBeTruthy();
+    expect(
+      await lstat(join(f.cacheHome, "ccm/staging/v1/incoming", snapshotId)).catch(() => null),
+    ).toBeNull();
+    const current = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).observe(
+      f.request,
+    );
+    const repeated = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+      archivePath: f.archive,
+      archiveSha256: f.sha,
+      archiveSize: f.archiveSize,
+      treePath: f.source,
+      snapshotId,
+      stagedInventory: f.stagedInventory,
+      observationRequest: f.request,
+      observation: current,
+      actions: [{ action: f.action, binding: f.binding }],
+    });
+    await repeated.abort();
+    await repeated.verifyRollback();
+    await repeated.cleanup();
+    expect(syncCalls).toBe(1);
+    expect(f.uploads.some((path) => path.endsWith("archive.tar.gz"))).toBe(false);
+
+    await writeFile(join(f.source, "codex/rules/incoming.md"), "newer");
+    const changedInventory = [
+      {
+        path: "codex/rules/incoming.md",
+        type: "file" as const,
+        mode: 0o644 as const,
+        size: 5,
+        sha256: createHash("sha256").update("newer").digest("hex"),
+      },
+    ];
+    const changedId = "d".repeat(64);
+    const changed = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+      archivePath: f.archive,
+      archiveSha256: f.sha,
+      archiveSize: f.archiveSize,
+      treePath: f.source,
+      snapshotId: changedId,
+      stagedInventory: changedInventory,
+      observationRequest: f.request,
+      observation: current,
+      actions: [{ action: f.action, binding: f.binding }],
+    });
+    await changed.apply(f.action, f.binding);
+    await changed.commit();
+    await changed.verifyCommit();
+    await changed.cleanup();
+    expect(linkDests).toEqual([undefined, join(f.cacheHome, "ccm/staging/v1/ready", snapshotId)]);
+    expect(await readFile(join(f.home, ".codex/rules/incoming.md"), "utf8")).toBe("newer");
+  });
+
+  it("preserves an interrupted incoming snapshot for an exact retry", async () => {
+    const f = await fixture();
+    const snapshotId = "b".repeat(64);
+    let interrupt = true;
+    const transport: PushSshTransport = {
+      ...f.transport,
+      async run(host, command, options) {
+        if (command === "command -v rsync")
+          return { stdout: "/usr/bin/rsync\n", stderr: "", exitCode: 0, signal: null };
+        return f.transport.run(host, command, options);
+      },
+      async hasLocalRsync() {
+        return true;
+      },
+      async syncTree(localTree, _host, remoteDirectory) {
+        if (interrupt) {
+          await writeFile(join(remoteDirectory, ".partial-canary"), "partial");
+          throw new ConnectivityError("interrupted rsync");
+        }
+        await rm(remoteDirectory, { recursive: true, force: true });
+        await cp(localTree, remoteDirectory, { recursive: true, force: true });
+      },
+    };
+    const input = {
+      archivePath: f.archive,
+      archiveSha256: f.sha,
+      archiveSize: f.archiveSize,
+      treePath: f.source,
+      snapshotId,
+      stagedInventory: f.stagedInventory,
+      observationRequest: f.request,
+      observation: f.observation,
+      actions: [{ action: f.action, binding: f.binding }],
+    };
+    await expect(
+      createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare(input),
+    ).rejects.toBeInstanceOf(ConnectivityError);
+    const incoming = join(f.home, ".cache/ccm/staging/v1/incoming", snapshotId);
+    expect(await readFile(join(incoming, ".partial-canary"), "utf8")).toBe("partial");
+    interrupt = false;
+    const session = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare(
+      input,
+    );
+    await session.abort();
+    await session.verifyRollback();
+    await session.cleanup();
+    expect(await lstat(incoming).catch(() => null)).toBeNull();
+    expect(await lstat(join(f.home, ".cache/ccm/staging/v1/ready", snapshotId))).toBeTruthy();
+  });
+
+  it("rejects an incremental tree with unsealed extra material before live mutation", async () => {
+    const f = await fixture();
+    await writeFile(join(f.source, "codex/rules/extra.md"), "not sealed");
+    const transport: PushSshTransport = {
+      ...f.transport,
+      async run(host, command, options) {
+        if (command === "command -v rsync")
+          return { stdout: "/usr/bin/rsync\n", stderr: "", exitCode: 0, signal: null };
+        return f.transport.run(host, command, options);
+      },
+      async hasLocalRsync() {
+        return true;
+      },
+      async syncTree(localTree, _host, remoteDirectory) {
+        await cp(localTree, remoteDirectory, { recursive: true, force: true });
+      },
+    };
+    await expect(
+      createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+        archivePath: f.archive,
+        archiveSha256: f.sha,
+        archiveSize: f.archiveSize,
+        treePath: f.source,
+        snapshotId: "c".repeat(64),
+        stagedInventory: f.stagedInventory,
+        observationRequest: f.request,
+        observation: f.observation,
+        actions: [{ action: f.action, binding: f.binding }],
+      }),
+    ).rejects.toThrow("incremental snapshot does not match sealed inventory");
+    expect(await readFile(join(f.home, ".codex/rules/preserved.md"), "utf8")).toBe("keep");
+    expect(await lstat(join(f.home, ".codex/rules/incoming.md")).catch(() => null)).toBeNull();
+  });
+
+  it("bounds distinct interrupted incoming snapshots", async () => {
+    const f = await fixture();
+    const transport: PushSshTransport = {
+      ...f.transport,
+      async run(host, command, options) {
+        if (command === "command -v rsync")
+          return { stdout: "/usr/bin/rsync\n", stderr: "", exitCode: 0, signal: null };
+        return f.transport.run(host, command, options);
+      },
+      async hasLocalRsync() {
+        return true;
+      },
+      async syncTree(_localTree, _host, remoteDirectory) {
+        await writeFile(join(remoteDirectory, ".partial"), "partial");
+        throw new ConnectivityError("interrupted rsync");
+      },
+    };
+    const prepare = (snapshotId: string) =>
+      createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+        archivePath: f.archive,
+        archiveSha256: f.sha,
+        archiveSize: f.archiveSize,
+        treePath: f.source,
+        snapshotId,
+        stagedInventory: f.stagedInventory,
+        observationRequest: f.request,
+        observation: f.observation,
+        actions: [{ action: f.action, binding: f.binding }],
+      });
+    const results = await Promise.allSettled(
+      ["1", "2", "3", "4", "5"].map((marker) => prepare(marker.repeat(64))),
+    );
+    const errors = results.map((result) =>
+      result.status === "rejected" ? result.reason : new Error("prepare unexpectedly succeeded"),
+    );
+    expect(errors.filter((error) => error instanceof ConnectivityError)).toHaveLength(4);
+    expect(errors.filter((error) => error instanceof BlockedError)).toMatchObject([
+      { message: expect.stringContaining("retention is full") },
+    ]);
+    expect(await readdir(join(f.home, ".cache/ccm/staging/v1/incoming"))).toHaveLength(4);
+  });
 
   it("uploads the fixed protocol files and commits a real helper transaction", async () => {
     const f = await fixture();

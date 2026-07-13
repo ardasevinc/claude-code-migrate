@@ -1015,6 +1015,171 @@ def extract_archive(workspace_fd, expected):
         os.close(archive_fd)
 
 
+def expected_incremental_inventory(value):
+    if not isinstance(value, list) or len(value) > MAX_ARCHIVE_MEMBERS:
+        fail("invalid incremental inventory")
+    result = []
+    seen = set()
+    total = 0
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"mode", "path", "sha256", "size", "type"}:
+            fail("invalid incremental inventory entry")
+        path = entry.get("path")
+        parts = path.split("/") if isinstance(path, str) else []
+        size = entry.get("size")
+        checksum = entry.get("sha256")
+        if (not parts or len(parts) > MAX_PATH_DEPTH or len(path.encode("utf-8")) > MAX_PATH_BYTES or
+                not all(safe_component(part) for part in parts) or path in seen or
+                entry.get("type") != "file" or entry.get("mode") not in (0o644, 0o755) or
+                not isinstance(size, int) or isinstance(size, bool) or size < 0 or size > MAX_MEMBER_BYTES or
+                not isinstance(checksum, str) or len(checksum) != 64 or
+                any(c not in "0123456789abcdef" for c in checksum)):
+            fail("invalid incremental inventory entry")
+        total += size
+        if total > MAX_DECOMPRESSED_BYTES:
+            fail("incremental inventory exceeds size limit")
+        seen.add(path)
+        result.append(entry)
+    return sorted(result, key=lambda item: item["path"])
+
+
+def inventory_incremental_tree(root_fd, prefix=""):
+    result = []
+    for name in sorted(os.listdir(root_fd)):
+        check_cancelled()
+        if not safe_component(name) or (not prefix and name == ".rsync-partial"):
+            fail("unsafe incremental entry")
+        logical = name if not prefix else prefix + "/" + name
+        if not prefix and name == ".ccm-manifest.json":
+            continue
+        st = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if stat.S_ISDIR(st.st_mode):
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+            try:
+                if not same_object(st, os.fstat(child)):
+                    fail("incremental directory changed")
+                result.extend(inventory_incremental_tree(child, logical))
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(st.st_mode):
+            source = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+            try:
+                current = os.fstat(source)
+                mode = stat.S_IMODE(current.st_mode)
+                if not same_object(st, current) or mode not in (0o644, 0o755) or current.st_size > MAX_MEMBER_BYTES:
+                    fail("unsafe incremental file")
+                result.append({"mode": mode, "path": logical, "sha256": hash_fd(source, MAX_MEMBER_BYTES),
+                               "size": current.st_size, "type": "file"})
+            finally:
+                os.close(source)
+        else:
+            fail("unsupported incremental entry")
+    return sorted(result, key=lambda item: item["path"])
+
+
+def open_private_staging_root(path):
+    if (not isinstance(path, str) or not os.path.isabs(path) or os.path.realpath(path) != path):
+        fail("invalid incremental staging root")
+    before = os.lstat(path)
+    root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    current = os.fstat(root_fd)
+    if (not same_object(before, current) or not stat.S_ISDIR(current.st_mode) or
+            current.st_uid != os.geteuid() or stat.S_IMODE(current.st_mode) & 0o077):
+        os.close(root_fd)
+        fail("unsafe incremental staging root")
+    return root_fd
+
+
+def import_incremental_tree(workspace_fd, home_fd, manifest):
+    snapshot_id = manifest.get("snapshotId")
+    incoming_path = manifest.get("incomingPath")
+    staging_root = manifest.get("stagingRoot")
+    expected = expected_incremental_inventory(manifest.get("inventory"))
+    if (not isinstance(snapshot_id, str) or len(snapshot_id) != 64 or
+            any(c not in "0123456789abcdef" for c in snapshot_id)):
+        fail("invalid incremental snapshot id")
+    if not isinstance(staging_root, str):
+        fail("invalid incremental staging root")
+    incoming_expected = staging_root + "/incoming/" + snapshot_id
+    ready_expected = staging_root + "/ready/" + snapshot_id
+    if incoming_path not in (incoming_expected, ready_expected):
+        fail("incremental snapshot path mismatch")
+    source_kind = "ready" if incoming_path == ready_expected else "incoming"
+    staging_fd = open_private_staging_root(staging_root)
+    incoming_fd = descend(staging_fd, [source_kind, snapshot_id])
+    published = False
+    try:
+        if inventory_incremental_tree(incoming_fd) != expected:
+            fail("incremental snapshot does not match sealed inventory")
+        os.mkdir("extract", 0o700, dir_fd=workspace_fd)
+        extract_fd = descend(workspace_fd, ["extract"])
+        try:
+            snapshot_directory(incoming_fd, extract_fd)
+            os.fsync(extract_fd)
+            if inventory_incremental_tree(extract_fd) != expected:
+                fail("imported incremental snapshot changed")
+            if source_kind == "incoming":
+                publish_ready_snapshot(staging_fd, extract_fd, snapshot_id, expected)
+                published = True
+        finally:
+            os.close(extract_fd)
+        return expected
+    finally:
+        os.close(incoming_fd)
+        if source_kind == "incoming" and published:
+            incoming_parent = descend(staging_fd, ["incoming"])
+            try:
+                remove_tree_at(incoming_parent, snapshot_id, cancellable=False)
+                os.fsync(incoming_parent)
+            finally:
+                os.close(incoming_parent)
+        os.close(staging_fd)
+
+
+def publish_ready_snapshot(staging_fd, extract_fd, snapshot_id, expected):
+    ready = descend(staging_fd, ["ready"], create=True)
+    temporary = "." + snapshot_id + ".tmp"
+    try:
+        try:
+            existing = os.stat(snapshot_id, dir_fd=ready, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is None:
+            try:
+                remove_tree_at(ready, temporary, cancellable=False)
+            except FileNotFoundError:
+                pass
+            os.mkdir(temporary, 0o700, dir_fd=ready)
+            output = descend(ready, [temporary])
+            try:
+                snapshot_directory(extract_fd, output)
+                os.fsync(output)
+                if inventory_incremental_tree(output) != expected:
+                    fail("ready incremental snapshot changed during publication")
+            finally:
+                os.close(output)
+            os.rename(temporary, snapshot_id, src_dir_fd=ready, dst_dir_fd=ready)
+            os.fsync(ready)
+        elif not stat.S_ISDIR(existing.st_mode):
+            fail("ready incremental snapshot has unsafe type")
+        candidates = []
+        for name in os.listdir(ready):
+            if len(name) != 64 or any(c not in "0123456789abcdef" for c in name):
+                continue
+            info = os.stat(name, dir_fd=ready, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                candidates.append((info.st_mtime_ns, name))
+        for _mtime, name in sorted(candidates, reverse=True)[2:]:
+            remove_tree_at(ready, name, cancellable=False)
+        os.fsync(ready)
+    finally:
+        try:
+            remove_tree_at(ready, temporary, cancellable=False)
+        except FileNotFoundError:
+            pass
+        os.close(ready)
+
+
 def snapshot(home_fd, parts, backups_fd, backup_name):
     try:
         parent = descend(home_fd, parts[:-1]) if parts[:-1] else os.dup(home_fd)
@@ -1291,7 +1456,13 @@ def prepare(req, workspace_fd):
         lock_acquired = True
         secret = create_transaction_state(home_fd, token)
         transaction_state_created = True
-        extract_inventory = extract_archive(workspace_fd, manifest.get("archiveSha256"))
+        transport = manifest.get("transport", "archive")
+        if transport == "archive":
+            extract_inventory = extract_archive(workspace_fd, manifest.get("archiveSha256"))
+        elif transport == "rsync":
+            extract_inventory = import_incremental_tree(workspace_fd, home_fd, manifest)
+        else:
+            fail("invalid transaction transport")
         os.mkdir("backups", 0o700, dir_fd=workspace_fd)
         backups_fd = descend(workspace_fd, ["backups"])
         seen = set()

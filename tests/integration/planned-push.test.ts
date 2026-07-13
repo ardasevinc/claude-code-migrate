@@ -122,6 +122,13 @@ describe("planned remote push", () => {
       expect(
         commands.some(
           ({ command, args }) =>
+            (command === "scp" || command === "rsync") &&
+            args.some((argument) => argument.includes("archive.tar.gz")),
+        ),
+      ).toBe(false);
+      expect(
+        commands.some(
+          ({ command, args }) =>
             command === "ssh" && args.some((argument) => argument.includes("tar -xzf")),
         ),
       ).toBe(false);
@@ -135,6 +142,16 @@ describe("planned remote push", () => {
         result.stdout.indexOf("Successfully pushed config"),
       );
       expect(result.stdout).toContain("Successfully pushed config to operator@example.test");
+
+      const transferCount = commands.filter(
+        ({ command }) => command === "scp" || command === "rsync",
+      ).length;
+      const repeated = await runCcm(["push", "codex", "operator@example.test"], machine);
+      expect(repeated.exitCode, repeated.stderr).toBe(0);
+      const repeatedCommands = await readCommandLog(machine);
+      expect(
+        repeatedCommands.filter(({ command }) => command === "scp" || command === "rsync"),
+      ).toHaveLength(transferCount);
     } finally {
       await machine.dispose();
     }

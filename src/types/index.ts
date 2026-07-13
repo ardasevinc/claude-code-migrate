@@ -145,6 +145,7 @@ export interface PushOptions {
   providers?: string;
   all?: boolean;
   verbose?: boolean;
+  transport?: "auto" | "rsync" | "archive";
 }
 
 export interface BackupOptions {

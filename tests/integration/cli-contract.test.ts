@@ -52,4 +52,18 @@ describe("CCM subprocess contract", () => {
       await machine.dispose();
     }
   });
+
+  it("rejects an unknown push transport before filesystem or SSH work", async () => {
+    const machine = await createFakeMachine();
+    try {
+      const result = await runCcm(
+        ["push", "codex", "operator@example.test", "--transport", "telepathy"],
+        machine,
+      );
+      expect(result).toMatchObject({ exitCode: 2, stdout: "" });
+      expect(result.stderr.trim()).toBe("--transport must be auto, rsync, or archive");
+    } finally {
+      await machine.dispose();
+    }
+  });
 });
