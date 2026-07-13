@@ -6,9 +6,9 @@ import { BlockedError, ConnectivityError, ExecutionError } from "../errors.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import {
   ProcessError,
+  type ProcessResult,
   runInheritedProcess,
   runProcess,
-  type ProcessResult,
 } from "../utils/process.ts";
 import { shellQuote } from "../utils/shell.ts";
 import type { InventoryEntry } from "./inventory.ts";
@@ -16,13 +16,13 @@ import { canonicalInventory } from "./inventory.ts";
 import type {
   PushActionBinding,
   PushExecutionAdapter,
-  PushExecutionSession,
   PushExecutionObservationRequest,
+  PushExecutionSession,
 } from "./plan-push.ts";
 import {
   observeRemotePushTarget,
-  pushStateFingerprint,
   type PushTargetObservation,
+  pushStateFingerprint,
 } from "./push-observation.ts";
 import { pushObservationRequestIdentity } from "./push-observation-request.ts";
 import { buildArchiveUploadArgs } from "./ssh.ts";
@@ -649,6 +649,8 @@ export function createSshPushExecutionAdapter(
             });
           }
         }
+        if (prepareMayHaveMutated)
+          throw new ExecutionError("Remote push preparation requires recovery", { cause: error });
         throw error;
       }
     },

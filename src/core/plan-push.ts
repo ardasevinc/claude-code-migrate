@@ -1,50 +1,60 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { ExecutionError } from "../errors.ts";
+import type { RuntimeContext } from "../runtime/context.ts";
 import type { CodexPluginPolicy, FileEntry, ProviderName } from "../types/index.ts";
 import { projectCodexMarketplaceAvailability } from "./codex-marketplace-projection.ts";
 import {
+  type ExecutionReceipt,
+  type ExecutionReceiptAction,
+  type ExecutionReceiptOutcome,
+  finishExecutionReceipt,
+  ReceiptPublicationAmbiguousError,
+  reconcileExecutionReceiptPublication,
+  startExecutionReceipt,
+} from "./execution-receipt.ts";
+import {
   canonicalInventory,
   groupManagedTopLevelEntries,
+  type InventoryEntry,
   inventoryFingerprint,
   inventoryFromFileEntries,
   overlayInventories,
   overlayInventory,
   symlinkInventoryEntry,
-  type InventoryEntry,
 } from "./inventory.ts";
 import {
   createMigrationPlan,
   deriveActionId,
-  fingerprint,
   type EndpointRef,
-  type MigrationActionInput,
+  fingerprint,
   type MigrationAction,
+  type MigrationActionInput,
   type MigrationPlan,
   type PlanDependency,
   type PlanFingerprint,
 } from "./migration-plan.ts";
 import {
-  pushStateFingerprint,
   type PushObservationQueries,
   type PushTargetObservation,
+  pushStateFingerprint,
 } from "./push-observation.ts";
-import { transformPushInputs, type PushTransformInputs } from "./push-transforms.ts";
 import {
+  type PreparedPushObservationRequest,
   preparePushObservationRequest,
   pushObservationRequestIdentity,
-  type PreparedPushObservationRequest,
 } from "./push-observation-request.ts";
-import {
-  sealPushSourceBindings,
-  stagePushArchive,
-  type SealedPushSourceBindings,
-} from "./push-staging.ts";
 import {
   applyResolvedCodexProfile,
   type ResolvedPushProfile,
   verifyPushProfileAssets,
 } from "./push-profile.ts";
+import {
+  type SealedPushSourceBindings,
+  sealPushSourceBindings,
+  stagePushArchive,
+} from "./push-staging.ts";
+import { type PushTransformInputs, transformPushInputs } from "./push-transforms.ts";
 
 export interface PlanPushInput {
   readonly files: readonly FileEntry[];
@@ -759,6 +769,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
 export async function executePlannedPush(
   planned: PlannedPush,
   adapter: PushExecutionAdapter,
+  options: { readonly context?: RuntimeContext } = {},
 ): Promise<void> {
   const resource = resources.get(planned);
   if (!resource) throw new Error("Push plan is forged or already consumed");
@@ -814,6 +825,15 @@ export async function executePlannedPush(
   let committed = false;
   let completed = false;
   let mutationStarted = false;
+  let receipt: ExecutionReceipt | undefined;
+  let observedPostFingerprint: PlanFingerprint | undefined;
+  let rollbackVerified = false;
+  let failedEffects = false;
+  let cleanupPending = false;
+  let recoveryRequired = false;
+  let receiptFinalizationError: unknown;
+  const attemptedActions = new Set<string>();
+  const completedActions = new Set<string>();
   try {
     const observed = await adapter.observe(resource.beforeRequest);
     if (
@@ -821,6 +841,27 @@ export async function executePlannedPush(
       pushStateFingerprint(observed) !== planned.plan.targetFingerprint
     )
       throw new Error("Push target changed after planning");
+    if (planned.plan.status !== "noop" && options.context) {
+      try {
+        receipt = await startExecutionReceipt(options.context, planned.plan, {
+          filesystemPostFingerprint: resource.filesystemPostFingerprint,
+        });
+      } catch (error) {
+        if (!(error instanceof ReceiptPublicationAmbiguousError)) throw error;
+        try {
+          receipt = await reconcileExecutionReceiptPublication(options.context, error.receiptId);
+          if (receipt.outcome !== "started" || receipt.planId !== planned.plan.id)
+            throw new Error("Ambiguous push receipt does not match the execution plan");
+        } catch (readError) {
+          throw new ExecutionError("Push receipt creation outcome could not be reconciled", {
+            cause: new AggregateError([error, readError]),
+          });
+        }
+      }
+      for (const action of planned.plan.actions)
+        if (action.phase === "materialize" && action.disposition !== "unchanged")
+          completedActions.add(action.id);
+    }
     const changedRemote = planned.plan.actions.some(
       (action) =>
         action.phase !== "materialize" &&
@@ -872,7 +913,11 @@ export async function executePlannedPush(
         mutationStarted = true;
       }
       if (!session) throw new Error("Push execution session was not prepared");
-      if (binding.kind !== "plugin-add") await session.apply(action, binding);
+      if (binding.kind !== "plugin-add") {
+        attemptedActions.add(action.id);
+        await session.apply(action, binding);
+        completedActions.add(action.id);
+      }
       consumed.add(action.id);
     }
     if (consumed.size !== resource.actionBindings.size)
@@ -881,53 +926,83 @@ export async function executePlannedPush(
       (action) => resource.actionBindings.get(action.id)?.kind === "plugin-add",
     );
     const filesystemFinal = await adapter.observe(resource.finalRequest, { mutationStarted: true });
-    if (
-      filesystemFinal.requestIdentity !== resource.finalRequest.requestIdentity ||
-      pushStateFingerprint(filesystemFinal) !== resource.filesystemPostFingerprint
-    )
+    if (filesystemFinal.requestIdentity !== resource.finalRequest.requestIdentity)
+      throw new ExecutionError("Push filesystem observation does not match its request");
+    observedPostFingerprint = pushStateFingerprint(filesystemFinal);
+    if (observedPostFingerprint !== resource.filesystemPostFingerprint)
       throw new ExecutionError("Push filesystem target does not match the planned post-state");
     await session?.commit();
     committed = session !== undefined;
     for (const action of effectActions) {
       const binding = resource.actionBindings.get(action.id);
       if (binding?.kind === "plugin-add") {
+        attemptedActions.add(action.id);
         try {
           await session?.applyEffect(action, binding);
+          completedActions.add(action.id);
         } catch (error) {
-          throw new ExecutionError("committed_with_failed_effects", { cause: error });
+          observedPostFingerprint = undefined;
+          if (error instanceof ExecutionError && error.message === "committed_with_failed_effects")
+            throw error;
+          throw new ExecutionError("committed_effect_recovery_required", { cause: error });
         }
       }
     }
+    observedPostFingerprint = undefined;
     const final = await adapter.observe(resource.finalRequest, { mutationStarted: true });
-    if (
-      final.requestIdentity !== resource.finalRequest.requestIdentity ||
-      pushStateFingerprint(final) !== planned.plan.stagedPostFingerprint
-    )
+    if (final.requestIdentity !== resource.finalRequest.requestIdentity)
+      throw new ExecutionError("Push final observation does not match its request");
+    observedPostFingerprint = pushStateFingerprint(final);
+    if (observedPostFingerprint !== planned.plan.stagedPostFingerprint)
       throw new ExecutionError("Push target does not match the planned post-state");
     await session?.verifyCommit();
     resources.delete(planned);
     completed = true;
   } catch (error) {
     failures.push(error);
+    if (
+      !session &&
+      error instanceof ExecutionError &&
+      error.message === "Remote push preparation requires recovery"
+    ) {
+      recoveryRequired = true;
+      resources.delete(planned);
+    }
     committed ||= session?.isCommitted() === true;
     if (committed) {
       const message =
         error instanceof ExecutionError && error.message === "committed_with_failed_effects"
           ? "committed_with_failed_effects"
-          : error instanceof ExecutionError && error.message.includes("retention_cleanup_pending")
-            ? "committed_with_retention_cleanup_pending"
-            : "committed_verification_failed";
+          : error instanceof ExecutionError &&
+              error.message === "committed_effect_recovery_required"
+            ? "committed_effect_recovery_required"
+            : error instanceof ExecutionError && error.message.includes("retention_cleanup_pending")
+              ? "committed_with_retention_cleanup_pending"
+              : "committed_verification_failed";
       failures[0] = new ExecutionError(message, { cause: error });
       if (message === "committed_with_failed_effects" && session) {
+        failedEffects = true;
+        observedPostFingerprint = undefined;
         try {
           await session.acknowledgeFailedEffects();
+          try {
+            const partial = await adapter.observe(resource.finalRequest, {
+              mutationStarted: true,
+            });
+            if (partial.requestIdentity === resource.finalRequest.requestIdentity)
+              observedPostFingerprint = pushStateFingerprint(partial);
+          } catch {
+            // The helper terminal state is known even when target observation is unavailable.
+          }
           await session.verifyCommit();
           await session.cleanup();
         } catch (recoveryError) {
+          cleanupPending = true;
           failures.push(recoveryError);
         }
       }
       session = undefined;
+      if (message !== "committed_with_failed_effects") recoveryRequired = true;
     } else if (session) {
       if (mutationStarted && !(failures[0] instanceof ExecutionError))
         failures[0] = new ExecutionError("Push execution failed after mutation started", {
@@ -938,19 +1013,22 @@ export async function executePlannedPush(
       } catch (recoveryError) {
         failures.push(recoveryError);
         session = undefined;
+        recoveryRequired = true;
       }
       if (session) {
         try {
           const restored = await adapter.observe(resource.beforeRequest, { mutationStarted: true });
-          if (
-            restored.requestIdentity !== resource.beforeRequest.requestIdentity ||
-            pushStateFingerprint(restored) !== planned.plan.targetFingerprint
-          )
+          if (restored.requestIdentity !== resource.beforeRequest.requestIdentity)
+            throw new ExecutionError("Rollback observation does not match its request");
+          observedPostFingerprint = pushStateFingerprint(restored);
+          if (observedPostFingerprint !== planned.plan.targetFingerprint)
             throw new ExecutionError("Rollback did not restore the planned target state");
           await session.verifyRollback();
+          rollbackVerified = true;
         } catch (recoveryError) {
           failures.push(recoveryError);
           session = undefined;
+          recoveryRequired = true;
         }
       }
     }
@@ -959,13 +1037,60 @@ export async function executePlannedPush(
     try {
       await session.cleanup();
     } catch (error) {
+      cleanupPending = true;
       failures.push(error);
     }
   }
   try {
     await staged?.cleanup();
   } catch (error) {
+    cleanupPending = true;
     failures.push(error);
+  }
+  if (receipt && options.context) {
+    const primary = failures[0];
+    const outcome: Exclude<ExecutionReceiptOutcome, "started"> = completed
+      ? "succeeded"
+      : failedEffects
+        ? "committed_with_failed_effects"
+        : recoveryRequired
+          ? "recovery_required"
+          : rollbackVerified
+            ? "rolled_back"
+            : "failed";
+    const observed =
+      outcome === "rolled_back"
+        ? planned.plan.targetFingerprint
+        : outcome === "succeeded"
+          ? planned.plan.stagedPostFingerprint
+          : observedPostFingerprint;
+    try {
+      await finishExecutionReceipt(options.context, receipt, {
+        outcome,
+        finishedAt: options.context.now(),
+        actions: pushReceiptActions(
+          receipt,
+          resource,
+          outcome,
+          attemptedActions,
+          completedActions,
+          committed,
+        ),
+        ...(observed === undefined ? {} : { observedPostFingerprint: observed }),
+        warnings: pushReceiptWarnings(primary, outcome, cleanupPending),
+      });
+    } catch (receiptError) {
+      receiptFinalizationError = receiptError;
+    }
+  }
+  if (receiptFinalizationError !== undefined) {
+    if (failures.length === 0)
+      throw new ExecutionError("Push reached a terminal state but receipt publication failed", {
+        cause: receiptFinalizationError,
+      });
+    throw new ExecutionError("Push failed and receipt finalization also failed", {
+      cause: new AggregateError([...failures, receiptFinalizationError]),
+    });
   }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1)
@@ -973,4 +1098,45 @@ export async function executePlannedPush(
       cause: new AggregateError(failures),
     });
   if (!completed) throw new ExecutionError("Push did not reach a terminal outcome");
+}
+
+function pushReceiptActions(
+  receipt: ExecutionReceipt,
+  resource: PushPlanResources,
+  outcome: Exclude<ExecutionReceiptOutcome, "started">,
+  attempted: ReadonlySet<string>,
+  completed: ReadonlySet<string>,
+  committed: boolean,
+): ExecutionReceiptAction[] {
+  return receipt.actions.map((action) => {
+    if (action.outcome === "skipped") return action;
+    if (outcome === "succeeded") return { ...action, outcome: "succeeded" };
+    const binding = resource.actionBindings.get(action.id);
+    if (completed.has(action.id)) {
+      const localMaterialization =
+        binding?.kind === "materialize-codex" || binding?.kind === "materialize-claude-mcp";
+      if (outcome === "recovery_required" && !committed && !localMaterialization)
+        return { ...action, outcome: "unknown" };
+      return { ...action, outcome: committed || localMaterialization ? "succeeded" : "failed" };
+    }
+    if (attempted.has(action.id))
+      return { ...action, outcome: outcome === "recovery_required" ? "unknown" : "failed" };
+    return { ...action, outcome: "skipped" };
+  });
+}
+
+function pushReceiptWarnings(
+  error: unknown,
+  outcome: Exclude<ExecutionReceiptOutcome, "started">,
+  cleanupPending: boolean,
+): string[] {
+  const warnings: string[] = [];
+  if (outcome === "committed_with_failed_effects") warnings.push("committed-with-failed-effects");
+  if (outcome === "recovery_required") warnings.push("recovery-required");
+  if (cleanupPending) warnings.push("terminal-cleanup-pending");
+  if (error instanceof ExecutionError && error.message.includes("retention_cleanup_pending"))
+    warnings.push("retention-cleanup-pending");
+  if (error instanceof ExecutionError && error.message.includes("verification"))
+    warnings.push("terminal-verification-failed");
+  return warnings;
 }

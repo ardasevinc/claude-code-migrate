@@ -27,7 +27,7 @@ export interface ExecutionReceiptAction {
   readonly id: string;
   readonly operation: ActionOperation;
   readonly scope: "claude" | "codex" | "shared";
-  readonly outcome: "pending" | "succeeded" | "skipped" | "failed";
+  readonly outcome: "pending" | "succeeded" | "skipped" | "failed" | "unknown";
   readonly durationMs?: number;
 }
 
@@ -44,6 +44,7 @@ export interface ExecutionReceipt {
   readonly sourceFingerprint: string;
   readonly targetFingerprint: string;
   readonly plannedPostFingerprint: string;
+  readonly filesystemPostFingerprint?: string;
   readonly observedPostFingerprint?: string;
   readonly startedAt: string;
   readonly finishedAt?: string;
@@ -86,6 +87,7 @@ const RECEIPT_ID = /^rcpt_[a-f0-9]{32}$/;
 export async function startExecutionReceipt(
   context: RuntimeContext,
   plan: MigrationPlan,
+  options: { readonly filesystemPostFingerprint?: string } = {},
 ): Promise<ExecutionReceipt> {
   if (plan.kind !== "push" && plan.kind !== "restore")
     throw new Error("Only mutating plans can create execution receipts");
@@ -102,6 +104,9 @@ export async function startExecutionReceipt(
     sourceFingerprint: plan.sourceFingerprint,
     targetFingerprint: plan.targetFingerprint,
     plannedPostFingerprint: plan.stagedPostFingerprint,
+    ...(options.filesystemPostFingerprint === undefined
+      ? {}
+      : { filesystemPostFingerprint: options.filesystemPostFingerprint }),
     startedAt: context.now().toISOString(),
     outcome: "started",
     actions: plan.actions.map((action) => ({
@@ -169,6 +174,20 @@ export async function readExecutionReceipt(
   const receipt = await readReceiptAt(join(directory, `${receiptId}.json`));
   if (receipt.id !== receiptId) throw new Error("Execution receipt filename identity mismatch");
   return receipt;
+}
+
+export async function reconcileExecutionReceiptPublication(
+  context: RuntimeContext,
+  receiptId: string,
+): Promise<ExecutionReceipt> {
+  if (!RECEIPT_ID.test(receiptId)) throw new Error("Invalid execution receipt ID");
+  const directory = await ensurePrivateStateDirectory(context, "receipts");
+  return withReceiptWriterLock(join(directory, ".writer.lock"), async () => {
+    await syncDirectory(directory);
+    const receipt = await readReceiptAt(join(directory, `${receiptId}.json`));
+    if (receipt.id !== receiptId) throw new Error("Execution receipt filename identity mismatch");
+    return receipt;
+  });
 }
 
 async function publishReceipt(
@@ -339,6 +358,7 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     "sourceFingerprint",
     "targetFingerprint",
     "plannedPostFingerprint",
+    "filesystemPostFingerprint",
     "observedPostFingerprint",
     "startedAt",
     "finishedAt",
@@ -375,6 +395,10 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     !/^fp_[a-f0-9]{64}$/.test(receipt.targetFingerprint) ||
     typeof receipt.plannedPostFingerprint !== "string" ||
     !/^fp_[a-f0-9]{64}$/.test(receipt.plannedPostFingerprint) ||
+    (receipt.filesystemPostFingerprint !== undefined &&
+      (receipt.kind !== "push" ||
+        typeof receipt.filesystemPostFingerprint !== "string" ||
+        !/^fp_[a-f0-9]{64}$/.test(receipt.filesystemPostFingerprint))) ||
     (receipt.observedPostFingerprint !== undefined &&
       (typeof receipt.observedPostFingerprint !== "string" ||
         !/^fp_[a-f0-9]{64}$/.test(receipt.observedPostFingerprint))) ||
@@ -419,7 +443,8 @@ function validateReceipt(value: unknown): ExecutionReceipt {
       (action.outcome !== "pending" &&
         action.outcome !== "succeeded" &&
         action.outcome !== "skipped" &&
-        action.outcome !== "failed") ||
+        action.outcome !== "failed" &&
+        action.outcome !== "unknown") ||
       (action.durationMs !== undefined && !nonnegativeInteger(action.durationMs))
     )
       throw new Error("Execution receipt action is invalid");
@@ -473,9 +498,26 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     (receipt.outcome === "rolled_back" &&
       receipt.observedPostFingerprint !== receipt.targetFingerprint) ||
     (receipt.outcome === "committed_with_failed_effects" &&
-      receipt.observedPostFingerprint !== receipt.plannedPostFingerprint)
+      receipt.filesystemPostFingerprint === undefined)
   )
     throw new Error("Execution receipt outcome does not match its observed post-state");
+  if (
+    receipt.outcome === "committed_with_failed_effects" &&
+    (!actions.some(
+      (action) => action.operation === "external-effect" && action.outcome === "failed",
+    ) ||
+      actions.some(
+        (action) =>
+          action.operation !== "external-effect" &&
+          (action.outcome === "failed" || action.outcome === "unknown"),
+      ))
+  )
+    throw new Error("Failed-effect receipt does not identify a proven failed effect");
+  if (
+    receipt.outcome !== "recovery_required" &&
+    actions.some((action) => action.outcome === "unknown")
+  )
+    throw new Error("Only recovery-required receipts may contain unknown actions");
   const validated = receipt as unknown as ExecutionReceipt;
   const encoded = JSON.stringify(validated);
   if (Buffer.byteLength(encoded) > MAX_RECEIPT_BYTES)
@@ -496,6 +538,7 @@ function assertReceiptSuccessor(existing: ExecutionReceipt, candidate: Execution
     sourceFingerprint: receipt.sourceFingerprint,
     targetFingerprint: receipt.targetFingerprint,
     plannedPostFingerprint: receipt.plannedPostFingerprint,
+    filesystemPostFingerprint: receipt.filesystemPostFingerprint,
     startedAt: receipt.startedAt,
     actions: receipt.actions.map(({ id, operation, scope }) => ({ id, operation, scope })),
   });

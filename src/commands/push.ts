@@ -3,12 +3,13 @@ import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts
 import { collectFiles } from "../core/collector.ts";
 import { executePlannedPush, planPush } from "../core/plan-push.ts";
 import { preparePushObservationRequest } from "../core/push-observation-request.ts";
-import { createSshPushExecutionAdapter } from "../core/push-ssh-adapter.ts";
 import { applyPushProfile } from "../core/push-profile.ts";
+import { createSshPushExecutionAdapter } from "../core/push-ssh-adapter.ts";
 import { testConnection } from "../core/ssh.ts";
 import { parseSshTarget } from "../core/ssh-target.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
 import { BlockedError, ConnectivityError, UsageError } from "../errors.ts";
+import { createRuntimeContext } from "../runtime/context.ts";
 import type { PushOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
 
@@ -146,6 +147,6 @@ export async function pushCommand(
     throw new BlockedError("Push plan is blocked");
   }
   log.info(`Executing push plan ${planned.plan.id}...`);
-  await executePlannedPush(planned, adapter);
+  await executePlannedPush(planned, adapter, { context: createRuntimeContext() });
   log.success(`Successfully pushed config to ${host}`);
 }

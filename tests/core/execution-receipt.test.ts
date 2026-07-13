@@ -131,6 +131,15 @@ describe("execution receipts", () => {
           finish,
         ),
       ).rejects.toThrow("valid successor");
+      await expect(
+        finishExecutionReceipt(state.context, started, {
+          ...finish,
+          actions: started.actions.map((action) => ({
+            ...action,
+            outcome: action.outcome === "pending" ? ("unknown" as const) : action.outcome,
+          })),
+        }),
+      ).rejects.toThrow("Only recovery-required receipts");
       const failed = await finishExecutionReceipt(state.context, started, finish);
       expect(failed.actions.every((action) => action.outcome === "skipped")).toBe(true);
       await expect(finishExecutionReceipt(state.context, started, finish)).rejects.toThrow(

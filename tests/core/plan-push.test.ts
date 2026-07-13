@@ -1,16 +1,40 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { readExecutionReceipt } from "../../src/core/execution-receipt.ts";
 import { fingerprint } from "../../src/core/migration-plan.ts";
 import {
   executePlannedPush,
-  planPush as rawPlanPush,
   type PlanPushInput,
+  planPush as rawPlanPush,
 } from "../../src/core/plan-push.ts";
+import {
+  type PushTargetObservation,
+  pushStateFingerprint,
+} from "../../src/core/push-observation.ts";
 import { preparePushObservationRequest } from "../../src/core/push-observation-request.ts";
-import type { PushTargetObservation } from "../../src/core/push-observation.ts";
+import { ExecutionError } from "../../src/errors.ts";
+import { createRuntimeContext } from "../../src/runtime/context.ts";
+
+async function receiptFixture() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-push-receipt-")));
+  const context = createRuntimeContext({
+    home: root,
+    process: { cwd: () => root, env: { XDG_STATE_HOME: join(root, "state") } },
+  });
+  return { root, context };
+}
+
+async function receipts(state: Awaited<ReturnType<typeof receiptFixture>>) {
+  const directory = join(state.root, "state/ccm/receipts");
+  return Promise.all(
+    (await readdir(directory))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => readExecutionReceipt(state.context, name.slice(0, -5))),
+  );
+}
 
 function observation(): PushTargetObservation {
   return {
@@ -114,6 +138,7 @@ describe("push migration planning", () => {
   });
 
   it("plans MCP merge, shared overlay, and symlink recreation in dependency order", async () => {
+    const receiptState = await receiptFixture();
     const planned = await planPush({
       files: [
         {
@@ -155,26 +180,30 @@ describe("push migration planning", () => {
       (item) => item.id === "prepared-observation-scope",
     )?.expectedFingerprint;
     await expect(
-      executePlannedPush(planned, {
-        observe: async (request) => ({
-          ...observation(),
-          requestIdentity: request.requestIdentity ?? requestIdentity,
-        }),
-        prepare: async () => ({
-          apply: async (_action, binding) => {
-            bindingOrder.push(binding.kind);
-            if (binding.kind === "write-claude-mcp") throw new Error("stop after MCP write");
-          },
-          commit: async () => {},
-          applyEffect: async () => {},
-          acknowledgeFailedEffects: async () => {},
-          abort: async () => {},
-          isCommitted: () => false,
-          verifyCommit: async () => {},
-          verifyRollback: async () => {},
-          cleanup: async () => {},
-        }),
-      }),
+      executePlannedPush(
+        planned,
+        {
+          observe: async (request) => ({
+            ...observation(),
+            requestIdentity: request.requestIdentity ?? requestIdentity,
+          }),
+          prepare: async () => ({
+            apply: async (_action, binding) => {
+              bindingOrder.push(binding.kind);
+              if (binding.kind === "write-claude-mcp") throw new Error("stop after MCP write");
+            },
+            commit: async () => {},
+            applyEffect: async () => {},
+            acknowledgeFailedEffects: async () => {},
+            abort: async () => {},
+            isCommitted: () => false,
+            verifyCommit: async () => {},
+            verifyRollback: async () => {},
+            cleanup: async () => {},
+          }),
+        },
+        { context: receiptState.context },
+      ),
     ).rejects.toMatchObject({
       name: "ExecutionError",
       message: "Push execution failed after mutation started",
@@ -184,6 +213,13 @@ describe("push migration planning", () => {
     expect(bindingOrder.indexOf("write-claude-mcp")).toBeGreaterThan(
       bindingOrder.indexOf("overlay-group"),
     );
+    expect(await receipts(receiptState)).toMatchObject([
+      {
+        outcome: "rolled_back",
+        observedPostFingerprint: planned.plan.targetFingerprint,
+      },
+    ]);
+    await rm(receiptState.root, { recursive: true, force: true });
   });
 
   it("rejects a decision-byte race against the recollected source inventory", async () => {
@@ -241,6 +277,9 @@ describe("push migration planning", () => {
   });
 
   it("executes a sealed plugin add and verifies the disjoint final plugin state", async () => {
+    const successReceiptState = await receiptFixture();
+    const failureReceiptState = await receiptFixture();
+    const uncertainReceiptState = await receiptFixture();
     const config = Buffer.from('[plugins."demo@market"]\nenabled = true\n');
     const base = observation();
     const target = {
@@ -318,64 +357,107 @@ describe("push migration planning", () => {
       codexCommand: string;
     }> = [];
     let observations = 0;
-    await executePlannedPush(planned, {
-      observe: async (request) => {
-        observations += 1;
-        if (observations === 1) return { ...target, requestIdentity: request.requestIdentity };
-        if (observations === 2)
+    await executePlannedPush(
+      planned,
+      {
+        observe: async (request) => {
+          observations += 1;
+          if (observations === 1) return { ...target, requestIdentity: request.requestIdentity };
+          if (observations === 2)
+            return {
+              ...target,
+              inventory: [finalEntry],
+              facts: { ...target.facts, captures: new Map([["codex-config", config]]) },
+              requestIdentity: request.requestIdentity,
+            };
           return {
             ...target,
             inventory: [finalEntry],
-            facts: { ...target.facts, captures: new Map([["codex-config", config]]) },
+            facts: {
+              ...target.facts,
+              captures: new Map([["codex-config", config]]),
+              codexPluginList: {
+                status: "ok" as const,
+                installed: ["demo@market"],
+                available: [],
+              },
+            },
             requestIdentity: request.requestIdentity,
           };
-        return {
-          ...target,
-          inventory: [finalEntry],
-          facts: {
-            ...target.facts,
-            captures: new Map([["codex-config", config]]),
-            codexPluginList: {
-              status: "ok" as const,
-              installed: ["demo@market"],
-              available: [],
-            },
+        },
+        prepare: async () => ({
+          apply: async (_action, binding) => {
+            if (binding.kind === "plugin-add") pluginBindings.push(binding);
           },
-          requestIdentity: request.requestIdentity,
-        };
+          commit: async () => {},
+          applyEffect: async (_action, binding) => {
+            if (binding.kind === "plugin-add") pluginBindings.push(binding);
+          },
+          acknowledgeFailedEffects: async () => {},
+          abort: async () => {},
+          isCommitted: () => false,
+          verifyCommit: async () => {},
+          verifyRollback: async () => {},
+          cleanup: async () => {},
+        }),
       },
-      prepare: async () => ({
-        apply: async (_action, binding) => {
-          if (binding.kind === "plugin-add") pluginBindings.push(binding);
-        },
-        commit: async () => {},
-        applyEffect: async (_action, binding) => {
-          if (binding.kind === "plugin-add") pluginBindings.push(binding);
-        },
-        acknowledgeFailedEffects: async () => {},
-        abort: async () => {},
-        isCommitted: () => false,
-        verifyCommit: async () => {},
-        verifyRollback: async () => {},
-        cleanup: async () => {},
-      }),
-    });
+      { context: successReceiptState.context },
+    );
     expect(pluginBindings).toEqual([
       { kind: "plugin-add", pluginId: "demo@market", codexCommand: "/usr/local/bin/codex" },
     ]);
+    expect(await receipts(successReceiptState)).toMatchObject([
+      {
+        outcome: "succeeded",
+        observedPostFingerprint: planned.plan.stagedPostFingerprint,
+      },
+    ]);
 
+    const failedConfig = Buffer.from(
+      '[plugins."demo-a@market"]\nenabled = true\n[plugins."demo-b@market"]\nenabled = true\n',
+    );
+    const failedEntry = {
+      ...finalEntry,
+      size: failedConfig.length,
+      sha256: createHash("sha256").update(failedConfig).digest("hex"),
+    };
+    const failedTarget = {
+      ...target,
+      facts: {
+        ...target.facts,
+        codexPluginList: {
+          status: "ok" as const,
+          installed: [],
+          available: ["demo-a@market", "demo-b@market"],
+        },
+      },
+    };
+    const partialTarget = {
+      ...failedTarget,
+      inventory: [failedEntry],
+      facts: {
+        ...failedTarget.facts,
+        captures: new Map([["codex-config", failedConfig]]),
+        codexPluginList: {
+          status: "ok" as const,
+          installed: ["demo-a@market"],
+          available: ["demo-b@market"],
+        },
+      },
+    };
     const failed = await planPush({
       files: [
         {
           sourcePath: "/unused/config",
           relativePath: "codex/config.toml",
           isSymlink: false,
-          mcpServersOnly: config.toString(),
+          mcpServersOnly: failedConfig.toString(),
         },
       ],
       host: "target",
       providers: ["codex"],
-      observation: target,
+      configuredPolicyIds: ["demo-a@market", "demo-b@market"],
+      observation: failedTarget,
     });
     let committed = false;
     let aborts = 0;
@@ -383,46 +465,135 @@ describe("push migration planning", () => {
     let cleanups = 0;
     let failureObservations = 0;
     await expect(
-      executePlannedPush(failed, {
-        observe: async (request) => {
-          failureObservations += 1;
-          return failureObservations === 1
-            ? { ...target, requestIdentity: request.requestIdentity }
-            : {
-                ...target,
-                inventory: [finalEntry],
-                facts: { ...target.facts, captures: new Map([["codex-config", config]]) },
+      executePlannedPush(
+        failed,
+        {
+          observe: async (request) => {
+            failureObservations += 1;
+            if (failureObservations === 1)
+              return { ...failedTarget, requestIdentity: request.requestIdentity };
+            if (failureObservations === 2)
+              return {
+                ...failedTarget,
+                inventory: [failedEntry],
+                facts: {
+                  ...failedTarget.facts,
+                  captures: new Map([["codex-config", failedConfig]]),
+                },
                 requestIdentity: request.requestIdentity,
               };
+            return { ...partialTarget, requestIdentity: request.requestIdentity };
+          },
+          prepare: async () => ({
+            apply: async () => {},
+            commit: async () => {
+              committed = true;
+            },
+            applyEffect: async (action) => {
+              const plugin = failed.plan.actions.find((item) => item.id === action.id)?.targetRef;
+              if (plugin === failed.plan.actions.at(-1)?.targetRef)
+                throw new ExecutionError("committed_with_failed_effects");
+            },
+            acknowledgeFailedEffects: async () => {
+              failedAcknowledgements += 1;
+            },
+            abort: async () => {
+              aborts += 1;
+            },
+            isCommitted: () => committed,
+            verifyCommit: async () => {},
+            verifyRollback: async () => {},
+            cleanup: async () => {
+              cleanups += 1;
+            },
+          }),
         },
-        prepare: async () => ({
-          apply: async () => {},
-          commit: async () => {
-            committed = true;
-          },
-          applyEffect: async () => {
-            throw new Error("effect failed");
-          },
-          acknowledgeFailedEffects: async () => {
-            failedAcknowledgements += 1;
-          },
-          abort: async () => {
-            aborts += 1;
-          },
-          isCommitted: () => committed,
-          verifyCommit: async () => {},
-          verifyRollback: async () => {},
-          cleanup: async () => {
-            cleanups += 1;
-          },
-        }),
-      }),
+        { context: failureReceiptState.context },
+      ),
     ).rejects.toMatchObject({ name: "ExecutionError", message: "committed_with_failed_effects" });
     expect({ aborts, cleanups, failedAcknowledgements }).toEqual({
       aborts: 0,
       cleanups: 1,
       failedAcknowledgements: 1,
     });
+    expect(await receipts(failureReceiptState)).toMatchObject([
+      {
+        outcome: "committed_with_failed_effects",
+        filesystemPostFingerprint: expect.stringMatching(/^fp_/),
+        observedPostFingerprint: pushStateFingerprint(partialTarget),
+        warnings: expect.arrayContaining(["committed-with-failed-effects"]),
+        actions: expect.arrayContaining([
+          expect.objectContaining({ operation: "external-effect", outcome: "succeeded" }),
+          expect.objectContaining({ operation: "external-effect", outcome: "failed" }),
+        ]),
+      },
+    ]);
+    const uncertain = await planPush({
+      files: [
+        {
+          sourcePath: "/unused/config",
+          relativePath: "codex/config.toml",
+          isSymlink: false,
+          mcpServersOnly: failedConfig.toString(),
+        },
+      ],
+      host: "target",
+      providers: ["codex"],
+      configuredPolicyIds: ["demo-a@market", "demo-b@market"],
+      observation: failedTarget,
+    });
+    let uncertainObservations = 0;
+    let uncertainEffects = 0;
+    await expect(
+      executePlannedPush(
+        uncertain,
+        {
+          observe: async (request) => {
+            uncertainObservations += 1;
+            return uncertainObservations === 1
+              ? { ...failedTarget, requestIdentity: request.requestIdentity }
+              : {
+                  ...failedTarget,
+                  inventory: [failedEntry],
+                  facts: {
+                    ...failedTarget.facts,
+                    captures: new Map([["codex-config", failedConfig]]),
+                  },
+                  requestIdentity: request.requestIdentity,
+                };
+          },
+          prepare: async () => ({
+            apply: async () => {},
+            commit: async () => {},
+            applyEffect: async () => {
+              uncertainEffects += 1;
+              if (uncertainEffects === 2) throw new Error("effect transport lost");
+            },
+            acknowledgeFailedEffects: async () => {},
+            abort: async () => {},
+            isCommitted: () => true,
+            verifyCommit: async () => {},
+            verifyRollback: async () => {},
+            cleanup: async () => {},
+          }),
+        },
+        { context: uncertainReceiptState.context },
+      ),
+    ).rejects.toMatchObject({ message: "committed_effect_recovery_required" });
+    expect(await receipts(uncertainReceiptState)).toMatchObject([
+      {
+        outcome: "recovery_required",
+        actions: expect.arrayContaining([
+          expect.objectContaining({ operation: "external-effect", outcome: "succeeded" }),
+          expect.objectContaining({ operation: "external-effect", outcome: "unknown" }),
+        ]),
+      },
+    ]);
+    await Promise.all(
+      [successReceiptState.root, failureReceiptState.root, uncertainReceiptState.root].map((root) =>
+        rm(root, { recursive: true, force: true }),
+      ),
+    );
   });
 
   it("executes sealed bindings exactly once and rejects forged plans", async () => {
