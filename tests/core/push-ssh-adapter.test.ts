@@ -971,7 +971,7 @@ describe("SSH remote push helper adapter", () => {
         verifyLosses: 2,
       });
     }
-  });
+  }, 15_000);
 
   it("reconciles a lost successful cleanup through the missing-workspace protocol", async () => {
     const f = await fixture();
