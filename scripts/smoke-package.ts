@@ -20,6 +20,26 @@ export async function smokePackage(
   const metadata = JSON.parse(packageEntry.data.toString()) as { version?: unknown };
   if (typeof metadata.version !== "string") throw new Error("packed package version is invalid");
 
+  await smokeInstallTarget(tarball, metadata.version, options);
+}
+
+export async function smokeRegistryPackage(
+  name: string,
+  version: string,
+  options: SmokePackageOptions = {},
+): Promise<void> {
+  if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(name)) {
+    throw new Error("registry package name is invalid");
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("registry package version is invalid");
+  await smokeInstallTarget(`${name}@${version}`, version, options);
+}
+
+async function smokeInstallTarget(
+  installTarget: string,
+  expectedVersion: string,
+  options: SmokePackageOptions,
+): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "ccm-package-smoke-"));
   const home = join(root, "home");
   const prefix = join(root, "prefix");
@@ -52,15 +72,15 @@ export async function smokePackage(
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
-        tarball,
+        installTarget,
       ],
       { env },
     );
     const executable = join(prefix, "bin", "ccm");
     const version = await run(executable, ["--version"], { env });
-    if (version.stdout.trim() !== metadata.version) {
+    if (version.stdout.trim() !== expectedVersion) {
       throw new Error(
-        `installed CLI version ${version.stdout.trim()} does not match ${metadata.version}`,
+        `installed CLI version ${version.stdout.trim()} does not match ${expectedVersion}`,
       );
     }
     const help = await run(executable, ["--help"], { env });
@@ -71,17 +91,25 @@ export async function smokePackage(
 }
 
 if (import.meta.main) {
-  const tarball = process.argv[2];
-  if (!tarball) {
-    console.error("usage: smoke-package TARFILE");
-    process.exitCode = 1;
-  } else {
+  const args = process.argv.slice(2);
+  if (args[0] === "--registry" && args[1] && args[2] && args.length === 3) {
     try {
-      await smokePackage(tarball);
-      console.log(`smoked ${tarball}`);
+      await smokeRegistryPackage(args[1], args[2]);
+      console.log(`smoked ${args[1]}@${args[2]} from the registry`);
     } catch (error) {
       console.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
     }
+  } else if (args[0] && args.length === 1) {
+    try {
+      await smokePackage(args[0]);
+      console.log(`smoked ${args[0]}`);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    }
+  } else {
+    console.error("usage: smoke-package TARFILE | --registry PACKAGE VERSION");
+    process.exitCode = 1;
   }
 }

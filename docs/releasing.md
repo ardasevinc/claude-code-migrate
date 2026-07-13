@@ -1,8 +1,8 @@
 # Releasing ccm
 
-This runbook describes the local verification foundation. npm trusted publishing and the GitHub
-release workflow are intentionally not enabled until the repository and npm environment are
-configured and a pack-once release has been proven end to end.
+Releases are published by `.github/workflows/release.yml` from an exact `vX.Y.Z` tag through npm
+trusted publishing. The workflow packs once, verifies and smokes that tarball, reconciles npm by
+both `dist.integrity` and `dist.shasum`, and attaches the same artifact to the GitHub release.
 
 ## Runtime and version contract
 
@@ -16,8 +16,9 @@ configured and a pack-once release has been proven end to end.
 1. Update `package.json` to the release version and refresh `bun.lock` with Bun 1.3.14.
 2. Replace the changelog's Unreleased content with a dated `## [X.Y.Z] - YYYY-MM-DD` section and
    restore an empty Unreleased section above it.
-3. Run `bun install --frozen-lockfile` and `bun run check`.
-4. Commit the release preparation, merge it to `main`, and create the matching annotated tag.
+3. Run `bun install --frozen-lockfile`, `bun audit`, and `bun run check`.
+4. Commit the release preparation and merge it to `main`.
+5. Create and push the matching annotated tag. Pushing the tag starts the release workflow.
 
 ## Verify one artifact
 
@@ -36,11 +37,30 @@ main ref, and requires the tarball to contain exactly the allowlisted package su
 script installs that exact tarball with npm under an isolated HOME and confirms both `ccm
 --version` and `ccm --help`.
 
-Do not repack between verification and publication. When automated publishing is added, it must
-publish and attach this same tarball and make reruns safe after npm publication succeeds.
+Do not publish locally or repack after verification. The workflow publishes the exact tarball,
+waits for the registry's SHA-512 `dist.integrity` and SHA-1 `dist.shasum` to match, installs the
+immutable registry version under an isolated HOME, emits `SHA256SUMS`, creates a GitHub artifact
+attestation, and creates or reconciles the GitHub release and assets.
 
-## Current handoff boundary
+## Trusted publisher contract
 
-Publishing remains manual. Before adding a release workflow, configure npm trusted publishing and
-the GitHub `npm` environment, then implement provenance, registry verification, checksums,
-attestation, and idempotent GitHub release creation as one reviewed slice.
+The npm package must trust this exact identity:
+
+- GitHub owner/repository: `ardasevinc/claude-code-migrate`
+- workflow filename: `release.yml`
+- environment: `npm`
+- allowed action: `npm publish`
+
+The release job runs only on GitHub-hosted Ubuntu, requests `id-token: write`, and uses npm 11.17.0
+on Node 24. No long-lived npm token is configured. npm trusted publishing generates npm provenance
+automatically; `actions/attest` separately records the GitHub artifact attestation.
+
+## Reruns and failure boundaries
+
+- Before publication, any verification failure is safe: no registry or release state changed.
+- If npm already has the version with both exact tarball digests, the workflow skips publication
+  and continues verification. A different digest fails closed because npm versions are immutable.
+- Registry verification must succeed before attestation or GitHub release creation.
+- GitHub release reruns replace the notes and clobber only the two managed assets: the exact
+  tarball and `SHA256SUMS`.
+- Failed workflows are rerun from GitHub Actions. Never delete or move a published tag to retry.

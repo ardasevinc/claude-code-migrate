@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { smokePackage } from "../../scripts/smoke-package.ts";
+import { prepareRelease } from "../../scripts/prepare-release.ts";
+import { decidePublication, waitForPublishedRelease } from "../../scripts/release-registry.ts";
+import { smokePackage, smokeRegistryPackage } from "../../scripts/smoke-package.ts";
 import {
   assertPackedContents,
   assertReleaseVersions,
@@ -180,6 +183,60 @@ describe("release contract", () => {
     ).rejects.toThrow("not an ancestor");
   });
 
+  test("prepares checksums and exact changelog notes for the verified tarball", async () => {
+    const directory = await fixtureDirectory();
+    const archivePath = join(directory, "claude-code-migrate-1.8.2.tgz");
+    const archive = tarball([
+      {
+        name: "package/package.json",
+        data: JSON.stringify({
+          name: "claude-code-migrate",
+          version: "1.8.2",
+          bin: { ccm: "./src/index.ts" },
+        }),
+      },
+      { name: "package/README.md", data: "readme" },
+      { name: "package/LICENSE", data: "license" },
+      { name: "package/CHANGELOG.md", data: "changelog" },
+      { name: "package/src/index.ts", data: "#!/usr/bin/env bun\n", mode: 0o755 },
+      { name: "package/src/core/remote-push-helper.py", data: "print('helper')\n" },
+    ]);
+    await writeFile(archivePath, archive);
+    const run: CommandRunner = async (command, args) => {
+      if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "" };
+      if (args[0] === "ls-files") {
+        return { stdout: "src/index.ts\nsrc/core/remote-push-helper.py\n", stderr: "" };
+      }
+      if (command === "bun") return { stdout: "1.8.2\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+    let smoked = "";
+
+    const prepared = await prepareRelease({
+      tag: "v1.8.2",
+      tarball: archivePath,
+      cwd: directory,
+      run,
+      smoke: async (path) => {
+        smoked = path;
+      },
+    });
+
+    const sha256 = createHash("sha256").update(archive).digest("hex");
+    const integrity = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
+    expect(smoked).toBe(archivePath);
+    expect(prepared).toMatchObject({
+      name: "claude-code-migrate",
+      version: "1.8.2",
+      integrity,
+      sha256,
+    });
+    expect(await readFile(prepared.checksums, "utf8")).toBe(
+      `${sha256}  claude-code-migrate-1.8.2.tgz\n`,
+    );
+    expect(await readFile(prepared.notes, "utf8")).toBe("- Verified release.\n");
+  });
+
   test("smokes an exact tarball through isolated npm install commands", async () => {
     const directory = await fixtureDirectory();
     const archivePath = join(directory, "claude-code-migrate-1.8.2.tgz");
@@ -200,5 +257,78 @@ describe("release contract", () => {
     expect(calls[0]?.args.at(-1)).toBe(archivePath);
     expect(calls[0]?.home).toContain("ccm-package-smoke-");
     expect(calls[1]?.command).toContain("/prefix/bin/ccm");
+  });
+
+  test("reconciles npm publication reruns only when both tarball digests match", async () => {
+    const digests = {
+      shasum: "a".repeat(40),
+      integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}`,
+    };
+    expect(decidePublication(digests, undefined)).toBe("publish");
+    expect(decidePublication(digests, digests)).toBe("already-published");
+    expect(() => decidePublication(digests, { ...digests, shasum: "b".repeat(40) })).toThrow(
+      "different tarball digests",
+    );
+    expect(() =>
+      decidePublication(digests, {
+        ...digests,
+        integrity: `sha512-${Buffer.alloc(64, 2).toString("base64")}`,
+      }),
+    ).toThrow("different tarball digests");
+    expect(() => decidePublication({ ...digests, integrity: "sha512-invalid" }, undefined)).toThrow(
+      "tarball integrity is invalid",
+    );
+
+    const observations = [undefined, undefined, digests];
+    let sleeps = 0;
+    await expect(
+      waitForPublishedRelease(
+        { name: "claude-code-migrate", version: "1.8.2", ...digests },
+        {
+          attempts: 3,
+          delayMs: 1,
+          lookup: async () => observations.shift(),
+          sleep: async () => {
+            sleeps += 1;
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(sleeps).toBe(2);
+  });
+
+  test("smokes the immutable registry name and version under an isolated home", async () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const run: CommandRunner = async (command, args) => {
+      calls.push({ command, args });
+      if (args[0] === "--version") return { stdout: "1.8.2\n", stderr: "" };
+      if (args[0] === "--help") return { stdout: "Usage: ccm [options]\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+
+    await smokeRegistryPackage("claude-code-migrate", "1.8.2", { run });
+    expect(calls[0]).toMatchObject({ command: "npm" });
+    expect(calls[0]?.args.at(-1)).toBe("claude-code-migrate@1.8.2");
+  });
+
+  test("pins the pack-once trusted-publishing and release reconciliation workflow", async () => {
+    const workflow = await readFile(join(process.cwd(), ".github/workflows/release.yml"), "utf8");
+    expect(workflow.match(/npm pack --pack-destination/g)).toHaveLength(1);
+    expect(workflow).toContain("prepare:\n    name: Verify exact release artifact");
+    expect(workflow).toContain("publish:\n    name: Publish exact release artifact");
+    expect(workflow).toContain("environment: npm");
+    expect(workflow).toContain("permissions:\n  contents: read");
+    expect(workflow).toContain("id-token: write");
+    expect(workflow).toContain("attestations: write");
+    expect(workflow.match(/persist-credentials: false/g)).toHaveLength(2);
+    expect(workflow).toContain("sha256sum --check SHA256SUMS");
+    expect(workflow).toContain("overwrite: true");
+    expect(workflow).toContain("release-registry.ts decide");
+    expect(workflow).toContain("release-registry.ts verify");
+    expect(workflow).toContain("already-published");
+    expect(workflow).toContain("actions/attest@a1948c3f048ba23858d222213b7c278aabede763");
+    expect(workflow).toContain("gh release upload");
+    expect(workflow).toContain("--clobber");
+    expect(workflow).not.toMatch(/uses: [^\n]+@(v\d+|main|master)\s*$/m);
   });
 });
