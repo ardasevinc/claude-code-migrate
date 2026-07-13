@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FileEntry, ProviderName } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
-import { createArchive, readVerifiedArchive } from "./archiver.ts";
+import { scanArchive } from "./archive-reader.ts";
+import { createArchive } from "./archiver.ts";
 import {
   canonicalInventory,
   type InventoryEntry,
@@ -40,6 +41,9 @@ export interface StagedPushArchive {
   readonly archivePath: string;
   readonly archiveSha256: string;
   readonly archiveSize: number;
+  /** Verified archive expansion used as the only incremental transport source. */
+  readonly treePath: string;
+  readonly snapshotId: string;
   cleanup(): Promise<void>;
 }
 
@@ -114,14 +118,34 @@ export async function stagePushArchive(input: StagePushArchiveInput): Promise<St
           throw new Error("Staged push archive does not match expected providers");
       },
     });
-    const verified = await readVerifiedArchive(archivePath);
+    const treePath = join(workspace, "tree");
+    const verified = await scanArchive(archivePath, { extractTo: treePath });
     const digest = await sha256(archivePath);
-    if (verified.archiveSha256 !== digest)
+    if (verified.archive.archiveSha256 !== digest)
       throw new Error("Staged push archive digest changed after verification");
+    const verifiedInventory = canonicalInventory(
+      verified.observedFiles.map((file) => ({
+        path: file.path,
+        type: "file" as const,
+        mode: file.mode & 0o111 ? (0o755 as const) : (0o644 as const),
+        size: file.size,
+        sha256: file.sha256,
+      })),
+    );
+    if (
+      inventoryFingerprint(verifiedInventory) !==
+      inventoryFingerprint(input.expectedStagedInventory)
+    )
+      throw new Error("Verified staged tree does not match expected inventory");
+    const snapshotId = createHash("sha256")
+      .update(JSON.stringify(canonicalInventory(input.expectedStagedInventory)))
+      .digest("hex");
     return Object.freeze({
       archivePath,
       archiveSha256: digest,
       archiveSize: (await lstat(archivePath)).size,
+      treePath,
+      snapshotId,
       cleanup: async () => {
         unregister();
         await cleanup();

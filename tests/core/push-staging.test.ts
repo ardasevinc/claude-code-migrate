@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -42,6 +42,12 @@ describe("push archive staging", () => {
       expect((await readVerifiedArchive(staged.archivePath)).archiveSha256).toBe(
         staged.archiveSha256,
       );
+      expect(staged.snapshotId).toMatch(/^[a-f0-9]{64}$/);
+      expect(await readFile(join(staged.treePath, "codex/config.toml"), "utf8")).toBe("new\n");
+      expect(await readFile(join(staged.treePath, "codex/rules/ordinary.md"), "utf8")).toBe(
+        "ordinary\n",
+      );
+      expect(await readdir(staged.treePath)).toContain(".ccm-manifest.json");
       await staged.cleanup();
       await staged.cleanup();
       expect(await lstat(staged.archivePath).catch(() => null)).toBeNull();
