@@ -1,6 +1,6 @@
 {
   "name": "claude-code-migrate",
-  "version": "1.8.2",
+  "version": "1.12.0",
   "description": "Migrate AI CLI configs (Claude Code, Codex) between machines via SSH or local backup",
   "type": "module",
   "packageManager": "bun@1.3.14",

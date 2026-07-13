@@ -5,6 +5,8 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-07-13
+
 - Added fail-closed configuration, SSH-target, process, archive, staging, and interrupt handling.
 - Added atomic manifest-v2 archives with bounded streaming integrity verification, legacy archive
   compatibility, and archive inspection.
@@ -114,7 +116,8 @@ the `vX.Y.Z` form.
 
 - Initial ccm CLI for migrating Claude Code configuration.
 
-[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.2...HEAD
+[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.2...v1.12.0
 [1.8.2]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.7.1...v1.8.0
