@@ -77,8 +77,9 @@ export function validateArchiveMemberPaths(paths: string[]): string[] {
   return normalizedPaths;
 }
 
-function isAllowedManagedPath(path: string, directory: boolean): boolean {
+export function isAllowedManagedPath(path: string, directory: boolean): boolean {
   const [root, ...rest] = path.split("/");
+  if (isExcludedManagedObservationPath(path)) return false;
   if ((root === "claude" || root === "codex") && rest.length === 0) return directory;
 
   if (root === "claude") {
@@ -127,6 +128,18 @@ function isAllowedManagedPath(path: string, directory: boolean): boolean {
     SHARED_MANAGED_ENTRIES,
     new Set(["skills", "lazy-skills"]),
     directory,
+  );
+}
+
+export function isExcludedManagedObservationPath(path: string): boolean {
+  const segments = path.split("/");
+  if (segments.includes(".git")) return true;
+  const provider = segments[0];
+  if (provider !== "claude" && provider !== "codex") return false;
+  const relative = segments.slice(1).join("/");
+  const definition = PROVIDERS[provider];
+  return [...definition.neverMigrate, ...(definition.neverMigratePaths ?? [])].some(
+    (excluded) => relative === excluded || relative.startsWith(`${excluded}/`),
   );
 }
 

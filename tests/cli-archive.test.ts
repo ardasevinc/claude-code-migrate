@@ -134,4 +134,20 @@ describe("archive operator commands", () => {
       error: "Archive is invalid or unreadable",
     });
   });
+
+  it("rejects receipt-only options for archives as one JSON object", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-archive-options-"));
+    const archivePath = await makeArchive(home, v2());
+    const result = await runCcm(
+      ["verify", archivePath, "--remote", "operator@example.com", "--json"],
+      home,
+    );
+
+    expect(result).toMatchObject({ exitCode: 2, stderr: "" });
+    expect(result.stdout.trim().split("\n")).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toEqual({
+      valid: false,
+      error: "Invalid archive verification request",
+    });
+  });
 });

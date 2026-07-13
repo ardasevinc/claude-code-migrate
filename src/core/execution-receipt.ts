@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, open, readdir, rename, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import {
   AdvisoryLockReleaseError,
   withAdvisoryFileLock,
 } from "./advisory-lock.ts";
+import { isAllowedManagedPath, validateCanonicalArchivePath } from "./archive-entries.ts";
 import { syncDirectory } from "./local-transaction-paths.ts";
 import type { ActionOperation, MigrationPlan } from "./migration-plan.ts";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.ts";
@@ -31,8 +32,20 @@ export interface ExecutionReceiptAction {
   readonly durationMs?: number;
 }
 
-export interface ExecutionReceipt {
+export interface ExecutionReceiptVerification {
   readonly schemaVersion: 1;
+  readonly mode: "local" | "remote";
+  readonly endpointRef: string;
+  readonly inventoryRoots: readonly string[];
+  readonly claudeMcp: boolean;
+  readonly codexPluginList: boolean;
+  readonly beforeFingerprint: string;
+  readonly plannedFingerprint: string;
+  readonly observedFingerprint?: string;
+}
+
+export interface ExecutionReceipt {
+  readonly schemaVersion: 1 | 2;
   readonly id: string;
   readonly revision: number;
   readonly toolVersion: string;
@@ -57,6 +70,7 @@ export interface ExecutionReceipt {
     readonly transferredBytes: number | null;
     readonly reusedBytes: number | null;
   };
+  readonly verification?: ExecutionReceiptVerification;
 }
 
 export interface FinishExecutionReceiptInput {
@@ -68,6 +82,7 @@ export interface FinishExecutionReceiptInput {
   readonly observedPostFingerprint?: string;
   readonly transferredBytes?: number;
   readonly reusedBytes?: number;
+  readonly observedManagedStateFingerprint?: string;
 }
 
 export class ReceiptPublicationAmbiguousError extends Error {
@@ -84,15 +99,34 @@ const MAX_RECEIPT_BYTES = 1024 * 1024;
 const MAX_RECEIPTS = 1024;
 const RECEIPT_ID = /^rcpt_[a-f0-9]{32}$/;
 
+export function isExecutionReceiptId(value: string): boolean {
+  return RECEIPT_ID.test(value);
+}
+
+export function executionReceiptEndpointRef(
+  mode: ExecutionReceiptVerification["mode"],
+  target: string,
+): string {
+  return `endpoint_${createHash("sha256")
+    .update(`ccm:receipt:${mode}:endpoint\0${target}`)
+    .digest("hex")}`;
+}
+
 export async function startExecutionReceipt(
   context: RuntimeContext,
   plan: MigrationPlan,
-  options: { readonly filesystemPostFingerprint?: string } = {},
+  options: {
+    readonly filesystemPostFingerprint?: string;
+    readonly verification: Omit<
+      ExecutionReceiptVerification,
+      "schemaVersion" | "observedFingerprint"
+    >;
+  },
 ): Promise<ExecutionReceipt> {
   if (plan.kind !== "push" && plan.kind !== "restore")
     throw new Error("Only mutating plans can create execution receipts");
   const receipt: ExecutionReceipt = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: `rcpt_${randomBytes(16).toString("hex")}`,
     revision: 0,
     toolVersion: packageMetadata.version,
@@ -120,6 +154,7 @@ export async function startExecutionReceipt(
     })),
     warnings: plan.warnings.map((warning) => warning.code),
     transport: { transferredBytes: null, reusedBytes: null },
+    verification: { schemaVersion: 1, ...options.verification },
   };
   await publishReceipt(context, receipt, null);
   return receipt;
@@ -160,6 +195,15 @@ export async function finishExecutionReceipt(
       transferredBytes: input.transferredBytes ?? null,
       reusedBytes: input.reusedBytes ?? null,
     },
+    verification:
+      started.verification === undefined
+        ? undefined
+        : {
+            ...started.verification,
+            ...(input.observedManagedStateFingerprint === undefined
+              ? {}
+              : { observedFingerprint: input.observedManagedStateFingerprint }),
+          },
   };
   await publishReceipt(context, receipt, started.revision);
   return receipt;
@@ -368,6 +412,7 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     "warnings",
     "transactionId",
     "transport",
+    "verification",
   ]);
   const outcomes: readonly ExecutionReceiptOutcome[] = [
     "started",
@@ -378,7 +423,7 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     "committed_with_failed_effects",
   ];
   if (
-    receipt.schemaVersion !== 1 ||
+    (receipt.schemaVersion !== 1 && receipt.schemaVersion !== 2) ||
     typeof receipt.id !== "string" ||
     !RECEIPT_ID.test(receipt.id) ||
     !nonnegativeInteger(receipt.revision) ||
@@ -458,6 +503,12 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     (transport.reusedBytes !== null && !nonnegativeInteger(transport.reusedBytes))
   )
     throw new Error("Execution receipt transport metrics are invalid");
+  const verification = validateVerification(
+    receipt.verification,
+    receipt.schemaVersion,
+    receipt.kind,
+    receipt.providers,
+  );
   const started = receipt.outcome === "started";
   if (
     started
@@ -484,6 +535,7 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     (actions.some((action) => action.outcome !== "pending" && action.outcome !== "skipped") ||
       actions.some((action) => action.durationMs !== undefined) ||
       receipt.observedPostFingerprint !== undefined ||
+      verification?.observedFingerprint !== undefined ||
       transport.transferredBytes !== null ||
       transport.reusedBytes !== null)
   )
@@ -494,6 +546,13 @@ function validateReceipt(value: unknown): ExecutionReceipt {
       receipt.observedPostFingerprint !== receipt.plannedPostFingerprint)
   )
     throw new Error("Successful execution receipt contains failed actions");
+  if (
+    (receipt.outcome === "succeeded" &&
+      verification?.observedFingerprint !== verification?.plannedFingerprint) ||
+    (receipt.outcome === "rolled_back" &&
+      verification?.observedFingerprint !== verification?.beforeFingerprint)
+  )
+    throw new Error("Execution receipt verification does not match its terminal outcome");
   if (
     (receipt.outcome === "rolled_back" &&
       receipt.observedPostFingerprint !== receipt.targetFingerprint) ||
@@ -539,6 +598,19 @@ function assertReceiptSuccessor(existing: ExecutionReceipt, candidate: Execution
     targetFingerprint: receipt.targetFingerprint,
     plannedPostFingerprint: receipt.plannedPostFingerprint,
     filesystemPostFingerprint: receipt.filesystemPostFingerprint,
+    verification:
+      receipt.verification === undefined
+        ? undefined
+        : {
+            schemaVersion: receipt.verification.schemaVersion,
+            mode: receipt.verification.mode,
+            endpointRef: receipt.verification.endpointRef,
+            inventoryRoots: receipt.verification.inventoryRoots,
+            claudeMcp: receipt.verification.claudeMcp,
+            codexPluginList: receipt.verification.codexPluginList,
+            beforeFingerprint: receipt.verification.beforeFingerprint,
+            plannedFingerprint: receipt.verification.plannedFingerprint,
+          },
     startedAt: receipt.startedAt,
     actions: receipt.actions.map(({ id, operation, scope }) => ({ id, operation, scope })),
   });
@@ -560,6 +632,77 @@ function assertReceiptSuccessor(existing: ExecutionReceipt, candidate: Execution
     )
       throw new Error("Execution receipt action outcome is not a valid successor");
   }
+}
+
+function validateVerification(
+  value: unknown,
+  receiptSchemaVersion: unknown,
+  receiptKind: unknown,
+  receiptProviders: unknown,
+): ExecutionReceiptVerification | undefined {
+  if (receiptSchemaVersion === 1) {
+    if (value !== undefined) throw new Error("Legacy execution receipt contains verification data");
+    return undefined;
+  }
+  const verification = exactRecord(value, [
+    "schemaVersion",
+    "mode",
+    "endpointRef",
+    "inventoryRoots",
+    "claudeMcp",
+    "codexPluginList",
+    "beforeFingerprint",
+    "plannedFingerprint",
+    "observedFingerprint",
+  ]);
+  if (
+    verification.schemaVersion !== 1 ||
+    (verification.mode !== "local" && verification.mode !== "remote") ||
+    typeof verification.endpointRef !== "string" ||
+    !/^endpoint_[a-f0-9]{64}$/.test(verification.endpointRef) ||
+    typeof verification.claudeMcp !== "boolean" ||
+    typeof verification.codexPluginList !== "boolean" ||
+    (receiptKind === "push" ? verification.mode !== "remote" : verification.mode !== "local") ||
+    (verification.mode === "local" && verification.codexPluginList !== false) ||
+    typeof verification.beforeFingerprint !== "string" ||
+    !/^fp_[a-f0-9]{64}$/.test(verification.beforeFingerprint) ||
+    typeof verification.plannedFingerprint !== "string" ||
+    !/^fp_[a-f0-9]{64}$/.test(verification.plannedFingerprint) ||
+    (verification.observedFingerprint !== undefined &&
+      (typeof verification.observedFingerprint !== "string" ||
+        !/^fp_[a-f0-9]{64}$/.test(verification.observedFingerprint))) ||
+    !Array.isArray(verification.inventoryRoots) ||
+    (verification.inventoryRoots.length === 0 &&
+      verification.claudeMcp !== true &&
+      verification.codexPluginList !== true) ||
+    verification.inventoryRoots.length > 4096 ||
+    new Set(verification.inventoryRoots).size !== verification.inventoryRoots.length
+  )
+    throw new Error("Execution receipt verification is invalid");
+  const roots = verification.inventoryRoots as unknown[];
+  const providers = new Set(receiptProviders as unknown[]);
+  for (const root of roots) {
+    if (typeof root !== "string") throw new Error("Execution receipt verification root is invalid");
+    try {
+      validateCanonicalArchivePath(root);
+    } catch {
+      throw new Error("Execution receipt verification root is invalid");
+    }
+    if (!isAllowedManagedPath(root, false))
+      throw new Error("Execution receipt verification root is unmanaged");
+    if (
+      (root.startsWith("claude/") && !providers.has("claude")) ||
+      (root.startsWith("codex/") && !providers.has("codex"))
+    )
+      throw new Error("Execution receipt verification root is outside provider selection");
+  }
+  if (verification.claudeMcp !== roots.includes("claude/.mcp-config.json"))
+    throw new Error("Execution receipt Claude MCP verification scope is inconsistent");
+  if (verification.codexPluginList && !providers.has("codex"))
+    throw new Error("Execution receipt Codex plugin scope is outside provider selection");
+  if ([...roots].sort().some((root, index) => root !== roots[index]))
+    throw new Error("Execution receipt verification roots are not canonical");
+  return verification as unknown as ExecutionReceiptVerification;
 }
 
 function exactRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {

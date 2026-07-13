@@ -83,16 +83,17 @@ export function createCli(): Command {
 
   program
     .command("inspect")
-    .description("Inspect a backup archive without extracting it")
-    .argument("<archive>", "Path to archive")
+    .description("Inspect a backup archive or execution receipt")
+    .argument("<archiveOrReceipt>", "Path to archive or canonical receipt ID")
     .option("--files", "Include archived file metadata", false)
     .option("--json", "Print one JSON object", false)
     .action(inspectCommand);
 
   program
     .command("verify")
-    .description("Verify a backup archive without extracting it")
-    .argument("<archive>", "Path to archive")
+    .description("Verify a backup archive or execution receipt")
+    .argument("<archiveOrReceipt>", "Path to archive or canonical receipt ID")
+    .option("--remote <target>", "Explicit remote target for a push receipt")
     .option("--json", "Print one JSON object", false)
     .action(verifyCommand);
 

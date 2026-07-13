@@ -34,4 +34,40 @@ describe("SSH session setup", () => {
       }),
     ).rejects.toThrow("SSH session setup failed and temporary state could not be removed");
   });
+
+  it("keeps interrupt cleanup registered until an in-flight close completes", async () => {
+    let releaseClose: (() => void) | undefined;
+    let interruptCleanup: (() => Promise<void>) | undefined;
+    const unregister = vi.fn();
+    const removed = vi.fn(async () => undefined);
+    const session = await createSshSession("operator@example.test", {
+      mkdtemp: async () => "/tmp/ccm-ssh-closing",
+      chmod: async () => undefined,
+      rm: removed,
+      runProcess: async () => {
+        await new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        });
+        return { stdout: "", stderr: "", exitCode: 0, signal: null };
+      },
+      registerCleanup: (cleanup) => {
+        interruptCleanup = cleanup;
+        return unregister;
+      },
+    });
+
+    const close = session.close();
+    expect(unregister).not.toHaveBeenCalled();
+    const interruptedClose = interruptCleanup?.();
+    expect(interruptedClose).toBe(close);
+    expect(unregister).not.toHaveBeenCalled();
+
+    releaseClose?.();
+    await Promise.all([close, interruptedClose]);
+    expect(removed).toHaveBeenCalledWith("/tmp/ccm-ssh-closing", {
+      recursive: true,
+      force: true,
+    });
+    expect(unregister).toHaveBeenCalledOnce();
+  });
 });

@@ -8,6 +8,7 @@ import {
   type ExecutionReceipt,
   type ExecutionReceiptAction,
   type ExecutionReceiptOutcome,
+  executionReceiptEndpointRef,
   finishExecutionReceipt,
   ReceiptPublicationAmbiguousError,
   reconcileExecutionReceiptPublication,
@@ -23,6 +24,10 @@ import {
   overlayInventory,
   symlinkInventoryEntry,
 } from "./inventory.ts";
+import {
+  claudeMcpManagedEntry,
+  managedStateVerificationFingerprint,
+} from "./managed-state-verification.ts";
 import {
   createMigrationPlan,
   deriveActionId,
@@ -82,6 +87,9 @@ interface PushPlanResources {
   readonly beforeRequest: PushExecutionObservationRequest;
   readonly finalRequest: PushExecutionObservationRequest;
   readonly filesystemPostFingerprint: PlanFingerprint;
+  readonly verificationPostFingerprint: PlanFingerprint;
+  readonly verificationClaudeMcp: boolean;
+  readonly verificationCodexPluginList: boolean;
   readonly sources: SealedPushSourceBindings;
   readonly transformedBytes: ReadonlyMap<string, Uint8Array>;
   readonly decisionFiles: readonly FileEntry[];
@@ -107,6 +115,23 @@ export type PushActionBinding =
   | { readonly kind: "overlay-group"; readonly logicalGroup: string }
   | { readonly kind: "symlink-view"; readonly names: readonly string[] }
   | { readonly kind: "plugin-add"; readonly pluginId: string; readonly codexCommand: string };
+
+function pushVerificationFingerprint(
+  observation: PushTargetObservation,
+  options: { readonly claudeMcp: boolean; readonly codexPluginList: boolean },
+): PlanFingerprint {
+  const mcp = options.claudeMcp ? observation.facts.captures.get("claude-mcp") : undefined;
+  const pluginList = options.codexPluginList ? observation.facts.codexPluginList : undefined;
+  if (pluginList !== undefined && pluginList.status !== "ok")
+    throw new ExecutionError("Managed Codex plugin state could not be observed");
+  return managedStateVerificationFingerprint(
+    canonicalInventory([
+      ...observation.inventory,
+      ...(options.claudeMcp ? [claudeMcpManagedEntry(mcp ?? undefined)] : []),
+    ]),
+    pluginList,
+  );
+}
 
 export interface PushExecutionAdapter {
   observe(
@@ -755,6 +780,8 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
   if (transformed.claudeMcp) transformedBytes.set("claude/.mcp-config.json", transformed.claudeMcp);
   if (transformed.codexConfig) transformedBytes.set("codex/config.toml", transformed.codexConfig);
   if (transformed.codexHooks) transformedBytes.set("codex/hooks.json", transformed.codexHooks);
+  const verificationCodexPluginList =
+    input.preparedRequest.queries.codexPluginList === true && projectedPluginList.status === "ok";
   resources.set(planned, {
     files: files.map((file) => Object.freeze({ ...file })),
     sourceInventory: canonicalInventory(incoming),
@@ -763,6 +790,17 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     beforeRequest,
     finalRequest,
     filesystemPostFingerprint,
+    verificationPostFingerprint: managedStateVerificationFingerprint(
+      canonicalInventory([
+        ...stagedFinal,
+        ...(transformed.claudeMcp ? [claudeMcpManagedEntry(transformed.claudeMcp)] : []),
+      ]),
+      verificationCodexPluginList && projectedPluginList.status === "ok"
+        ? projectedPluginList
+        : undefined,
+    ),
+    verificationClaudeMcp: transformed.claudeMcp !== undefined,
+    verificationCodexPluginList,
     sources: sealPushSourceBindings(files),
     transformedBytes,
     decisionFiles,
@@ -776,7 +814,7 @@ export async function executePlannedPush(
   planned: PlannedPush,
   adapter: PushExecutionAdapter,
   options: { readonly context?: RuntimeContext } = {},
-): Promise<void> {
+): Promise<string | undefined> {
   const resource = resources.get(planned);
   if (!resource) throw new Error("Push plan is forged or already consumed");
   if (resource.profile) await verifyPushProfileAssets(resource.profile);
@@ -833,6 +871,7 @@ export async function executePlannedPush(
   let mutationStarted = false;
   let receipt: ExecutionReceipt | undefined;
   let observedPostFingerprint: PlanFingerprint | undefined;
+  let observedManagedStateFingerprint: PlanFingerprint | undefined;
   let rollbackVerified = false;
   let failedEffects = false;
   let cleanupPending = false;
@@ -854,6 +893,21 @@ export async function executePlannedPush(
       try {
         receipt = await startExecutionReceipt(options.context, planned.plan, {
           filesystemPostFingerprint: resource.filesystemPostFingerprint,
+          verification: {
+            mode: "remote",
+            endpointRef: executionReceiptEndpointRef("remote", resource.beforeRequest.host),
+            inventoryRoots: [
+              ...resource.finalRequest.inventoryRoots,
+              ...(resource.verificationClaudeMcp ? ["claude/.mcp-config.json"] : []),
+            ].sort(),
+            claudeMcp: resource.verificationClaudeMcp,
+            codexPluginList: resource.verificationCodexPluginList,
+            beforeFingerprint: pushVerificationFingerprint(observed, {
+              claudeMcp: resource.verificationClaudeMcp,
+              codexPluginList: resource.verificationCodexPluginList,
+            }),
+            plannedFingerprint: resource.verificationPostFingerprint,
+          },
         });
       } catch (error) {
         if (!(error instanceof ReceiptPublicationAmbiguousError)) throw error;
@@ -940,6 +994,10 @@ export async function executePlannedPush(
     if (filesystemFinal.requestIdentity !== resource.finalRequest.requestIdentity)
       throw new ExecutionError("Push filesystem observation does not match its request");
     observedPostFingerprint = pushStateFingerprint(filesystemFinal);
+    observedManagedStateFingerprint = pushVerificationFingerprint(filesystemFinal, {
+      claudeMcp: resource.verificationClaudeMcp,
+      codexPluginList: resource.verificationCodexPluginList,
+    });
     if (observedPostFingerprint !== resource.filesystemPostFingerprint)
       throw new ExecutionError("Push filesystem target does not match the planned post-state");
     await session?.commit();
@@ -953,6 +1011,7 @@ export async function executePlannedPush(
           completedActions.add(action.id);
         } catch (error) {
           observedPostFingerprint = undefined;
+          observedManagedStateFingerprint = undefined;
           if (error instanceof ExecutionError && error.message === "committed_with_failed_effects")
             throw error;
           throw new ExecutionError("committed_effect_recovery_required", { cause: error });
@@ -960,10 +1019,15 @@ export async function executePlannedPush(
       }
     }
     observedPostFingerprint = undefined;
+    observedManagedStateFingerprint = undefined;
     const final = await adapter.observe(resource.finalRequest, { mutationStarted: true });
     if (final.requestIdentity !== resource.finalRequest.requestIdentity)
       throw new ExecutionError("Push final observation does not match its request");
     observedPostFingerprint = pushStateFingerprint(final);
+    observedManagedStateFingerprint = pushVerificationFingerprint(final, {
+      claudeMcp: resource.verificationClaudeMcp,
+      codexPluginList: resource.verificationCodexPluginList,
+    });
     if (observedPostFingerprint !== planned.plan.stagedPostFingerprint)
       throw new ExecutionError("Push target does not match the planned post-state");
     await session?.verifyCommit();
@@ -1000,8 +1064,13 @@ export async function executePlannedPush(
             const partial = await adapter.observe(resource.finalRequest, {
               mutationStarted: true,
             });
-            if (partial.requestIdentity === resource.finalRequest.requestIdentity)
+            if (partial.requestIdentity === resource.finalRequest.requestIdentity) {
               observedPostFingerprint = pushStateFingerprint(partial);
+              observedManagedStateFingerprint = pushVerificationFingerprint(partial, {
+                claudeMcp: resource.verificationClaudeMcp,
+                codexPluginList: resource.verificationCodexPluginList,
+              });
+            }
           } catch {
             // The helper terminal state is known even when target observation is unavailable.
           }
@@ -1019,6 +1088,8 @@ export async function executePlannedPush(
         failures[0] = new ExecutionError("Push execution failed after mutation started", {
           cause: error,
         });
+      observedPostFingerprint = undefined;
+      observedManagedStateFingerprint = undefined;
       try {
         await session.abort();
       } catch (recoveryError) {
@@ -1032,6 +1103,10 @@ export async function executePlannedPush(
           if (restored.requestIdentity !== resource.beforeRequest.requestIdentity)
             throw new ExecutionError("Rollback observation does not match its request");
           observedPostFingerprint = pushStateFingerprint(restored);
+          observedManagedStateFingerprint = pushVerificationFingerprint(restored, {
+            claudeMcp: resource.verificationClaudeMcp,
+            codexPluginList: resource.verificationCodexPluginList,
+          });
           if (observedPostFingerprint !== planned.plan.targetFingerprint)
             throw new ExecutionError("Rollback did not restore the planned target state");
           await session.verifyRollback();
@@ -1089,6 +1164,9 @@ export async function executePlannedPush(
           committed,
         ),
         ...(observed === undefined ? {} : { observedPostFingerprint: observed }),
+        ...(observedManagedStateFingerprint === undefined
+          ? {}
+          : { observedManagedStateFingerprint }),
         warnings: pushReceiptWarnings(primary, outcome, cleanupPending),
         ...(transportMetrics?.transferredBytes == null
           ? {}
@@ -1116,6 +1194,7 @@ export async function executePlannedPush(
       cause: new AggregateError(failures),
     });
   if (!completed) throw new ExecutionError("Push did not reach a terminal outcome");
+  return receipt?.id;
 }
 
 function pushReceiptActions(

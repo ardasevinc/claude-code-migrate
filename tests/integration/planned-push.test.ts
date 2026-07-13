@@ -184,6 +184,7 @@ describe("planned remote push", () => {
         result.stdout.indexOf("Successfully pushed config"),
       );
       expect(result.stdout).toContain("Successfully pushed config to operator@example.test");
+      expect(result.stdout).toMatch(/Receipt: rcpt_[a-f0-9]{32}/);
 
       const transferCount = commands.filter(
         ({ command }) => command === "scp" || command === "rsync",

@@ -40,8 +40,11 @@ export async function pushCommand(
 
     if (planned.plan.status === "blocked") throw new BlockedError("Push plan is blocked");
     log.info(`Executing push plan ${planned.plan.id}...`);
-    await executePlannedPush(planned, adapter, { context: createRuntimeContext() });
+    const receiptId = await executePlannedPush(planned, adapter, {
+      context: createRuntimeContext(),
+    });
     log.success(`Successfully pushed config to ${host}`);
+    if (receiptId) log.info(`Receipt: ${receiptId}`);
   });
 }
 

@@ -37,6 +37,8 @@ export interface SshSessionSetup {
     path: string,
     options: { readonly recursive: true; readonly force: true },
   ) => Promise<void>;
+  readonly runProcess?: typeof runProcess;
+  readonly registerCleanup?: typeof registerInterruptCleanup;
 }
 
 const defaultSetup: SshSessionSetup = { mkdtemp, chmod, rm };
@@ -75,33 +77,38 @@ export async function createSshSession(
     `-oControlPath=${controlPath}`,
   ] as const;
   const rsyncShell = `ssh ${options.join(" ")}`;
+  const run = setup.runProcess ?? runProcess;
+  const registerCleanup = setup.registerCleanup ?? registerInterruptCleanup;
   let closing: Promise<void> | undefined;
   let unregister = () => {};
   const closeOnce = async () => {
-    unregister();
-    const failures: ProcessError[] = [];
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await runProcess("ssh", [`-oControlPath=${controlPath}`, "-O", "exit", host], {
-        nothrow: true,
-        timeoutMs: 5_000,
+    try {
+      const failures: ProcessError[] = [];
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await run("ssh", [`-oControlPath=${controlPath}`, "-O", "exit", host], {
+          nothrow: true,
+          timeoutMs: 5_000,
+        });
+        if (result.exitCode === 0 && result.signal === null && !result.error) {
+          await setup.rm(root, { recursive: true, force: true });
+          return;
+        }
+        failures.push(new ProcessError("ssh", result));
+        if (!(await lstat(controlPath).catch(() => null))) {
+          await setup.rm(root, { recursive: true, force: true });
+          return;
+        }
+      }
+      throw new ExecutionError("Could not close multiplexed SSH session; control socket retained", {
+        cause: new AggregateError(failures),
       });
-      if (result.exitCode === 0 && result.signal === null && !result.error) {
-        await setup.rm(root, { recursive: true, force: true });
-        return;
-      }
-      failures.push(new ProcessError("ssh", result));
-      if (!(await lstat(controlPath).catch(() => null))) {
-        await setup.rm(root, { recursive: true, force: true });
-        return;
-      }
+    } finally {
+      unregister();
     }
-    throw new ExecutionError("Could not close multiplexed SSH session; control socket retained", {
-      cause: new AggregateError(failures),
-    });
   };
   const close = () => (closing ??= closeOnce());
   try {
-    unregister = registerInterruptCleanup(close);
+    unregister = registerCleanup(close);
   } catch (error) {
     try {
       await setup.rm(root, { recursive: true, force: true });
@@ -119,7 +126,7 @@ export async function createSshSession(
   return {
     host,
     run: (command, processOptions = {}, sshOptions = []) =>
-      runProcess("ssh", [...options, ...sshOptions, host, command], processOptions),
+      run("ssh", [...options, ...sshOptions, host, command], processOptions),
     upload: (command, args, processOptions = {}) =>
       runInheritedProcess(
         command,

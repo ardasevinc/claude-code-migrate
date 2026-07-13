@@ -64,14 +64,25 @@ async function fixture() {
     policies: [],
     createdAt: "2026-07-13T00:00:00.000Z",
   });
-  return { root, context, plan };
+  const verification = {
+    mode: "local" as const,
+    endpointRef: `endpoint_${"6".repeat(64)}`,
+    inventoryRoots: ["codex/config.toml"],
+    claudeMcp: false,
+    codexPluginList: false,
+    beforeFingerprint: `fp_${"7".repeat(64)}`,
+    plannedFingerprint: `fp_${"8".repeat(64)}`,
+  };
+  return { root, context, plan, verification };
 }
 
 describe("execution receipts", () => {
   it("durably publishes a private started receipt and a revisioned terminal receipt", async () => {
     const state = await fixture();
     try {
-      const started = await startExecutionReceipt(state.context, state.plan);
+      const started = await startExecutionReceipt(state.context, state.plan, {
+        verification: state.verification,
+      });
       expect(started.outcome).toBe("started");
       expect((await lstat(join(state.root, "state/ccm/receipts"))).mode & 0o777).toBe(0o700);
       const path = join(state.root, "state/ccm/receipts", `${started.id}.json`);
@@ -86,6 +97,7 @@ describe("execution receipts", () => {
           outcome: action.outcome === "skipped" ? "skipped" : "succeeded",
         })),
         observedPostFingerprint: state.plan.stagedPostFingerprint,
+        observedManagedStateFingerprint: state.verification.plannedFingerprint,
         transferredBytes: 1024,
         reusedBytes: 256,
       });
@@ -108,7 +120,9 @@ describe("execution receipts", () => {
   it("rejects stale terminal publication and strict-schema tampering", async () => {
     const state = await fixture();
     try {
-      const started = await startExecutionReceipt(state.context, state.plan);
+      const started = await startExecutionReceipt(state.context, state.plan, {
+        verification: state.verification,
+      });
       const finish = {
         outcome: "failed" as const,
         finishedAt: new Date("2026-07-13T00:00:00.010Z"),
@@ -118,6 +132,7 @@ describe("execution receipts", () => {
           outcome: "succeeded",
           finishedAt: new Date("2026-07-13T00:00:00.010Z"),
           observedPostFingerprint: state.plan.stagedPostFingerprint,
+          observedManagedStateFingerprint: state.verification.plannedFingerprint,
           actions: started.actions.map((action) => ({
             ...action,
             outcome: action.outcome === "pending" ? ("skipped" as const) : ("succeeded" as const),
@@ -131,6 +146,30 @@ describe("execution receipts", () => {
           finish,
         ),
       ).rejects.toThrow("valid successor");
+      await expect(
+        finishExecutionReceipt(
+          state.context,
+          {
+            ...started,
+            verification: {
+              ...(started.verification as NonNullable<typeof started.verification>),
+              inventoryRoots: ["codex/hooks.json"],
+            },
+          },
+          finish,
+        ),
+      ).rejects.toThrow("valid successor");
+      await expect(
+        finishExecutionReceipt(state.context, started, {
+          outcome: "succeeded",
+          finishedAt: new Date("2026-07-13T00:00:00.010Z"),
+          observedPostFingerprint: state.plan.stagedPostFingerprint,
+          actions: started.actions.map((action) => ({
+            ...action,
+            outcome: action.outcome === "pending" ? ("succeeded" as const) : action.outcome,
+          })),
+        }),
+      ).rejects.toThrow("verification does not match");
       await expect(
         finishExecutionReceipt(state.context, started, {
           ...finish,
@@ -155,6 +194,91 @@ describe("execution receipts", () => {
       await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
         "unknown field",
       );
+      await writeFile(path, `${JSON.stringify({ ...parsed, schemaVersion: 1 })}\n`, {
+        mode: 0o600,
+      });
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "Legacy execution receipt contains verification data",
+      );
+      await writeFile(
+        path,
+        `${JSON.stringify({
+          ...parsed,
+          verification: {
+            ...(parsed.verification as Record<string, unknown>),
+            inventoryRoots: ["/private/target"],
+          },
+        })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "verification root is invalid",
+      );
+      await writeFile(
+        path,
+        `${JSON.stringify({
+          ...parsed,
+          verification: {
+            ...(parsed.verification as Record<string, unknown>),
+            inventoryRoots: ["codex/auth.json"],
+          },
+        })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "verification root is unmanaged",
+      );
+      for (const root of ["codex", "claude", "shared/agents", "codex/.tmp"]) {
+        await writeFile(
+          path,
+          `${JSON.stringify({
+            ...parsed,
+            verification: {
+              ...(parsed.verification as Record<string, unknown>),
+              inventoryRoots: [root],
+            },
+          })}\n`,
+          { mode: 0o600 },
+        );
+        await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+          "verification root is unmanaged",
+        );
+      }
+      await writeFile(
+        path,
+        `${JSON.stringify({
+          ...parsed,
+          providers: ["claude", "codex"],
+          verification: {
+            ...(parsed.verification as Record<string, unknown>),
+            inventoryRoots: ["claude/.mcp-config.json", "codex/config.toml"],
+          },
+        })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "Claude MCP verification scope is inconsistent",
+      );
+      await writeFile(
+        path,
+        `${JSON.stringify({
+          ...parsed,
+          verification: {
+            ...(parsed.verification as Record<string, unknown>),
+            codexPluginList: true,
+          },
+        })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "verification is invalid",
+      );
+      await writeFile(path, `${JSON.stringify({ ...parsed, providers: ["claude"] })}\n`, {
+        mode: 0o600,
+      });
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "verification root is outside provider selection",
+      );
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }
@@ -163,7 +287,9 @@ describe("execution receipts", () => {
   it("binds the embedded receipt identity to its requested filename", async () => {
     const state = await fixture();
     try {
-      const started = await startExecutionReceipt(state.context, state.plan);
+      const started = await startExecutionReceipt(state.context, state.plan, {
+        verification: state.verification,
+      });
       const directory = join(state.root, "state/ccm/receipts");
       const copiedId = `rcpt_${"f".repeat(32)}`;
       await copyFile(join(directory, `${started.id}.json`), join(directory, `${copiedId}.json`));
@@ -187,8 +313,8 @@ describe("execution receipts", () => {
         },
       });
       const receipts = await Promise.all([
-        startExecutionReceipt(context, state.plan),
-        startExecutionReceipt(context, state.plan),
+        startExecutionReceipt(context, state.plan, { verification: state.verification }),
+        startExecutionReceipt(context, state.plan, { verification: state.verification }),
       ]);
       expect(new Set(receipts.map((receipt) => receipt.id)).size).toBe(2);
       await Promise.all(receipts.map((receipt) => readExecutionReceipt(context, receipt.id)));

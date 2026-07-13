@@ -1,14 +1,16 @@
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectionPathsForHome } from "../../src/config/providers.ts";
-import { observeLocalRestoreTarget } from "../../src/core/restore-observation.ts";
-import { MAX_RESTORE_OBSERVATION_FILE_BYTES } from "../../src/core/restore-observation.ts";
-import { resolveLocalHookCandidate } from "../../src/core/restore-observation.ts";
-import { createRuntimeContext } from "../../src/runtime/context.ts";
 import type { InventoryEntry } from "../../src/core/inventory.ts";
+import {
+  MAX_RESTORE_OBSERVATION_FILE_BYTES,
+  observeLocalRestoreTarget,
+  resolveLocalHookCandidate,
+} from "../../src/core/restore-observation.ts";
+import { createRuntimeContext } from "../../src/runtime/context.ts";
 
 const incoming = (path: string): InventoryEntry => ({
   path,

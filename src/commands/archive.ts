@@ -1,18 +1,25 @@
 import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { verifyArchive } from "../core/archive-reader.ts";
-import { BlockedError, ReportedCliError } from "../errors.ts";
+import { isExecutionReceiptId } from "../core/execution-receipt.ts";
+import { BlockedError, ReportedCliError, UsageError } from "../errors.ts";
 import type { VerifiedArchive } from "../types/index.ts";
+import { inspectReceiptCommand, verifyReceiptCommand } from "./receipt.ts";
 
 interface ArchiveCommandOptions {
   files?: boolean;
   json?: boolean;
+  remote?: string;
 }
 
 export async function inspectCommand(
   archiveArg: string,
   options: ArchiveCommandOptions,
 ): Promise<void> {
+  if (isExecutionReceiptId(archiveArg)) {
+    await inspectReceiptCommand(archiveArg, options);
+    return;
+  }
   const result = await readArchive(archiveArg, options.json ?? false);
   if (!result) return;
 
@@ -30,8 +37,19 @@ export async function inspectCommand(
 
 export async function verifyCommand(
   archiveArg: string,
-  options: Pick<ArchiveCommandOptions, "json">,
+  options: Pick<ArchiveCommandOptions, "json" | "remote">,
 ): Promise<void> {
+  if (isExecutionReceiptId(archiveArg)) {
+    await verifyReceiptCommand(archiveArg, options);
+    return;
+  }
+  if (options.remote !== undefined) {
+    if (options.json) {
+      console.log(JSON.stringify({ valid: false, error: "Invalid archive verification request" }));
+      throw new ReportedCliError(2);
+    }
+    throw new UsageError("--remote is available only for execution receipt verification");
+  }
   const result = await readArchive(archiveArg, options.json ?? false);
   if (!result) return;
   const valid = result.integrity === "verified";

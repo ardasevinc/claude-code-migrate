@@ -23,6 +23,7 @@ import {
   type ExecutionReceipt,
   type ExecutionReceiptAction,
   type ExecutionReceiptOutcome,
+  executionReceiptEndpointRef,
   finishExecutionReceipt,
   startExecutionReceipt,
 } from "./execution-receipt.ts";
@@ -42,6 +43,10 @@ import {
   type LocalTransactionRootBinding,
   localTransactionRootsForPaths,
 } from "./local-transaction.ts";
+import {
+  claudeMcpManagedEntry,
+  managedStateVerificationFingerprint,
+} from "./managed-state-verification.ts";
 import {
   createMigrationPlan,
   deriveActionId,
@@ -125,6 +130,40 @@ function inventoryEntry(path: string, mode: number, bytes: Uint8Array): Inventor
     size: bytes.byteLength,
     sha256: bytesSha256(bytes),
   };
+}
+
+function restoreObservedInventory(
+  observation: RestoreTargetObservation,
+  includeClaudeMcp: boolean,
+): readonly InventoryEntry[] {
+  return canonicalInventory([
+    ...observation.inventory,
+    ...(includeClaudeMcp ? [claudeMcpManagedEntry(observation.claudeMcp.bytes)] : []),
+  ]);
+}
+
+function restoreVerificationInventory(
+  inventory: readonly InventoryEntry[],
+  claudeMcp: Uint8Array | undefined,
+  includeClaudeMcp: boolean,
+): readonly InventoryEntry[] {
+  return canonicalInventory([
+    ...inventory.filter((entry) => entry.path !== "claude/.mcp-config.json"),
+    ...(includeClaudeMcp ? [claudeMcpManagedEntry(claudeMcp)] : []),
+  ]);
+}
+
+function verificationRoots(
+  before: readonly InventoryEntry[],
+  after: readonly InventoryEntry[],
+): readonly string[] {
+  return [
+    ...new Set(
+      [before, after].flatMap((inventory) =>
+        groupManagedTopLevelEntries(inventory).map((group) => group.path),
+      ),
+    ),
+  ].sort();
 }
 
 function selectedInventory(
@@ -707,7 +746,7 @@ async function buildRestoreTransactionMembers(
 export async function executePlannedRestore(
   planned: PlannedRestore,
   options: ExecutePlannedRestoreOptions = {},
-): Promise<void> {
+): Promise<string | undefined> {
   const resource = resources.get(planned);
   if (!resource) throw new BlockedError("Restore plan is forged or no longer executable");
   if (planned.plan.status === "blocked")
@@ -729,6 +768,9 @@ export async function executePlannedRestore(
   let transaction:
     | { roots: LocalTransactionRootBinding[]; members: LocalTransactionMemberInput[] }
     | undefined;
+  const includeClaudeMcp =
+    resource.selectedInventory.some((entry) => entry.path === "claude/.mcp-config.json") ||
+    resource.transformed.claudeMcp !== undefined;
   try {
     const scan = await scanArchive(resource.archivePath, { extractTo: extraction });
     const observedInventory = canonicalInventory(
@@ -805,7 +847,23 @@ export async function executePlannedRestore(
       options.afterStageClone,
     );
     transaction = builtTransaction;
-    receipt = await startExecutionReceipt(resource.context, planned.plan);
+    const beforeInventory = restoreObservedInventory(resource.observation, includeClaudeMcp);
+    const plannedVerificationInventory = restoreVerificationInventory(
+      resource.stagedFinal,
+      resource.transformed.claudeMcp,
+      includeClaudeMcp,
+    );
+    receipt = await startExecutionReceipt(resource.context, planned.plan, {
+      verification: {
+        mode: "local",
+        endpointRef: executionReceiptEndpointRef("local", resource.context.home),
+        inventoryRoots: verificationRoots(beforeInventory, plannedVerificationInventory),
+        claudeMcp: includeClaudeMcp,
+        codexPluginList: false,
+        beforeFingerprint: managedStateVerificationFingerprint(beforeInventory),
+        plannedFingerprint: managedStateVerificationFingerprint(plannedVerificationInventory),
+      },
+    });
     resources.delete(planned);
     mutationStarted = true;
     const journal = await executeLocalTransaction({
@@ -847,6 +905,9 @@ export async function executePlannedRestore(
       finishedAt: resource.context.now(),
       actions: receiptActions(receipt, "succeeded"),
       observedPostFingerprint: planned.plan.stagedPostFingerprint,
+      observedManagedStateFingerprint: managedStateVerificationFingerprint(
+        plannedVerificationInventory,
+      ),
       transactionId,
     });
     await finalizeLocalTransaction({
@@ -868,6 +929,7 @@ export async function executePlannedRestore(
         cause: retentionError,
       });
     }
+    return receipt.id;
   } catch (error) {
     if (transactionCommitted) {
       if (error instanceof ExecutionError) throw error;
@@ -882,6 +944,7 @@ export async function executePlannedRestore(
       let outcome: ExecutionReceiptOutcome = "failed";
       const terminalTransactionId = transactionId;
       let observedPostFingerprint: string | undefined;
+      let observedManagedStateFingerprint: string | undefined;
       try {
         const observed = await observeLocalRestoreTarget({
           context: resource.context,
@@ -891,6 +954,9 @@ export async function executePlannedRestore(
           queries: resource.queries,
         });
         observedPostFingerprint = observed.targetFingerprint;
+        observedManagedStateFingerprint = managedStateVerificationFingerprint(
+          restoreObservedInventory(observed, includeClaudeMcp),
+        );
         if (transactionId && observed.targetFingerprint === planned.plan.targetFingerprint)
           outcome = "rolled_back";
       } catch {
@@ -915,6 +981,9 @@ export async function executePlannedRestore(
           finishedAt: resource.context.now(),
           actions: receiptActions(receipt, "failed"),
           ...(observedPostFingerprint === undefined ? {} : { observedPostFingerprint }),
+          ...(observedManagedStateFingerprint === undefined
+            ? {}
+            : { observedManagedStateFingerprint }),
           ...(terminalTransactionId === undefined ? {} : { transactionId: terminalTransactionId }),
         });
       } catch (receiptError) {

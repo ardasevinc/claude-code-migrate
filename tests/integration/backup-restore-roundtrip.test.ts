@@ -48,6 +48,7 @@ describe("real backup and restore product boundary", () => {
 
       const restored = await runCcm(["restore", archive, "codex"], target);
       expect(restored).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(restored.stdout).toMatch(/Receipt: rcpt_[a-f0-9]{32}/);
       expect(await readFile(join(target.home, ".codex/config.toml"), "utf8")).toBe(
         'model = "gpt-5"\n',
       );

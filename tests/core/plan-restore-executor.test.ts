@@ -25,6 +25,7 @@ import {
   planRestore,
   RestoreTransformPlanError,
 } from "../../src/core/plan-restore.ts";
+import { verifyExecutionReceipt } from "../../src/core/receipt-verification.ts";
 import { listTransactionJournals } from "../../src/core/transaction-journal.ts";
 import { BlockedError } from "../../src/errors.ts";
 import { createRuntimeContext } from "../../src/runtime/context.ts";
@@ -213,7 +214,7 @@ describe("executePlannedRestore", () => {
       await writeFile(state.archivePath, "changed");
       await expect(executePlannedRestore(state.planned)).rejects.toBeInstanceOf(BlockedError);
       await writeFile(state.archivePath, original);
-      await expect(executePlannedRestore(state.planned)).resolves.toBeUndefined();
+      await expect(executePlannedRestore(state.planned)).resolves.toMatch(/^rcpt_/);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }
@@ -342,7 +343,7 @@ describe("executePlannedRestore", () => {
         paths: collectionPathsForHome(home),
       });
 
-      await executePlannedRestore(planned);
+      const receiptId = await executePlannedRestore(planned);
 
       expect(JSON.parse(await readFile(join(home, ".claude.json"), "utf8"))).toEqual({
         theme: "dark",
@@ -352,6 +353,21 @@ describe("executePlannedRestore", () => {
       expect(JSON.parse(await readFile(join(home, backup as string), "utf8"))).toEqual({
         theme: "dark",
         mcpServers: { old: { command: "old" } },
+      });
+      const receipt = await readExecutionReceipt(context, receiptId as string);
+      expect(await verifyExecutionReceipt(context, receipt)).toMatchObject({ valid: true });
+      await writeFile(
+        join(home, ".claude.json"),
+        '{"theme":"light","mcpServers":{"old":{"command":"old"},"new":{"command":"new"}}}',
+      );
+      expect(await verifyExecutionReceipt(context, receipt)).toMatchObject({ valid: true });
+      await writeFile(
+        join(home, ".claude.json"),
+        '{"theme":"light","mcpServers":{"new":{"command":"changed"}}}',
+      );
+      expect(await verifyExecutionReceipt(context, receipt)).toMatchObject({
+        valid: false,
+        status: "drifted",
       });
     } finally {
       await rm(root, { recursive: true, force: true });

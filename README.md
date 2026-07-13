@@ -125,6 +125,22 @@ Archive reads and restores use bounded streaming extraction. ccm rejects unsafe 
 types, duplicate or non-portable destinations, malformed manifests, integrity mismatches, and
 archives that exceed its compressed, expanded, per-file, entry-count, manifest, or path limits.
 
+Successful and failed mutating restores and pushes also write private execution receipts under
+`${XDG_STATE_HOME:-~/.local/state}/ccm/receipts/`. Use the canonical `rcpt_...` filename stem:
+
+```bash
+ccm inspect rcpt_0123456789abcdef0123456789abcdef
+ccm inspect rcpt_0123456789abcdef0123456789abcdef --json
+ccm verify rcpt_0123456789abcdef0123456789abcdef
+ccm verify rcpt_0123456789abcdef0123456789abcdef --remote arda@devbox
+```
+
+Receipt verification re-observes only the receipt's symbolic managed roots and, when applicable,
+Codex plugin state, then compares fingerprints; it does not print file contents. Push receipts
+require the original target through `--remote`, and the target must match the receipt's redacted
+endpoint binding. Older schema-v1 receipts remain inspectable but report drift verification as
+unavailable because they do not carry an observation scope.
+
 ### Push
 
 ```bash

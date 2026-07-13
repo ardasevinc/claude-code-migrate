@@ -217,6 +217,12 @@ describe("push migration planning", () => {
       {
         outcome: "rolled_back",
         observedPostFingerprint: planned.plan.targetFingerprint,
+        verification: {
+          claudeMcp: true,
+          codexPluginList: false,
+          inventoryRoots: expect.arrayContaining(["claude/.mcp-config.json"]),
+          observedFingerprint: expect.stringMatching(/^fp_/),
+        },
       },
     ]);
     await rm(receiptState.root, { recursive: true, force: true });
@@ -455,6 +461,10 @@ describe("push migration planning", () => {
         outcome: "succeeded",
         observedPostFingerprint: planned.plan.stagedPostFingerprint,
         transport: { transferredBytes: 10, reusedBytes: 5 },
+        verification: {
+          codexPluginList: true,
+          observedFingerprint: expect.stringMatching(/^fp_/),
+        },
       },
     ]);
 
@@ -696,6 +706,73 @@ describe("push migration planning", () => {
     expect(JSON.stringify(requests)).toContain("shared/agents/skills");
     await expect(executePlannedPush(planned, adapter)).rejects.toThrow("already consumed");
     await expect(executePlannedPush({ plan: planned.plan }, adapter)).rejects.toThrow("forged");
+  });
+
+  it("does not publish stale pre-abort fingerprints when rollback is unobserved", async () => {
+    const bytes = Buffer.from("demo");
+    const managedEntry = {
+      path: "shared/agents/skills/demo/SKILL.md",
+      type: "file" as const,
+      mode: 0o644 as const,
+      size: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    const before = observation();
+    const after = { ...before, inventory: [managedEntry] };
+
+    for (const failure of ["abort", "rollback-observation"] as const) {
+      const receiptState = await receiptFixture();
+      const planned = await planPush({
+        files: [
+          {
+            sourcePath: "/unused/skill",
+            relativePath: managedEntry.path,
+            isSymlink: false,
+            mcpServersOnly: "demo",
+          },
+        ],
+        host: "target",
+        providers: ["codex"],
+        observation: before,
+      });
+      let observations = 0;
+      await expect(
+        executePlannedPush(
+          planned,
+          {
+            observe: async (request) => {
+              observations += 1;
+              if (observations === 1)
+                return { ...before, requestIdentity: request.requestIdentity };
+              if (observations === 2) return { ...after, requestIdentity: request.requestIdentity };
+              throw new Error("rollback observation failed");
+            },
+            prepare: async () => ({
+              apply: async () => {},
+              commit: async () => {
+                throw new Error("commit transport failed");
+              },
+              applyEffect: async () => {},
+              acknowledgeFailedEffects: async () => {},
+              abort: async () => {
+                if (failure === "abort") throw new Error("abort failed");
+              },
+              isCommitted: () => false,
+              verifyCommit: async () => {},
+              verifyRollback: async () => {},
+              cleanup: async () => {},
+            }),
+          },
+          { context: receiptState.context },
+        ),
+      ).rejects.toThrow();
+
+      const [receipt] = await receipts(receiptState);
+      expect(receipt).toMatchObject({ outcome: "recovery_required" });
+      expect(receipt).not.toHaveProperty("observedPostFingerprint");
+      expect(receipt).not.toHaveProperty("verification.observedFingerprint");
+      await rm(receiptState.root, { recursive: true, force: true });
+    }
   });
 
   it("keeps the sealed plan retryable when remote preparation fails", async () => {

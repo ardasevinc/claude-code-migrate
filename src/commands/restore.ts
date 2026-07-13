@@ -42,7 +42,11 @@ export async function restoreCommandWithContext(
         log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
     return;
   }
-  await executePlannedRestore(planned);
+  const receiptId = await executePlannedRestore(planned);
+  if (receiptId) {
+    log.success("Successfully restored config");
+    log.info(`Receipt: ${receiptId}`);
+  }
 }
 
 export async function prepareRestorePlan(

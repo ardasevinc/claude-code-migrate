@@ -2,15 +2,17 @@ import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { CollectionPaths, ProviderName } from "../types/index.ts";
 import type { RuntimeContext } from "../runtime/context.ts";
+import type { CollectionPaths, ProviderName } from "../types/index.ts";
+import { isExcludedManagedObservationPath } from "./archive-entries.ts";
 import {
   canonicalInventory,
   groupManagedTopLevelEntries,
+  type InventoryEntry,
   inventoryFingerprint,
   symlinkInventoryEntry,
-  type InventoryEntry,
 } from "./inventory.ts";
+import { claudeMcpManagedEntry } from "./managed-state-verification.ts";
 import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
 
 export const MAX_RESTORE_OBSERVATION_FILE_BYTES = 4 * 1024 * 1024;
@@ -51,6 +53,13 @@ export interface ObserveLocalRestoreTargetInput {
   readonly selectedProviders: readonly ProviderName[];
   readonly incoming: readonly InventoryEntry[];
   readonly queries?: RestoreObservationQueries;
+  readonly limits?: { readonly maxEntries?: number };
+}
+
+export interface ObserveLocalManagedInventoryInput {
+  readonly context: RuntimeContext;
+  readonly paths: CollectionPaths;
+  readonly inventoryRoots: readonly string[];
   readonly limits?: { readonly maxEntries?: number };
 }
 
@@ -151,6 +160,7 @@ async function inventoryTree(
   logicalRoot: string,
   budget: ObservationBudget,
 ): Promise<InventoryEntry[]> {
+  if (isExcludedManagedObservationPath(logicalRoot)) return [];
   let stat: Stats;
   try {
     stat = await context.files.lstat(root);
@@ -241,6 +251,35 @@ async function captureMcp(
       digest: sha256("ccm:restore:claude-mcp-bytes", bytes),
     }),
   };
+}
+
+/** Observe only the symbolic managed roots recorded in an execution receipt. */
+export async function observeLocalManagedInventory(
+  input: ObserveLocalManagedInventoryInput,
+): Promise<readonly InventoryEntry[]> {
+  const roots = [...new Set(input.inventoryRoots)].sort();
+  const budget: ObservationBudget = {
+    bytes: 0,
+    entries: 0,
+    maxEntries: input.limits?.maxEntries ?? MAX_RESTORE_OBSERVATION_ENTRIES,
+  };
+  const entries: InventoryEntry[] = [];
+  for (const root of roots) {
+    if (root === "claude/.mcp-config.json") {
+      const captured = await captureMcp(
+        input.context,
+        input.paths.claudeMcpConfigPath,
+        true,
+        budget,
+      );
+      entries.push(claudeMcpManagedEntry(captured.bytes));
+      continue;
+    }
+    entries.push(
+      ...(await inventoryTree(input.context, livePath(input.paths, root), root, budget)),
+    );
+  }
+  return canonicalInventory(entries);
 }
 
 async function sharedSkillNames(
