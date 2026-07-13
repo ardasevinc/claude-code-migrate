@@ -842,13 +842,16 @@ describe("remote push helper", () => {
     roots.push(root);
     const commandPath = join(root, "fake-codex.py");
     const started = join(root, "started");
+    const release = join(root, "release");
     const orphan = join(root, "orphan");
     await writeFile(
       commandPath,
       `#!/usr/bin/env python3
 import subprocess,sys,time
+subprocess.Popen([sys.executable,"-c",${JSON.stringify(`import os,time
+while not os.path.exists(${JSON.stringify(release)}): time.sleep(0.02)
+open(${JSON.stringify(orphan)},"w").close()`)}])
 open(${JSON.stringify(started)},"w").close()
-subprocess.Popen([sys.executable,"-c",${JSON.stringify(`import time;time.sleep(0.5);open(${JSON.stringify(orphan)},"w").close()`)}])
 time.sleep(10)
 `,
     );
@@ -871,7 +874,8 @@ time.sleep(10)
     child.kill("SIGTERM");
     const exit = await new Promise<number | null>((resolve) => child.on("close", resolve));
     expect(exit).not.toBe(0);
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await writeFile(release, "");
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(await lstat(orphan).catch(() => null)).toBeNull();
     const state = JSON.parse(await readFile(join(f.workspace, "state.json"), "utf8")).payload;
     expect(state).toMatchObject({ status: "committed", effectInflight: "signal-effect" });
