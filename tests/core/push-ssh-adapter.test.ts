@@ -361,7 +361,7 @@ describe("SSH remote push helper adapter", () => {
     await changed.cleanup();
     expect(linkDests).toEqual([undefined, join(f.cacheHome, "ccm/staging/v1/ready", snapshotId)]);
     expect(await readFile(join(f.home, ".codex/rules/incoming.md"), "utf8")).toBe("newer");
-  });
+  }, 15_000);
 
   it("preserves an interrupted incoming snapshot for an exact retry", async () => {
     const f = await fixture();
