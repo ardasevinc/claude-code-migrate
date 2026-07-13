@@ -311,6 +311,52 @@ describe("release contract", () => {
     expect(calls[0]?.args.at(-1)).toBe("claude-code-migrate@1.8.2");
   });
 
+  test("retries only transient registry propagation misses", async () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    let installAttempts = 0;
+    let sleeps = 0;
+    const run: CommandRunner = async (command, args) => {
+      calls.push({ command, args });
+      if (command === "npm") {
+        installAttempts += 1;
+        if (installAttempts === 1) {
+          throw new Error(
+            "npm error code ETARGET\nnpm error notarget No matching version found for claude-code-migrate@1.8.2.",
+          );
+        }
+      }
+      if (args[0] === "--version") return { stdout: "1.8.2\n", stderr: "" };
+      if (args[0] === "--help") return { stdout: "Usage: ccm [options]\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+
+    await smokeRegistryPackage("claude-code-migrate", "1.8.2", {
+      run,
+      attempts: 2,
+      delayMs: 1,
+      sleep: async () => {
+        sleeps += 1;
+      },
+    });
+    expect(calls.filter((call) => call.command === "npm")).toHaveLength(2);
+    expect(calls[0]?.args).toContain("--prefer-online");
+    expect(sleeps).toBe(1);
+
+    const permanentFailure: CommandRunner = async () => {
+      throw new Error("npm error code E401");
+    };
+    await expect(
+      smokeRegistryPackage("claude-code-migrate", "1.8.2", {
+        run: permanentFailure,
+        attempts: 2,
+        delayMs: 1,
+        sleep: async () => {
+          throw new Error("must not retry permanent failures");
+        },
+      }),
+    ).rejects.toThrow("E401");
+  });
+
   test("pins the pack-once trusted-publishing and release reconciliation workflow", async () => {
     const workflow = await readFile(join(process.cwd(), ".github/workflows/release.yml"), "utf8");
     expect(workflow.match(/npm pack --pack-destination/g)).toHaveLength(1);

@@ -9,6 +9,12 @@ export interface SmokePackageOptions {
   keepTemporaryDirectory?: boolean;
 }
 
+export interface RegistrySmokePackageOptions extends SmokePackageOptions {
+  attempts?: number;
+  delayMs?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
+}
+
 export async function smokePackage(
   tarballInput: string,
   options: SmokePackageOptions = {},
@@ -26,19 +32,38 @@ export async function smokePackage(
 export async function smokeRegistryPackage(
   name: string,
   version: string,
-  options: SmokePackageOptions = {},
+  options: RegistrySmokePackageOptions = {},
 ): Promise<void> {
   if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(name)) {
     throw new Error("registry package name is invalid");
   }
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("registry package version is invalid");
-  await smokeInstallTarget(`${name}@${version}`, version, options);
+  const attempts = options.attempts ?? 12;
+  const delayMs = options.delayMs ?? 5_000;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 120) {
+    throw new Error("registry smoke attempts are invalid");
+  }
+  if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 60_000) {
+    throw new Error("registry smoke delay is invalid");
+  }
+  await smokeInstallTarget(`${name}@${version}`, version, options, {
+    attempts,
+    delayMs,
+    sleep: options.sleep ?? ((milliseconds) => Bun.sleep(milliseconds)),
+  });
+}
+
+interface InstallRetryPolicy {
+  attempts: number;
+  delayMs: number;
+  sleep: (milliseconds: number) => Promise<void>;
 }
 
 async function smokeInstallTarget(
   installTarget: string,
   expectedVersion: string,
   options: SmokePackageOptions,
+  retry?: InstallRetryPolicy,
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "ccm-package-smoke-"));
   const home = join(root, "home");
@@ -62,20 +87,28 @@ async function smokeInstallTarget(
         (directory) => mkdir(directory, { recursive: true }),
       ),
     );
-    await run(
-      "npm",
-      [
-        "install",
-        "--global",
-        "--prefix",
-        prefix,
-        "--ignore-scripts",
-        "--no-audit",
-        "--no-fund",
-        installTarget,
-      ],
-      { env },
-    );
+    const installArgs = [
+      "install",
+      "--global",
+      "--prefix",
+      prefix,
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+      ...(retry ? ["--prefer-online"] : []),
+      installTarget,
+    ];
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await run("npm", installArgs, { env });
+        break;
+      } catch (error) {
+        if (!retry || attempt >= retry.attempts || !isTransientRegistryMiss(error, installTarget)) {
+          throw error;
+        }
+        await retry.sleep(retry.delayMs);
+      }
+    }
     const executable = join(prefix, "bin", "ccm");
     const version = await run(executable, ["--version"], { env });
     if (version.stdout.trim() !== expectedVersion) {
@@ -88,6 +121,14 @@ async function smokeInstallTarget(
   } finally {
     if (!options.keepTemporaryDirectory) await rm(root, { recursive: true, force: true });
   }
+}
+
+function isTransientRegistryMiss(error: unknown, installTarget: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("ETARGET") &&
+    message.includes(`No matching version found for ${installTarget}`)
+  );
 }
 
 if (import.meta.main) {
