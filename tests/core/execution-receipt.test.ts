@@ -84,6 +84,7 @@ describe("execution receipts", () => {
         verification: state.verification,
       });
       expect(started.outcome).toBe("started");
+      expect(started.actions.every((action) => action.policyProvenance?.[0] === "test")).toBe(true);
       expect((await lstat(join(state.root, "state/ccm/receipts"))).mode & 0o777).toBe(0o700);
       const path = join(state.root, "state/ccm/receipts", `${started.id}.json`);
       expect((await lstat(path)).mode & 0o777).toBe(0o600);
@@ -151,6 +152,19 @@ describe("execution receipts", () => {
           state.context,
           {
             ...started,
+            actions: started.actions.map((action) => ({
+              ...action,
+              policyProvenance: ["forged"],
+            })),
+          },
+          finish,
+        ),
+      ).rejects.toThrow("valid successor");
+      await expect(
+        finishExecutionReceipt(
+          state.context,
+          {
+            ...started,
             verification: {
               ...(started.verification as NonNullable<typeof started.verification>),
               inventoryRoots: ["codex/hooks.json"],
@@ -186,6 +200,39 @@ describe("execution receipts", () => {
       );
       const path = join(state.root, "state/ccm/receipts", `${started.id}.json`);
       const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+      const actionsWithoutProvenance = (parsed.actions as Array<Record<string, unknown>>).map(
+        ({ policyProvenance: _, ...action }) => action,
+      );
+      await writeFile(
+        path,
+        `${JSON.stringify({ ...parsed, actions: actionsWithoutProvenance })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "action is invalid",
+      );
+      await writeFile(
+        path,
+        `${JSON.stringify({ ...parsed, schemaVersion: 2, actions: actionsWithoutProvenance })}\n`,
+        { mode: 0o600 },
+      );
+      expect((await readExecutionReceipt(state.context, started.id)).actions).toEqual(
+        actionsWithoutProvenance,
+      );
+      await writeFile(path, `${JSON.stringify({ ...parsed, schemaVersion: 2 })}\n`, {
+        mode: 0o600,
+      });
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "unknown field",
+      );
+      await writeFile(
+        path,
+        `${JSON.stringify({ ...parsed, schemaVersion: 1, verification: undefined })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
+        "unknown field",
+      );
       await writeFile(path, `${JSON.stringify({ ...parsed, durationMs: 999_999 })}\n`, {
         mode: 0o600,
       });
@@ -194,9 +241,15 @@ describe("execution receipts", () => {
       await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
         "unknown field",
       );
-      await writeFile(path, `${JSON.stringify({ ...parsed, schemaVersion: 1 })}\n`, {
-        mode: 0o600,
-      });
+      await writeFile(
+        path,
+        `${JSON.stringify({
+          ...parsed,
+          schemaVersion: 1,
+          actions: actionsWithoutProvenance,
+        })}\n`,
+        { mode: 0o600 },
+      );
       await expect(readExecutionReceipt(state.context, started.id)).rejects.toThrow(
         "Legacy execution receipt contains verification data",
       );

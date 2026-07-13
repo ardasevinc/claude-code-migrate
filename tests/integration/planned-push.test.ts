@@ -82,6 +82,24 @@ describe("planned remote push", () => {
         env: { HOME: canonicalHome },
       });
       expect(live.exitCode, live.stderr).toBe(0);
+      const receiptId = /Receipt: (rcpt_[a-f0-9]{32})/.exec(live.stdout)?.[1];
+      expect(receiptId).toBeDefined();
+      const inspected = await runCcm(["inspect", receiptId as string, "--json"], machine, {
+        env: { HOME: canonicalHome },
+      });
+      expect(inspected.exitCode, inspected.stderr).toBe(0);
+      const receipt = JSON.parse(inspected.stdout) as {
+        receipt: { profile?: string; actions: Array<{ policyProvenance?: string[] }> };
+      };
+      expect(receipt.receipt.profile).toBe("devbox");
+      expect(receipt.receipt.actions.flatMap((action) => action.policyProvenance ?? [])).toEqual(
+        expect.arrayContaining([
+          "profile.devbox.codex-instructions",
+          "profile.devbox.codex-config",
+        ]),
+      );
+      expect(inspected.stdout).not.toContain("profiles/devbox/AGENTS.md");
+      expect(inspected.stdout).not.toContain("model_reasoning_effort");
       expect(await readFile(join(machine.remoteHome, ".codex/AGENTS.md"), "utf8")).toBe(
         "devbox instructions\n",
       );

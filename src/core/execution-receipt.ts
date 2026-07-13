@@ -28,6 +28,7 @@ export interface ExecutionReceiptAction {
   readonly id: string;
   readonly operation: ActionOperation;
   readonly scope: "claude" | "codex" | "shared";
+  readonly policyProvenance?: readonly string[];
   readonly outcome: "pending" | "succeeded" | "skipped" | "failed" | "unknown";
   readonly durationMs?: number;
 }
@@ -45,7 +46,7 @@ export interface ExecutionReceiptVerification {
 }
 
 export interface ExecutionReceipt {
-  readonly schemaVersion: 1 | 2;
+  readonly schemaVersion: 1 | 2 | 3;
   readonly id: string;
   readonly revision: number;
   readonly toolVersion: string;
@@ -126,7 +127,7 @@ export async function startExecutionReceipt(
   if (plan.kind !== "push" && plan.kind !== "restore")
     throw new Error("Only mutating plans can create execution receipts");
   const receipt: ExecutionReceipt = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: `rcpt_${randomBytes(16).toString("hex")}`,
     revision: 0,
     toolVersion: packageMetadata.version,
@@ -147,6 +148,7 @@ export async function startExecutionReceipt(
       id: action.id,
       operation: action.operation,
       scope: action.scope,
+      policyProvenance: [...action.policyProvenance],
       outcome:
         action.disposition === "unchanged" || action.disposition === "preserve"
           ? "skipped"
@@ -423,7 +425,7 @@ function validateReceipt(value: unknown): ExecutionReceipt {
     "committed_with_failed_effects",
   ];
   if (
-    (receipt.schemaVersion !== 1 && receipt.schemaVersion !== 2) ||
+    (receipt.schemaVersion !== 1 && receipt.schemaVersion !== 2 && receipt.schemaVersion !== 3) ||
     typeof receipt.id !== "string" ||
     !RECEIPT_ID.test(receipt.id) ||
     !nonnegativeInteger(receipt.revision) ||
@@ -474,7 +476,13 @@ function validateReceipt(value: unknown): ExecutionReceipt {
   if (!Array.isArray(receipt.actions) || receipt.actions.length > 4096)
     throw new Error("Execution receipt actions are invalid");
   const actions = receipt.actions.map((value) => {
-    const action = exactRecord(value, ["id", "operation", "scope", "outcome", "durationMs"]);
+    const action = exactRecord(
+      value,
+      receipt.schemaVersion === 3
+        ? ["id", "operation", "scope", "policyProvenance", "outcome", "durationMs"]
+        : ["id", "operation", "scope", "outcome", "durationMs"],
+    );
+    const policyProvenance = action.policyProvenance;
     if (
       typeof action.id !== "string" ||
       !/^action_[a-f0-9]{64}$/.test(action.id) ||
@@ -485,6 +493,16 @@ function validateReceipt(value: unknown): ExecutionReceipt {
         action.operation !== "symlink" &&
         action.operation !== "external-effect") ||
       (action.scope !== "claude" && action.scope !== "codex" && action.scope !== "shared") ||
+      (receipt.schemaVersion === 3
+        ? !Array.isArray(policyProvenance) ||
+          policyProvenance.length === 0 ||
+          policyProvenance.length > 128 ||
+          policyProvenance.some(
+            (code) => typeof code !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(code),
+          ) ||
+          new Set(policyProvenance).size !== policyProvenance.length ||
+          [...policyProvenance].sort().some((code, index) => code !== policyProvenance[index])
+        : policyProvenance !== undefined) ||
       (action.outcome !== "pending" &&
         action.outcome !== "succeeded" &&
         action.outcome !== "skipped" &&
@@ -612,7 +630,12 @@ function assertReceiptSuccessor(existing: ExecutionReceipt, candidate: Execution
             plannedFingerprint: receipt.verification.plannedFingerprint,
           },
     startedAt: receipt.startedAt,
-    actions: receipt.actions.map(({ id, operation, scope }) => ({ id, operation, scope })),
+    actions: receipt.actions.map(({ id, operation, scope, policyProvenance }) => ({
+      id,
+      operation,
+      scope,
+      policyProvenance,
+    })),
   });
   if (
     existing.outcome !== "started" ||
