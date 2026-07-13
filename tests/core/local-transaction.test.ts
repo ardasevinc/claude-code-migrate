@@ -1,4 +1,5 @@
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -111,6 +112,165 @@ describe("local transactions", () => {
       expect((await readdir(state.home)).some((name) => name.startsWith(".codex.backup-"))).toBe(
         false,
       );
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "journal:planning",
+    "materialized:codex-agents",
+    "journal:preparing",
+    "journal:prepared",
+    "journal:committing",
+    "renamed:rollback:codex-agents",
+    "renamed:commit-unsynced:codex-agents",
+    "renamed:commit:codex-agents",
+  ])("restores exact pre-state after an injected failure at %s", async (faultBoundary) => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      await writeFile(target, "old\n");
+      await chmod(target, 0o740);
+      const before = await fingerprintLocalPath(target);
+      const observed: string[] = [];
+
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_fault_matrix",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "new\n"),
+            },
+          ],
+          verify: async () => {},
+          afterBoundary: async (boundary) => {
+            observed.push(boundary);
+            if (boundary === faultBoundary) throw new Error(`injected fault at ${boundary}`);
+          },
+        }),
+      ).rejects.toBeInstanceOf(ExecutionError);
+
+      expect(observed).toContain(faultBoundary);
+      expect(await fingerprintLocalPath(target)).toEqual(before);
+      expect(await listTransactionJournals(state.context)).toEqual([]);
+      expect(
+        (await readdir(state.home)).filter(
+          (name) => name.startsWith(".ccm-transaction-") || name.startsWith(".codex.backup-"),
+        ),
+      ).toEqual([]);
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "journal:planning",
+    "materialized:codex-agents",
+    "journal:preparing",
+    "journal:prepared",
+    "journal:committing",
+    "renamed:commit-unsynced:codex-agents",
+    "renamed:commit:codex-agents",
+  ])("restores an absent target after an injected failure at %s", async (faultBoundary) => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const target = join(codex, "AGENTS.md");
+      await mkdir(codex);
+      const before = await fingerprintLocalPath(target);
+
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_absent_fault_matrix",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "new\n", { mode: 0o750 }),
+            },
+          ],
+          verify: async () => {},
+          afterBoundary: async (boundary) => {
+            if (boundary === faultBoundary) throw new Error(`injected fault at ${boundary}`);
+          },
+        }),
+      ).rejects.toBeInstanceOf(ExecutionError);
+
+      expect(await fingerprintLocalPath(target)).toEqual(before);
+      expect(await listTransactionJournals(state.context)).toEqual([]);
+      expect(
+        (await readdir(state.home)).filter(
+          (name) => name.startsWith(".ccm-transaction-") || name.startsWith(".codex.backup-"),
+        ),
+      ).toEqual([]);
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "renamed:rollback:codex-agents",
+    "renamed:commit-unsynced:codex-agents",
+    "renamed:commit:codex-agents",
+    "renamed:commit-unsynced:codex-config",
+    "renamed:commit:codex-config",
+  ])("atomically restores mixed multi-member pre-state after failure at %s", async (faultBoundary) => {
+    const state = await fixture();
+    try {
+      const codex = join(state.home, ".codex");
+      const agents = join(codex, "AGENTS.md");
+      const instructions = join(codex, "instructions-v1.md");
+      const config = join(codex, "config.toml");
+      await mkdir(codex);
+      await writeFile(instructions, "old agents\n");
+      await symlink("instructions-v1.md", agents);
+      const beforeAgents = await fingerprintLocalPath(agents);
+      const beforeConfig = await fingerprintLocalPath(config);
+      const beforeHome = (await readdir(state.home)).sort();
+      const beforeCodex = (await readdir(codex)).sort();
+
+      await expect(
+        executeLocalTransaction({
+          context: state.context,
+          planId: "plan_multi_member_fault",
+          roots: state.roots,
+          members: [
+            {
+              id: "codex-agents",
+              rootCode: "codex-home",
+              targetRef: "AGENTS.md",
+              materialize: (stage) => writeFile(stage, "new agents\n", { mode: 0o600 }),
+            },
+            {
+              id: "codex-config",
+              rootCode: "codex-home",
+              targetRef: "config.toml",
+              materialize: (stage) => writeFile(stage, "new config\n", { mode: 0o750 }),
+            },
+          ],
+          verify: async () => {},
+          afterBoundary: async (boundary) => {
+            if (boundary === faultBoundary) throw new Error(`injected fault at ${boundary}`);
+          },
+        }),
+      ).rejects.toBeInstanceOf(ExecutionError);
+
+      expect(await fingerprintLocalPath(agents)).toEqual(beforeAgents);
+      expect(await fingerprintLocalPath(config)).toEqual(beforeConfig);
+      expect((await readdir(state.home)).sort()).toEqual(beforeHome);
+      expect((await readdir(codex)).sort()).toEqual(beforeCodex);
+      expect(await listTransactionJournals(state.context)).toEqual([]);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }
