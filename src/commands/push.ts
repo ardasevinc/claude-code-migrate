@@ -1,7 +1,12 @@
 import { getConfigDir, loadConfig } from "../config/loader.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
-import { executePlannedPush, planPush } from "../core/plan-push.ts";
+import {
+  executePlannedPush,
+  type PlannedPush,
+  type PushExecutionAdapter,
+  planPush,
+} from "../core/plan-push.ts";
 import { preparePushObservationRequest } from "../core/push-observation-request.ts";
 import { applyPushProfile } from "../core/push-profile.ts";
 import { createSshPushExecutionAdapter } from "../core/push-ssh-adapter.ts";
@@ -19,6 +24,39 @@ export async function pushCommand(
   arg2: string | undefined,
   options: PushOptions,
 ): Promise<void> {
+  return withPushPlan(arg1, arg2, options, async ({ planned, adapter, host }) => {
+    if (options.dryRun) {
+      if (options.json) {
+        console.log(JSON.stringify(planned.plan));
+        return;
+      }
+      log.info(`Push plan ${planned.plan.id} (${planned.plan.status})`);
+      log.info(`Providers: ${planned.plan.providers.join(", ")}`);
+      if (options.verbose)
+        for (const action of planned.plan.actions)
+          log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
+      return;
+    }
+
+    if (planned.plan.status === "blocked") throw new BlockedError("Push plan is blocked");
+    log.info(`Executing push plan ${planned.plan.id}...`);
+    await executePlannedPush(planned, adapter, { context: createRuntimeContext() });
+    log.success(`Successfully pushed config to ${host}`);
+  });
+}
+
+export interface PreparedPushCommand {
+  readonly planned: PlannedPush;
+  readonly adapter: PushExecutionAdapter;
+  readonly host: string;
+}
+
+export async function withPushPlan<T>(
+  arg1: string | undefined,
+  arg2: string | undefined,
+  options: PushOptions,
+  consume: (prepared: PreparedPushCommand) => Promise<T>,
+): Promise<T> {
   if (
     options.transport !== undefined &&
     options.transport !== "auto" &&
@@ -26,9 +64,7 @@ export async function pushCommand(
     options.transport !== "archive"
   )
     throw new UsageError("--transport must be auto, rsync, or archive");
-  if (options.json && !options.dryRun) {
-    throw new UsageError("--json currently requires --dry-run");
-  }
+  if (options.json && !options.dryRun) throw new UsageError("--json currently requires --dry-run");
   const createdAt = new Date().toISOString();
   const config = await loadConfig();
   const enabledProviders = getEnabledProviders(config);
@@ -103,7 +139,7 @@ export async function pushCommand(
   };
 
   const session = await createSshSession(host);
-  const execute = async () => {
+  const execute = async (): Promise<T> => {
     if (!options.dryRun) {
       log.info(`Testing connection to ${host}...`);
       const connected = await testConnection(host, session);
@@ -143,30 +179,13 @@ export async function pushCommand(
       createdAt,
     });
 
-    if (options.dryRun) {
-      if (options.json) {
-        console.log(JSON.stringify(planned.plan));
-        return;
-      }
-      log.info(`Push plan ${planned.plan.id} (${planned.plan.status})`);
-      log.info(`Providers: ${planned.plan.providers.join(", ")}`);
-      if (options.verbose)
-        for (const action of planned.plan.actions)
-          log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
-      return;
-    }
-
-    if (planned.plan.status === "blocked") {
-      throw new BlockedError("Push plan is blocked");
-    }
-    log.info(`Executing push plan ${planned.plan.id}...`);
-    await executePlannedPush(planned, adapter, { context: createRuntimeContext() });
-    log.success(`Successfully pushed config to ${host}`);
+    return consume({ planned, adapter, host });
   };
   let primaryError: unknown;
   let failed = false;
+  let result: T | undefined;
   try {
-    await execute();
+    result = await execute();
   } catch (error) {
     failed = true;
     primaryError = error;
@@ -185,4 +204,5 @@ export async function pushCommand(
     });
   if (failed) throw primaryError;
   if (cleanupFailed) throw cleanupError;
+  return result as T;
 }

@@ -3,6 +3,7 @@ import packageMetadata from "../package.json" with { type: "json" };
 import { inspectCommand, verifyCommand } from "./commands/archive.ts";
 import { backupCommand } from "./commands/backup.ts";
 import { configCommand } from "./commands/config.ts";
+import { diffPushCommand, diffRestoreCommand } from "./commands/diff.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { pushCommand } from "./commands/push.ts";
 import { restoreCommand } from "./commands/restore.ts";
@@ -42,6 +43,28 @@ export function createCli(): Command {
     .option("--json", "Print one JSON object", false)
     .option("--verbose", "Show the full dry-run file list", false)
     .action(backupCommand);
+
+  const diff = program
+    .command("diff")
+    .description("Compare managed state using the execution plan");
+  diff
+    .command("push")
+    .description("Compare local managed state with a remote target")
+    .argument("[providerOrTarget]", "Provider name (claude|codex) or SSH target (user@host)")
+    .argument("[target]", "SSH target (user@host) when provider is specified")
+    .option("--json", "Print one JSON object", false)
+    .option("--profile <name>", "Use an explicit host-bound profile")
+    .option("--transport <mode>", "Observation transport mode: auto, rsync, or archive", "auto")
+    .option("--providers <providers>", "Comma-separated providers to compare (claude,codex)")
+    .option("--all", "Compare all providers")
+    .action(diffPushCommand);
+  diff
+    .command("restore")
+    .description("Compare an archive with local managed state")
+    .argument("<archive>", "Path to archive")
+    .argument("[provider]", "Optional provider (claude|codex)")
+    .option("--json", "Print one JSON object", false)
+    .action(diffRestoreCommand);
 
   program
     .command("push")

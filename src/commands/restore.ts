@@ -4,8 +4,8 @@ import { collectionPathsForHome } from "../config/providers.ts";
 import { resolveRestoreProvider } from "../core/arg-parser.ts";
 import {
   executePlannedRestore,
-  planRestore,
   type PlannedRestore,
+  planRestore,
   RestoreTargetPlanError,
   RestoreTransformPlanError,
 } from "../core/plan-restore.ts";
@@ -29,6 +29,27 @@ export async function restoreCommandWithContext(
   context: RuntimeContext,
 ): Promise<void> {
   if (options.json && !options.dryRun) throw new UsageError("--json currently requires --dry-run");
+  const planned = await prepareRestorePlan(archiveArg, providerArg, context);
+  if (options.dryRun) {
+    if (options.json) {
+      console.log(JSON.stringify(planned.plan));
+      return;
+    }
+    log.info(`Restore plan ${planned.plan.id} (${planned.plan.status})`);
+    log.info(`Providers: ${planned.plan.providers.join(", ")}`);
+    if (options.verbose)
+      for (const action of planned.plan.actions)
+        log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
+    return;
+  }
+  await executePlannedRestore(planned);
+}
+
+export async function prepareRestorePlan(
+  archiveArg: string,
+  providerArg: string | undefined,
+  context: RuntimeContext,
+): Promise<PlannedRestore> {
   const archivePath = resolve(archiveArg);
 
   if (!(await exists(archivePath))) {
@@ -45,9 +66,8 @@ export async function restoreCommandWithContext(
     });
   }
 
-  let planned: PlannedRestore;
   try {
-    planned = await planRestore({
+    return await planRestore({
       archivePath,
       provider,
       context,
@@ -59,19 +79,6 @@ export async function restoreCommandWithContext(
       throw new BlockedError(error.message, { cause: error });
     throw new BlockedError("Archive is invalid or unreadable", { cause: error });
   }
-  if (options.dryRun) {
-    if (options.json) {
-      console.log(JSON.stringify(planned.plan));
-      return;
-    }
-    log.info(`Restore plan ${planned.plan.id} (${planned.plan.status})`);
-    log.info(`Providers: ${planned.plan.providers.join(", ")}`);
-    if (options.verbose)
-      for (const action of planned.plan.actions)
-        log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
-    return;
-  }
-  await executePlannedRestore(planned);
 }
 
 async function exists(path: string): Promise<boolean> {
