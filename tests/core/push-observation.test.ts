@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { InventoryEntry } from "../../src/core/inventory.ts";
 import {
+  buildRemoteExecutableResolverShell,
   buildRemotePushObservationProbe,
   observeRemotePushTarget,
   PUSH_OBSERVATION_TIMEOUT_MS,
@@ -33,6 +34,23 @@ const envelope = (...records: string[]) =>
   ].join("\n");
 
 describe("remote push observation", () => {
+  it("rejects relative, function, and non-executable command discoveries", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccm-observe-resolver-"));
+    await mkdir(join(home, "bin"));
+    await writeFile(join(home, "relative-tool"), "#!/bin/sh\n", { mode: 0o755 });
+    await writeFile(join(home, "bin", "nonexec-tool"), "#!/bin/sh\n", { mode: 0o644 });
+    const script = `home=$HOME
+cd "$home"
+command(){ case "$2" in relative-tool) printf './relative-tool';; function_tool) printf 'function_tool';; nonexec-tool) printf '%s' "$home/bin/nonexec-tool";; esac; }
+${buildRemoteExecutableResolverShell()}
+printf '<%s>|<%s>|<%s>\n' "$(findcmd relative-tool)" "$(findcmd function_tool)" "$(findcmd nonexec-tool)"`;
+    const result = await runProcess("/bin/sh", ["-c", script], {
+      env: { HOME: home, PATH: "." },
+    });
+
+    expect(result).toMatchObject({ exitCode: 0, stdout: "<>|<>|<>\n" });
+  });
+
   it("allows a sixty-second managed-tree scan", () => {
     expect(PUSH_OBSERVATION_TIMEOUT_MS).toBe(60_000);
   });

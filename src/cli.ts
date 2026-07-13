@@ -3,6 +3,7 @@ import packageMetadata from "../package.json" with { type: "json" };
 import { inspectCommand, verifyCommand } from "./commands/archive.ts";
 import { backupCommand } from "./commands/backup.ts";
 import { configCommand } from "./commands/config.ts";
+import { doctorCommand } from "./commands/doctor.ts";
 import { pushCommand } from "./commands/push.ts";
 import { restoreCommand } from "./commands/restore.ts";
 import { recoverCommand, transactionsCommand } from "./commands/transactions.ts";
@@ -23,6 +24,13 @@ export function createCli(): Command {
     .option("--init", "Create default config file")
     .option("--path", "Show config file path")
     .action(configCommand);
+
+  program
+    .command("doctor")
+    .description("Check local CCM health and optionally inspect one remote target")
+    .option("--remote [target]", "Explicitly inspect a remote SSH target")
+    .option("--json", "Print one JSON object", false)
+    .action(doctorCommand);
 
   program
     .command("backup")

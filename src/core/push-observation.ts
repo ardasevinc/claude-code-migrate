@@ -34,6 +34,12 @@ export interface PushObservationQueries {
 
 export type PushCaptureId = "claude-mcp" | "codex-config";
 
+/** Shell helpers shared by every remote capability probe. Assumes canonical `$home`. */
+export function buildRemoteExecutableResolverShell(): string {
+  return `findcmd(){ p=$(command -v "$1" 2>/dev/null || true); case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] || p=;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$1" "$home/.local/bin/$1" "$home/bin/$1" "/usr/local/bin/$1" "/usr/bin/$1"; do if [ -f "$c" ] && [ -x "$c" ]; then p=$c; break; fi; done; fi; printf '%s' "$p"; }
+resolve(){ "$python_path" -c 'import os,sys; p=os.path.realpath(sys.argv[1]); ok=os.path.isabs(p) and os.path.isfile(p) and os.access(p, os.X_OK); print(p) if ok else None; raise SystemExit(0 if ok else 1)' "$1"; }`;
+}
+
 export interface PushObservationTransport {
   run(
     host: string,
@@ -193,9 +199,8 @@ home=$(cd -P "$home" && pwd -P) || exit 41
 printf 'CCM_PUSH_OBSERVATION\\t1\\n'; emit HOME "$(printf '%s' "$home"|enc)"
 os=$(uname -s); arch=$(uname -m); emit OS "$(printf '%s' "$os"|enc)"; emit ARCH "$(printf '%s' "$arch"|enc)"
 gui=false; [ "$(uname -s)" = Darwin ] && [ -n "\${DISPLAY-}\${WAYLAND_DISPLAY-}\${TERM_PROGRAM-}" ] && gui=true; emit GUI "$gui"
-findcmd(){ p=$(command -v "$1" 2>/dev/null || true); case "$p" in /*) ;; *) p=;; esac; if [ -z "$p" ]; then for c in "$home/.bun/bin/$1" "$home/.local/bin/$1" "$home/bin/$1" "/usr/local/bin/$1" "/usr/bin/$1"; do if [ -x "$c" ]; then p=$c; break; fi; done; fi; printf '%s' "$p"; }
+${buildRemoteExecutableResolverShell()}
 python_path=$(findcmd python3); [ -n "$python_path" ] || exit 46
-resolve(){ "$python_path" -c 'import os,sys; p=os.path.realpath(sys.argv[1]); ok=os.path.isabs(p) and os.path.isfile(p) and os.access(p, os.X_OK); print(p) if ok else None; raise SystemExit(0 if ok else 1)' "$1"; }
 python_path=$(resolve "$python_path") || exit 46
 python_path=$("$python_path" -I -c 'import os,sys; print(os.path.realpath(sys.executable))') || exit 46
 python_path=$(resolve "$python_path") || exit 46

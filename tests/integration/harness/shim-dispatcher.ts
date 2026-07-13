@@ -90,6 +90,11 @@ function runSsh(argv: string[]): number {
       : commandArgs.length === 1
         ? ["/bin/sh", "-c", commandArgs[0] as string]
         : commandArgs;
+  if (
+    commandArgs.some((argument) => argument.includes("OS=%s")) &&
+    process.env.CCM_TEST_REMOTE_PROBE_PREFIX
+  )
+    process.stdout.write(process.env.CCM_TEST_REMOTE_PROBE_PREFIX);
   const result = Bun.spawnSync(invocation, {
     cwd: remoteHome,
     env,

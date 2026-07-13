@@ -30,16 +30,44 @@ export interface SshSession {
   close(): Promise<void>;
 }
 
+export interface SshSessionSetup {
+  readonly mkdtemp: (prefix: string) => Promise<string>;
+  readonly chmod: (path: string, mode: number) => Promise<void>;
+  readonly rm: (
+    path: string,
+    options: { readonly recursive: true; readonly force: true },
+  ) => Promise<void>;
+}
+
+const defaultSetup: SshSessionSetup = { mkdtemp, chmod, rm };
+
 export function assertSshSessionHost(session: SshSession, host: string): void {
   if (session.host !== host)
     throw new BlockedError("SSH session target does not match requested host");
 }
 
-export async function createSshSession(host: string): Promise<SshSession> {
+export async function createSshSession(
+  host: string,
+  setup: SshSessionSetup = defaultSetup,
+): Promise<SshSession> {
   parseSshTarget(host);
   // OpenSSH's Unix-domain control path is short on macOS; keep it under /tmp.
-  const root = await mkdtemp(join("/tmp", "ccm-ssh-"));
-  await chmod(root, 0o700);
+  const root = await setup.mkdtemp(join("/tmp", "ccm-ssh-"));
+  try {
+    await setup.chmod(root, 0o700);
+  } catch (error) {
+    try {
+      await setup.rm(root, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new ExecutionError(
+        "SSH session setup failed and temporary state could not be removed",
+        {
+          cause: new AggregateError([error, cleanupError]),
+        },
+      );
+    }
+    throw error;
+  }
   const controlPath = join(root, "control");
   const options = [
     "-oControlMaster=auto",
@@ -58,12 +86,12 @@ export async function createSshSession(host: string): Promise<SshSession> {
         timeoutMs: 5_000,
       });
       if (result.exitCode === 0 && result.signal === null && !result.error) {
-        await rm(root, { recursive: true, force: true });
+        await setup.rm(root, { recursive: true, force: true });
         return;
       }
       failures.push(new ProcessError("ssh", result));
       if (!(await lstat(controlPath).catch(() => null))) {
-        await rm(root, { recursive: true, force: true });
+        await setup.rm(root, { recursive: true, force: true });
         return;
       }
     }
@@ -72,7 +100,21 @@ export async function createSshSession(host: string): Promise<SshSession> {
     });
   };
   const close = () => (closing ??= closeOnce());
-  unregister = registerInterruptCleanup(close);
+  try {
+    unregister = registerInterruptCleanup(close);
+  } catch (error) {
+    try {
+      await setup.rm(root, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new ExecutionError(
+        "SSH session setup failed and temporary state could not be removed",
+        {
+          cause: new AggregateError([error, cleanupError]),
+        },
+      );
+    }
+    throw error;
+  }
 
   return {
     host,

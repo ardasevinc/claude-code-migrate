@@ -596,11 +596,30 @@ async function ensureCanonicalStateHome(path: string): Promise<void> {
     )
       throw new Error("Unsafe XDG state directory");
   }
+  if (!(await assertCanonicalStateHome(target)))
+    throw new Error("XDG state directory was not initialized");
+}
+
+async function assertCanonicalStateHome(path: string): Promise<boolean> {
+  const target = resolve(path);
+  let existing = target;
+  while (true) {
+    try {
+      await lstat(existing);
+      break;
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+      const parent = dirname(existing);
+      if (parent === existing) throw new Error("Cannot inspect XDG state directory");
+      existing = parent;
+    }
+  }
   const chain: string[] = [];
-  for (let current = target; ; current = dirname(current)) {
+  for (let current = existing; ; current = dirname(current)) {
     chain.push(current);
     if (dirname(current) === current) break;
   }
+  const currentUid = process.getuid?.();
   for (const directory of chain.reverse()) {
     const info = await lstat(directory);
     const isWritable = (info.mode & 0o022) !== 0;
@@ -614,6 +633,32 @@ async function ensureCanonicalStateHome(path: string): Promise<void> {
     )
       throw new Error("Unsafe XDG state directory ancestry");
   }
+  if (existing !== target) return false;
+  const info = await lstat(target);
+  if ((currentUid !== undefined && info.uid !== currentUid) || (info.mode & 0o022) !== 0)
+    throw new Error("Unsafe XDG state directory");
+  return true;
+}
+
+export async function inspectPrivateStateLayout(
+  context: RuntimeContext,
+): Promise<"state-not-initialized" | "private-state-directory"> {
+  const root = ccmStateRoot(context);
+  if (!(await assertCanonicalStateHome(dirname(root)))) return "state-not-initialized";
+  try {
+    await assertPrivateDirectory(root);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return "state-not-initialized";
+    throw error;
+  }
+  for (const leaf of [transactionJournalDir(context), receiptDir(context)]) {
+    try {
+      await assertPrivateDirectory(leaf);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+    }
+  }
+  return "private-state-directory";
 }
 
 export async function ensurePrivateStateDirectory(
@@ -634,6 +679,7 @@ export async function ensurePrivateStateDirectory(
   await ensurePrivateLeaf(root);
   const directory = kind === "transactions" ? transactionJournalDir(context) : receiptDir(context);
   await ensurePrivateLeaf(directory);
+  await inspectPrivateStateLayout(context);
   return directory;
 }
 

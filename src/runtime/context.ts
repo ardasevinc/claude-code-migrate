@@ -7,6 +7,7 @@ export interface RuntimeProcess {
 }
 
 export interface RuntimeFiles {
+  readonly access: typeof fs.access;
   readonly open: typeof fs.open;
   readonly lstat: typeof fs.lstat;
   readonly readdir: typeof fs.readdir;
