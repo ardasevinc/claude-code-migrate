@@ -6,6 +6,12 @@ import { BlockedError, ExecutionError } from "../errors.ts";
 import type { RuntimeContext } from "../runtime/context.ts";
 import type { CollectionPaths } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import {
+  type ExecutionReceipt,
+  type ExecutionReceiptAction,
+  finishExecutionReceipt,
+  readExecutionReceipt,
+} from "./execution-receipt.ts";
 import { fingerprintLocalPath } from "./local-transaction-fingerprint.ts";
 import {
   durableRemove,
@@ -71,6 +77,7 @@ export interface LocalTransactionMemberInput {
 export interface ExecuteLocalTransactionOptions {
   readonly context: RuntimeContext;
   readonly planId: string;
+  readonly receiptId?: string;
   readonly roots: readonly LocalTransactionRootBinding[];
   readonly members: readonly LocalTransactionMemberInput[];
   readonly verify: () => Promise<void>;
@@ -79,6 +86,8 @@ export interface ExecuteLocalTransactionOptions {
   readonly afterBoundary?: (boundary: string, journal: TransactionJournal) => Promise<void>;
   /** Test seam immediately before the atomic absent-target rename syscall. */
   readonly beforeAbsentRename?: (targetPath: string) => Promise<void>;
+  /** Keep a terminal journal until a caller has durably published coupled metadata. */
+  readonly deferTerminalFinalization?: boolean;
 }
 
 class InterruptRequestedError extends Error {}
@@ -334,6 +343,37 @@ async function finalizeTerminalJournal(
   await deleteTerminalTransactionJournal(context, journal.id, journal.revision);
 }
 
+function failedReceiptActions(receipt: ExecutionReceipt): ExecutionReceiptAction[] {
+  return receipt.actions.map((action) => ({
+    ...action,
+    outcome: action.outcome === "skipped" ? "skipped" : "failed",
+  }));
+}
+
+async function reconcileBoundReceipt(
+  context: RuntimeContext,
+  journal: TransactionJournal,
+): Promise<void> {
+  if (!journal.receiptId) return;
+  const receipt = await readExecutionReceipt(context, journal.receiptId);
+  if (receipt.planId !== journal.planId)
+    throw new BlockedError("Transaction receipt binding does not match its plan");
+  if (receipt.outcome !== "started") {
+    if (receipt.transactionId !== journal.id)
+      throw new BlockedError("Terminal receipt does not acknowledge its transaction");
+    return;
+  }
+  if (journal.state !== "committed" && journal.state !== "rolled_back")
+    throw new BlockedError(`Transaction receipt cannot be reconciled from ${journal.state}`);
+  await finishExecutionReceipt(context, receipt, {
+    outcome: "failed",
+    finishedAt: context.now(),
+    actions: failedReceiptActions(receipt),
+    transactionId: journal.id,
+    warnings: ["outcome-unverified-after-interruption"],
+  });
+}
+
 async function inferAndRollbackMember(
   roots: ReadonlyMap<string, LocalTransactionRootBinding>,
   journal: TransactionJournal,
@@ -523,11 +563,13 @@ async function maintainExistingJournals(
 ): Promise<void> {
   for (const journal of await listTransactionJournals(context)) {
     if (journal.state === "committed" || journal.state === "rolled_back") {
+      await reconcileBoundReceipt(context, journal);
       await finalizeTerminalJournal(context, roots, journal);
       continue;
     }
     if (journal.state === "planning") {
       const rolledBack = await rollbackJournal(context, roots, journal);
+      await reconcileBoundReceipt(context, rolledBack);
       await finalizeTerminalJournal(context, roots, rolledBack);
       continue;
     }
@@ -537,6 +579,7 @@ async function maintainExistingJournals(
       journal.state === "aborting"
     ) {
       const rolledBack = await abortPreparedJournal(context, roots, journal);
+      await reconcileBoundReceipt(context, rolledBack);
       await finalizeTerminalJournal(context, roots, rolledBack);
       continue;
     }
@@ -555,6 +598,7 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
   let journal = createTransactionJournal({
     kind: "restore",
     planId: options.planId,
+    receiptId: options.receiptId,
     now: options.context.now(),
     members: options.members.map(({ id, rootCode }) => {
       const root = roots.get(rootCode);
@@ -594,7 +638,8 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
   };
   const rollbackAndFinalizeOnce = () => {
     rollbackFinalizationPromise ??= rollbackOnce().then(async (rolledBack) => {
-      await finalizeTerminalJournal(options.context, roots, rolledBack);
+      if (!options.deferTerminalFinalization)
+        await finalizeTerminalJournal(options.context, roots, rolledBack);
       return rolledBack;
     });
     return rollbackFinalizationPromise;
@@ -722,7 +767,8 @@ async function executeLocked(options: ExecuteLocalTransactionOptions): Promise<T
       });
     });
     unregister();
-    await finalizeTerminalJournal(options.context, roots, journal);
+    if (!options.deferTerminalFinalization)
+      await finalizeTerminalJournal(options.context, roots, journal);
     return journal;
   } catch (error) {
     if (journal.state === "committed") {
@@ -761,6 +807,24 @@ export async function executeLocalTransaction(
   return withTransactionMutationLock(options.context, () => executeLocked(options));
 }
 
+export async function finalizeLocalTransaction(options: {
+  readonly context: RuntimeContext;
+  readonly transactionId: string;
+  readonly roots?: readonly LocalTransactionRootBinding[];
+}): Promise<TransactionJournal> {
+  return withTransactionMutationLock(options.context, async () => {
+    const roots = await rootMap(
+      options.roots ?? defaultLocalTransactionRoots(options.context.home),
+    );
+    const journal = await readTransactionJournal(options.context, options.transactionId);
+    if (journal.state !== "committed" && journal.state !== "rolled_back")
+      throw new BlockedError(`Transaction cannot be finalized from ${journal.state}`);
+    await reconcileBoundReceipt(options.context, journal);
+    await finalizeTerminalJournal(options.context, roots, journal);
+    return journal;
+  });
+}
+
 export async function recoverLocalTransaction(options: {
   readonly context: RuntimeContext;
   readonly transactionId: string;
@@ -796,6 +860,7 @@ export async function recoverLocalTransaction(options: {
       options.mode === "rollback"
         ? await rollbackJournal(options.context, roots, journal)
         : await acceptRecoveredJournal(options.context, roots, journal);
+    await reconcileBoundReceipt(options.context, terminal);
     await finalizeTerminalJournal(options.context, roots, terminal);
     return terminal;
   });

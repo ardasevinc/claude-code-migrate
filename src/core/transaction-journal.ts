@@ -48,11 +48,12 @@ export interface TransactionMember {
 }
 
 export interface TransactionJournal {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly revision: number;
   readonly id: string;
   readonly kind: "restore" | "push";
   readonly planId: string;
+  readonly receiptId?: string;
   readonly state: TransactionState;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -76,6 +77,7 @@ const MAX_JOURNALS = 1024;
 const JOURNAL_ID = /^txn_[a-f0-9]{32}$/;
 const SYMBOL = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const PLAN_ID = /^plan_[a-zA-Z0-9._-]{1,128}$/;
+const RECEIPT_ID = /^rcpt_[a-f0-9]{32}$/;
 const FINGERPRINT = /^fp_[a-f0-9]{64}$/;
 const ROOT_BINDING = /^root_[a-f0-9]{64}$/;
 const BACKUP_REF = /^(0|[1-9][0-9]{0,19})$/;
@@ -324,6 +326,8 @@ export function parseTransactionJournal(source: string): TransactionJournal {
   if (Buffer.byteLength(source) > MAX_JOURNAL_BYTES)
     throw new Error("transaction journal exceeds the size limit");
   const root = record(parseJsonWithoutDuplicateKeys(source), "journal");
+  if (root.schemaVersion !== 1 && root.schemaVersion !== 2)
+    throw new Error("journal schemaVersion is unsupported");
   exactKeys(
     root,
     [
@@ -332,6 +336,7 @@ export function parseTransactionJournal(source: string): TransactionJournal {
       "id",
       "kind",
       "planId",
+      ...(root.schemaVersion === 2 ? ["receiptId"] : []),
       "state",
       "createdAt",
       "updatedAt",
@@ -340,7 +345,6 @@ export function parseTransactionJournal(source: string): TransactionJournal {
     ],
     "journal",
   );
-  if (root.schemaVersion !== 1) throw new Error("journal schemaVersion is unsupported");
   if (!Number.isSafeInteger(root.revision) || (root.revision as number) < 0)
     throw new Error("journal revision is invalid");
   if (typeof root.id !== "string" || !JOURNAL_ID.test(root.id))
@@ -348,6 +352,13 @@ export function parseTransactionJournal(source: string): TransactionJournal {
   if (root.kind !== "restore" && root.kind !== "push") throw new Error("journal kind is invalid");
   if (typeof root.planId !== "string" || !PLAN_ID.test(root.planId))
     throw new Error("journal planId is invalid");
+  if (
+    root.schemaVersion === 2 &&
+    (typeof root.receiptId !== "string" || !RECEIPT_ID.test(root.receiptId))
+  )
+    throw new Error("v2 journal receiptId is required and invalid");
+  const receiptId =
+    root.schemaVersion === 2 && typeof root.receiptId === "string" ? root.receiptId : undefined;
   if (typeof root.state !== "string" || !(root.state in TRANSITIONS))
     throw new Error("journal state is invalid");
   if (!Array.isArray(root.members) || root.members.length > MAX_MEMBERS)
@@ -359,11 +370,12 @@ export function parseTransactionJournal(source: string): TransactionJournal {
   const updatedAt = timestamp(root.updatedAt, "journal updatedAt");
   if (updatedAt < createdAt) throw new Error("journal updatedAt precedes createdAt");
   const journal: TransactionJournal = {
-    schemaVersion: 1,
+    schemaVersion: root.schemaVersion,
     revision: root.revision as number,
     id: root.id,
     kind: root.kind,
     planId: root.planId,
+    ...(receiptId === undefined ? {} : { receiptId }),
     state: root.state as TransactionState,
     createdAt,
     updatedAt,
@@ -379,6 +391,7 @@ export function parseTransactionJournal(source: string): TransactionJournal {
 export function createTransactionJournal(input: {
   readonly kind: "restore" | "push";
   readonly planId: string;
+  readonly receiptId?: string;
   readonly now: Date;
   readonly members: readonly {
     readonly id: string;
@@ -389,11 +402,12 @@ export function createTransactionJournal(input: {
   const at = input.now.toISOString();
   return parseTransactionJournal(
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: input.receiptId === undefined ? 1 : 2,
       revision: 0,
       id: `txn_${randomBytes(16).toString("hex")}`,
       kind: input.kind,
       planId: input.planId,
+      ...(input.receiptId === undefined ? {} : { receiptId: input.receiptId }),
       state: "planning",
       createdAt: at,
       updatedAt: at,
@@ -463,9 +477,11 @@ export function transitionTransactionJournal(
 
 function assertJournalSuccessor(existing: TransactionJournal, candidate: TransactionJournal): void {
   if (
+    candidate.schemaVersion !== existing.schemaVersion ||
     candidate.id !== existing.id ||
     candidate.kind !== existing.kind ||
     candidate.planId !== existing.planId ||
+    candidate.receiptId !== existing.receiptId ||
     candidate.createdAt !== existing.createdAt ||
     candidate.revision !== existing.revision + 1 ||
     candidate.updatedAt <= existing.updatedAt ||

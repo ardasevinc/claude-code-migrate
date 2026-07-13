@@ -13,7 +13,7 @@ import {
 import { syncDirectory } from "./local-transaction-paths.ts";
 import type { ActionOperation, MigrationPlan } from "./migration-plan.ts";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.ts";
-import { ensurePrivateStateDirectory } from "./transaction-journal.ts";
+import { ensurePrivateStateDirectory, listTransactionJournals } from "./transaction-journal.ts";
 
 export type ExecutionReceiptOutcome =
   | "started"
@@ -189,7 +189,7 @@ async function publishReceipt(
   let directorySynced = false;
   try {
     await withReceiptWriterLock(join(directory, ".writer.lock"), async () => {
-      if (expectedRevision === null) await pruneTerminalReceipts(directory);
+      if (expectedRevision === null) await pruneTerminalReceipts(context, directory);
       let existing: ExecutionReceipt | undefined;
       try {
         existing = await readReceiptAt(destination);
@@ -295,17 +295,23 @@ async function readReceiptAt(path: string): Promise<ExecutionReceipt> {
   }
 }
 
-async function pruneTerminalReceipts(directory: string): Promise<void> {
+async function pruneTerminalReceipts(context: RuntimeContext, directory: string): Promise<void> {
   const names = (await readdir(directory))
     .filter((name) => /^rcpt_[a-f0-9]{32}\.json$/.test(name))
     .sort();
   if (names.length < MAX_RECEIPTS) return;
+  const protectedIds = new Set(
+    (await listTransactionJournals(context)).flatMap((journal) =>
+      journal.receiptId === undefined ? [] : [journal.receiptId],
+    ),
+  );
   const terminal: Array<{ name: string; receipt: ExecutionReceipt }> = [];
   for (const name of names) {
     const receipt = await readReceiptAt(join(directory, name));
     if (receipt.id !== name.slice(0, -".json".length))
       throw new Error("Execution receipt filename identity mismatch");
-    if (receipt.outcome !== "started") terminal.push({ name, receipt });
+    if (receipt.outcome !== "started" && !protectedIds.has(receipt.id))
+      terminal.push({ name, receipt });
   }
   terminal.sort((left, right) =>
     left.receipt.startedAt === right.receipt.startedAt

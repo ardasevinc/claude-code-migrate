@@ -15,14 +15,28 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectionPathsForHome } from "../../src/config/providers.ts";
 import { createArchive } from "../../src/core/archiver.ts";
+import { readExecutionReceipt } from "../../src/core/execution-receipt.ts";
+import {
+  finalizeLocalTransaction,
+  localTransactionRootsForPaths,
+} from "../../src/core/local-transaction.ts";
 import {
   executePlannedRestore,
   planRestore,
   RestoreTransformPlanError,
 } from "../../src/core/plan-restore.ts";
+import { listTransactionJournals } from "../../src/core/transaction-journal.ts";
 import { BlockedError } from "../../src/errors.ts";
 import { createRuntimeContext } from "../../src/runtime/context.ts";
 import type { FileEntry, ProviderName } from "../../src/types/index.ts";
+
+async function receipts(root: string, context: ReturnType<typeof createRuntimeContext>) {
+  const directory = join(root, "state/ccm/receipts");
+  const names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  return Promise.all(
+    names.map((name) => readExecutionReceipt(context, name.slice(0, -".json".length))),
+  );
+}
 
 async function fixture(
   root: string,
@@ -106,8 +120,53 @@ describe("executePlannedRestore", () => {
       expect(await readFile(join(state.home, ".codex/history.jsonl"), "utf8")).toBe(
         "LOCAL-HISTORY\n",
       );
+      expect(await receipts(state.root, state.context)).toMatchObject([
+        {
+          outcome: "succeeded",
+          observedPostFingerprint: state.planned.plan.stagedPostFingerprint,
+          transactionId: expect.stringMatching(/^txn_/),
+        },
+      ]);
       const backup = (await readdir(state.home)).find((name) => name.startsWith(".codex.backup-"));
       expect(backup).toBeUndefined();
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains terminal evidence when receipt publication is interrupted", async () => {
+    const state = await setup([["codex/AGENTS.md", "incoming\n"]]);
+    try {
+      await expect(
+        executePlannedRestore(state.planned, {
+          afterTransactionTerminal: async () => {
+            throw new Error("simulated hard-crash boundary");
+          },
+        }),
+      ).rejects.toThrow("receipt or transaction finalization is pending");
+      const [started] = await receipts(state.root, state.context);
+      expect(started).toMatchObject({ outcome: "started" });
+      const journals = await listTransactionJournals(state.context);
+      expect(journals).toMatchObject([
+        {
+          state: "committed",
+          planId: state.planned.plan.id,
+          receiptId: started?.id,
+        },
+      ]);
+      await finalizeLocalTransaction({
+        context: state.context,
+        transactionId: journals[0]?.id as string,
+        roots: localTransactionRootsForPaths(collectionPathsForHome(state.home)),
+      });
+      expect(await receipts(state.root, state.context)).toMatchObject([
+        {
+          outcome: "failed",
+          transactionId: journals[0]?.id,
+          warnings: ["outcome-unverified-after-interruption"],
+        },
+      ]);
+      expect(await listTransactionJournals(state.context)).toEqual([]);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }
@@ -317,6 +376,12 @@ describe("executePlannedRestore", () => {
           afterBackup: () => writeFile(join(state.home, ".codex/AGENTS.md"), "drift\n"),
         }),
       ).rejects.toBeInstanceOf(BlockedError);
+      expect(await receipts(state.root, state.context)).toMatchObject([
+        {
+          outcome: "failed",
+          transactionId: expect.stringMatching(/^txn_/),
+        },
+      ]);
       expect(
         (await readdir(state.home)).filter((name) => name.startsWith(".codex.backup-")).sort(),
       ).toEqual([
@@ -355,6 +420,12 @@ describe("executePlannedRestore", () => {
         }),
       ).rejects.toBeInstanceOf(BlockedError);
       expect(await readFile(join(attacker, "incoming.md"), "utf8")).toBe("outside\n");
+      expect(await receipts(state.root, state.context)).toMatchObject([
+        {
+          outcome: "rolled_back",
+          observedPostFingerprint: planned.plan.targetFingerprint,
+        },
+      ]);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }

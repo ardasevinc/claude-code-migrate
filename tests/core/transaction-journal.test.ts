@@ -49,11 +49,30 @@ function snapshotted(journal: ReturnType<typeof createTransactionJournal>): Tran
 }
 
 describe("transaction journals", () => {
+  it("keeps strict read compatibility with receipt-less v1 journals", () => {
+    expect(
+      parseTransactionJournal(
+        JSON.stringify({
+          schemaVersion: 1,
+          revision: 0,
+          id: `txn_${"a".repeat(32)}`,
+          kind: "push",
+          planId: "plan_legacy",
+          state: "planning",
+          createdAt: "2026-07-12T12:00:00.000Z",
+          updatedAt: "2026-07-12T12:00:00.000Z",
+          members: [],
+        }),
+      ),
+    ).toMatchObject({ schemaVersion: 1, planId: "plan_legacy" });
+  });
+
   it("publishes private journals with revision CAS and strict round trips", async () => {
     const { context } = await fixture();
     const journal = createTransactionJournal({
       kind: "restore",
       planId: "plan_abc",
+      receiptId: `rcpt_${"a".repeat(32)}`,
       now: new Date("2026-07-12T12:00:00.000Z"),
       members: [{ id: "claude", rootCode: "claude-home" }],
     });
@@ -363,7 +382,7 @@ describe("transaction journals", () => {
 
   it.each([
     '{"schemaVersion":1,"schemaVersion":1}',
-    '{"schemaVersion":2}',
+    '{"schemaVersion":3}',
     JSON.stringify({
       schemaVersion: 1,
       revision: 0,

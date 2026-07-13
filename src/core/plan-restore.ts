@@ -20,6 +20,13 @@ import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { scanArchive } from "./archive-reader.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
 import {
+  type ExecutionReceipt,
+  type ExecutionReceiptAction,
+  type ExecutionReceiptOutcome,
+  finishExecutionReceipt,
+  startExecutionReceipt,
+} from "./execution-receipt.ts";
+import {
   canonicalInventory,
   groupManagedTopLevelEntries,
   type InventoryEntry,
@@ -30,6 +37,7 @@ import {
 } from "./inventory.ts";
 import {
   executeLocalTransaction,
+  finalizeLocalTransaction,
   type LocalTransactionMemberInput,
   type LocalTransactionRootBinding,
   localTransactionRootsForPaths,
@@ -50,6 +58,7 @@ import {
   type RestoreTransformInputs,
   transformRestoreInputs,
 } from "./restore-transforms.ts";
+import { readTransactionJournal } from "./transaction-journal.ts";
 
 export interface PlanRestoreInput {
   readonly archivePath: string;
@@ -499,6 +508,8 @@ export interface ExecutePlannedRestoreOptions {
   readonly afterBackup?: () => Promise<void>;
   /** Test seam immediately after cloning a live transaction member. */
   readonly afterStageClone?: (stagePath: string, logicalBase: string) => Promise<void>;
+  /** Test seam after the terminal journal is durable, before receipt publication. */
+  readonly afterTransactionTerminal?: () => Promise<void>;
 }
 
 function sourceFingerprint(
@@ -712,6 +723,12 @@ export async function executePlannedRestore(
     rm(temp, { recursive: true, force: true }),
   );
   let mutationStarted = false;
+  let receipt: ExecutionReceipt | undefined;
+  let transactionId: string | undefined;
+  let transactionCommitted = false;
+  let transaction:
+    | { roots: LocalTransactionRootBinding[]; members: LocalTransactionMemberInput[] }
+    | undefined;
   try {
     const scan = await scanArchive(resource.archivePath, { extractTo: extraction });
     const observedInventory = canonicalInventory(
@@ -781,19 +798,26 @@ export async function executePlannedRestore(
     )
       throw new Error("Restore action bindings were not consumed exactly once");
     await assertTargetUnchanged(resource);
-    const transaction = await buildRestoreTransactionMembers(
+    const builtTransaction = await buildRestoreTransactionMembers(
       resource,
       changedBindings,
       extraction,
       options.afterStageClone,
     );
+    transaction = builtTransaction;
+    receipt = await startExecutionReceipt(resource.context, planned.plan);
     resources.delete(planned);
     mutationStarted = true;
-    await executeLocalTransaction({
+    const journal = await executeLocalTransaction({
       context: resource.context,
       planId: planned.plan.id,
-      roots: transaction.roots,
-      members: transaction.members,
+      receiptId: receipt.id,
+      roots: builtTransaction.roots,
+      members: builtTransaction.members,
+      deferTerminalFinalization: true,
+      afterBoundary: async (boundary, current) => {
+        if (boundary === "journal:planning") transactionId = current.id;
+      },
       beforeCommit: async () => {
         await options.afterBackup?.();
         await assertTargetUnchanged(resource);
@@ -815,15 +839,103 @@ export async function executePlannedRestore(
           throw new Error("Restored target does not match planned post-state");
       },
     });
-    for (const root of new Set(
-      transaction.members.map((member) => {
-        const binding = transaction.roots.find((item) => item.code === member.rootCode);
-        if (!binding) throw new Error(`Missing transaction root: ${member.rootCode}`);
-        return binding.path;
-      }),
-    ))
-      await pruneLocalBackupsIfParentExists(root);
+    transactionId = journal.id;
+    transactionCommitted = true;
+    await options.afterTransactionTerminal?.();
+    await finishExecutionReceipt(resource.context, receipt, {
+      outcome: "succeeded",
+      finishedAt: resource.context.now(),
+      actions: receiptActions(receipt, "succeeded"),
+      observedPostFingerprint: planned.plan.stagedPostFingerprint,
+      transactionId,
+    });
+    await finalizeLocalTransaction({
+      context: resource.context,
+      transactionId,
+      roots: builtTransaction.roots,
+    });
+    try {
+      for (const root of new Set(
+        builtTransaction.members.map((member) => {
+          const binding = builtTransaction.roots.find((item) => item.code === member.rootCode);
+          if (!binding) throw new Error(`Missing transaction root: ${member.rootCode}`);
+          return binding.path;
+        }),
+      ))
+        await pruneLocalBackupsIfParentExists(root);
+    } catch (retentionError) {
+      throw new ExecutionError("Restore committed but backup retention cleanup failed", {
+        cause: retentionError,
+      });
+    }
   } catch (error) {
+    if (transactionCommitted) {
+      if (error instanceof ExecutionError) throw error;
+      throw new ExecutionError(
+        "Restore committed but receipt or transaction finalization is pending",
+        {
+          cause: error,
+        },
+      );
+    }
+    if (receipt) {
+      let outcome: ExecutionReceiptOutcome = "failed";
+      const terminalTransactionId = transactionId;
+      let observedPostFingerprint: string | undefined;
+      try {
+        const observed = await observeLocalRestoreTarget({
+          context: resource.context,
+          paths: resource.paths,
+          selectedProviders: resource.providers,
+          incoming: resource.selectedInventory,
+          queries: resource.queries,
+        });
+        observedPostFingerprint = observed.targetFingerprint;
+        if (transactionId && observed.targetFingerprint === planned.plan.targetFingerprint)
+          outcome = "rolled_back";
+      } catch {
+        // The original execution error remains primary when observation is unavailable.
+      }
+      let terminalState: "rolled_back" | "recovery_required" | undefined;
+      if (transactionId) {
+        try {
+          const pending = await readTransactionJournal(resource.context, transactionId);
+          if (pending.state === "recovery_required") terminalState = "recovery_required";
+          else if (pending.state === "rolled_back") terminalState = "rolled_back";
+        } catch (journalError) {
+          throw new ExecutionError("Restore failed and transaction state could not be verified", {
+            cause: new AggregateError([error, journalError]),
+          });
+        }
+      }
+      if (terminalState === "recovery_required") outcome = "recovery_required";
+      try {
+        await finishExecutionReceipt(resource.context, receipt, {
+          outcome,
+          finishedAt: resource.context.now(),
+          actions: receiptActions(receipt, "failed"),
+          ...(observedPostFingerprint === undefined ? {} : { observedPostFingerprint }),
+          ...(terminalTransactionId === undefined ? {} : { transactionId: terminalTransactionId }),
+        });
+      } catch (receiptError) {
+        throw new ExecutionError("Restore failed and receipt finalization also failed", {
+          cause: new AggregateError([error, receiptError]),
+        });
+      }
+      if (terminalState === "rolled_back" && transactionId && transaction)
+        try {
+          await finalizeLocalTransaction({
+            context: resource.context,
+            transactionId,
+            roots: transaction.roots,
+          });
+        } catch (finalizationError) {
+          throw new ExecutionError(
+            "Restore rolled back and receipt was published, but transaction finalization is pending",
+            { cause: new AggregateError([error, finalizationError]) },
+          );
+        }
+    }
     if (error instanceof BlockedError || error instanceof ExecutionError) throw error;
     if (!mutationStarted)
       throw new BlockedError(error instanceof Error ? error.message : String(error), {
@@ -837,4 +949,15 @@ export async function executePlannedRestore(
     await rm(temp, { recursive: true, force: true });
     unregisterInterruptCleanup();
   }
+}
+
+function receiptActions(
+  receipt: ExecutionReceipt,
+  outcome: "succeeded" | "failed",
+): ExecutionReceiptAction[] {
+  return receipt.actions.map((action) => ({
+    ...action,
+    outcome:
+      action.outcome === "skipped" ? "skipped" : outcome === "succeeded" ? "succeeded" : "failed",
+  }));
 }
