@@ -1,7 +1,47 @@
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createFakeMachine, readCommandLog, runCcm } from "./harness/index.ts";
+import {
+  armFault,
+  type CommandLogEntry,
+  createFakeMachine,
+  readCommandLog,
+  runCcm,
+} from "./harness/index.ts";
+
+function controlPaths(commands: readonly CommandLogEntry[]): string[] {
+  return [
+    ...new Set(
+      commands.flatMap(({ command, args }) =>
+        command === "ssh" || command === "scp" || command === "rsync"
+          ? args.flatMap((argument) => /-oControlPath=([^\s]+)/.exec(argument)?.[1] ?? [])
+          : [],
+      ),
+    ),
+  ];
+}
+
+function expectOneClosedSession(commands: readonly CommandLogEntry[]): void {
+  const [controlPath] = controlPaths(commands);
+  expect(controlPath).toBeDefined();
+  for (const { command, args } of commands) {
+    if (command !== "ssh" && command !== "scp" && command !== "rsync") continue;
+    expect(
+      args.some((argument) => argument.includes(`-oControlPath=${controlPath as string}`)),
+    ).toBe(true);
+  }
+  expect(
+    commands.filter(
+      ({ command, args }) => command === "ssh" && args.includes("-O") && args.includes("exit"),
+    ),
+  ).toHaveLength(1);
+}
+
+async function expectSessionResidueRemoved(commands: readonly CommandLogEntry[]): Promise<void> {
+  const [controlPath] = controlPaths(commands);
+  expect(controlPath).toBeDefined();
+  expect(await lstat(dirname(controlPath as string)).catch(() => null)).toBeNull();
+}
 
 describe("planned remote push", () => {
   it("applies an explicit host-bound profile and exposes only symbolic provenance", async () => {
@@ -118,6 +158,8 @@ describe("planned remote push", () => {
       ).toBe("UNMANAGED-CANARY\n");
 
       const commands = await readCommandLog(machine);
+      expectOneClosedSession(commands);
+      await expectSessionResidueRemoved(commands);
       expect(commands.some(({ command }) => command === "scp" || command === "rsync")).toBe(true);
       expect(
         commands.some(
@@ -179,7 +221,8 @@ describe("planned remote push", () => {
       );
       const commands = await readCommandLog(machine);
       expect(commands.some(({ command }) => command === "scp" || command === "rsync")).toBe(false);
-      expect(commands.filter(({ command }) => command === "ssh")).toHaveLength(1);
+      expect(commands.filter(({ command }) => command === "ssh")).toHaveLength(2);
+      expectOneClosedSession(commands);
     } finally {
       await machine.dispose();
     }
@@ -200,7 +243,60 @@ describe("planned remote push", () => {
       expect(result.stderr).toContain("Push plan is blocked");
       const commands = await readCommandLog(machine);
       expect(commands.some(({ command }) => command === "scp" || command === "rsync")).toBe(false);
+      expectOneClosedSession(commands);
     } finally {
+      await machine.dispose();
+    }
+  });
+
+  it("closes the multiplexed session after a connection failure", async () => {
+    const machine = await createFakeMachine("ccm-planned-push-connectivity-");
+    try {
+      await mkdir(join(machine.home, ".codex"), { recursive: true });
+      await writeFile(join(machine.home, ".codex/config.toml"), 'model = "gpt-5.6"\n');
+      await armFault(machine, "ssh", { exitCode: 255, stderr: "connection refused\n" });
+
+      const result = await runCcm(["push", "codex", "operator@example.test"], machine);
+
+      expect(result.exitCode).toBe(4);
+      expect(result.stderr).toContain("Cannot connect to operator@example.test");
+      const commands = await readCommandLog(machine);
+      expectOneClosedSession(commands);
+      await expectSessionResidueRemoved(commands);
+    } finally {
+      await machine.dispose();
+    }
+  });
+
+  it("retries failed master shutdown and retains the control socket for recovery", async () => {
+    const machine = await createFakeMachine("ccm-planned-push-close-failure-");
+    let retainedRoot: string | undefined;
+    try {
+      await mkdir(join(machine.home, ".codex"), { recursive: true });
+      await writeFile(join(machine.home, ".codex/config.toml"), 'model = "gpt-5.6"\n');
+      await armFault(
+        machine,
+        "ssh:exit",
+        { exitCode: 255, stderr: "control command failed\n" },
+        { once: false },
+      );
+
+      const result = await runCcm(["push", "codex", "operator@example.test"], machine);
+
+      expect(result.exitCode).toBe(5);
+      expect(result.stderr).toContain("Could not close multiplexed SSH session");
+      const commands = await readCommandLog(machine);
+      const [controlPath] = controlPaths(commands);
+      expect(controlPath).toBeDefined();
+      expect(
+        commands.filter(
+          ({ command, args }) => command === "ssh" && args.includes("-O") && args.includes("exit"),
+        ),
+      ).toHaveLength(2);
+      retainedRoot = dirname(controlPath as string);
+      expect(await lstat(controlPath as string)).toBeTruthy();
+    } finally {
+      if (retainedRoot) await rm(retainedRoot, { recursive: true, force: true });
       await machine.dispose();
     }
   });

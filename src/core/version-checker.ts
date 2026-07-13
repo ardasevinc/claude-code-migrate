@@ -1,5 +1,6 @@
 import { log } from "../utils/logger.ts";
 import { runProcess } from "../utils/process.ts";
+import { assertSshSessionHost, type SshSession } from "./ssh-session.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
 export async function getClaudeVersion(): Promise<string | null> {
@@ -13,10 +14,16 @@ export async function getClaudeVersion(): Promise<string | null> {
   }
 }
 
-export async function getRemoteClaudeVersion(host: string): Promise<string | null> {
+export async function getRemoteClaudeVersion(
+  host: string,
+  session?: SshSession,
+): Promise<string | null> {
   parseSshTarget(host);
+  if (session) assertSshSessionHost(session, host);
   try {
-    const result = await runProcess("ssh", [host, "claude --version"]);
+    const result = session
+      ? await session.run("claude --version")
+      : await runProcess("ssh", [host, "claude --version"]);
     const output = result.stdout.trim();
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match?.[1] ?? null;
@@ -39,10 +46,11 @@ function parseSemver(version: string): { major: number; minor: number; patch: nu
 
 export async function checkVersionCompatibility(
   host: string,
+  session?: SshSession,
 ): Promise<{ compatible: boolean; warning?: string }> {
   parseSshTarget(host);
   const localVersion = await getClaudeVersion();
-  const remoteVersion = await getRemoteClaudeVersion(host);
+  const remoteVersion = await getRemoteClaudeVersion(host, session);
 
   if (!localVersion) {
     return {

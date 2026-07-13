@@ -27,6 +27,7 @@ import {
 } from "./push-observation.ts";
 import { pushObservationRequestIdentity } from "./push-observation-request.ts";
 import { buildArchiveUploadArgs } from "./ssh.ts";
+import { assertSshSessionHost, type SshSession } from "./ssh-session.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
 const HELPER_PATH = fileURLToPath(new URL("./remote-push-helper.py", import.meta.url));
@@ -82,6 +83,37 @@ const defaultTransport: PushSshTransport = {
     return parseRsyncTransportMetrics(`${result.stdout}\n${result.stderr}`, options.payloadBytes);
   },
 };
+
+function sessionTransport(session: SshSession): PushSshTransport {
+  return {
+    run: (host, command, options = {}) => {
+      assertSshSessionHost(session, host);
+      return session.run(command, {
+        nothrow: options.nothrow,
+        maxBuffer: options.maxBuffer,
+        timeoutMs: options.timeout,
+      });
+    },
+    async upload(localPath, host, remotePath, useRsync) {
+      assertSshSessionHost(session, host);
+      await session.upload(
+        useRsync ? "rsync" : "scp",
+        buildArchiveUploadArgs(localPath, `${host}:${remotePath}`, useRsync),
+      );
+    },
+    async hasLocalRsync() {
+      return (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
+    },
+    async syncTree(localTree, host, remoteDirectory, options = {}) {
+      assertSshSessionHost(session, host);
+      const result = await session.streamRsync(
+        buildIncrementalRsyncArgs(localTree, `${host}:${remoteDirectory}`, options.linkDest),
+        { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024 },
+      );
+      return parseRsyncTransportMetrics(`${result.stdout}\n${result.stderr}`, options.payloadBytes);
+    },
+  };
+}
 
 export function parseRsyncTransportMetrics(
   output: string,
@@ -429,9 +461,17 @@ function manifestAction(input: {
 }
 
 export function createSshPushExecutionAdapter(
-  options: { transport?: PushSshTransport; helperPath?: string; mode?: PushTransportMode } = {},
+  options: {
+    transport?: PushSshTransport;
+    helperPath?: string;
+    mode?: PushTransportMode;
+    session?: SshSession;
+  } = {},
 ): PushExecutionAdapter {
-  const transport = options.transport ?? defaultTransport;
+  if (options.transport && options.session)
+    throw new BlockedError("Push adapter accepts either an SSH session or a custom transport");
+  const transport =
+    options.transport ?? (options.session ? sessionTransport(options.session) : defaultTransport);
   const helperPath = options.helperPath ?? HELPER_PATH;
   const mode = options.mode ?? "auto";
   let transportMetrics: PushTransportMetrics = {

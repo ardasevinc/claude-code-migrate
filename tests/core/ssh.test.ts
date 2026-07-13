@@ -1,24 +1,46 @@
 import { spawnSync } from "node:child_process";
-import type { FileEntry } from "../../src/types/index.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertUploadedArchiveDigest,
   buildArchiveUploadArgs,
   buildClaudeSharedSkillSymlinkCommand,
-  buildRemoteManagedBackupCommand,
-  buildRemoteHostCapabilityProbeCommand,
   buildRemoteCommandPathResolutionCommand,
+  buildRemoteHostCapabilityProbeCommand,
+  buildRemoteManagedBackupCommand,
   parseRemoteHome,
   parseRemoteWorkspace,
   previewPush,
   resolvePushActions,
+  testConnection,
 } from "../../src/core/ssh.ts";
+import type { SshSession } from "../../src/core/ssh-session.ts";
+import { getRemoteClaudeVersion } from "../../src/core/version-checker.ts";
+import type { FileEntry } from "../../src/types/index.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("ssh helpers", () => {
+  it("rejects a multiplexed session bound to another target before transport", async () => {
+    const run = vi.fn();
+    const session: SshSession = {
+      host: "bound@example.test",
+      run,
+      upload: vi.fn(),
+      streamRsync: vi.fn(),
+      close: vi.fn(),
+    };
+
+    await expect(testConnection("other@example.test", session)).rejects.toThrow(
+      "SSH session target does not match requested host",
+    );
+    await expect(getRemoteClaudeVersion("other@example.test", session)).rejects.toThrow(
+      "SSH session target does not match requested host",
+    );
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("binds the uploaded archive to the digest produced during verification", () => {
     const verifiedDigest = "a".repeat(64);
 
@@ -31,13 +53,7 @@ describe("ssh helpers", () => {
   it("uses rsync progress when available and falls back to scp", () => {
     expect(
       buildArchiveUploadArgs("/tmp/archive;touch nope", "host:/tmp/archive.tar.gz", true),
-    ).toEqual([
-      "--partial",
-      "--human-readable",
-      "--info=progress2",
-      "/tmp/archive;touch nope",
-      "host:/tmp/archive.tar.gz",
-    ]);
+    ).toEqual(["--partial", "--progress", "/tmp/archive;touch nope", "host:/tmp/archive.tar.gz"]);
     expect(
       buildArchiveUploadArgs("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", false),
     ).toEqual(["/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz"]);

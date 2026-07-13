@@ -5,7 +5,12 @@ const [commandArg, ...args] = process.argv.slice(2);
 const command = basename(commandArg ?? "");
 
 appendLog({ command, args, cwd: process.cwd(), home: process.env.HOME ?? null });
-applyFault(`${command}:${args[0] ?? ""}`) || applyFault(command);
+const controlOperation = args.indexOf("-O");
+const scopedFault =
+  command === "ssh" && controlOperation !== -1 && args[controlOperation + 1] === "exit"
+    ? "ssh:exit"
+    : `${command}:${args[0] ?? ""}`;
+applyFault(scopedFault) || applyFault(command);
 
 switch (command) {
   case "claude":
@@ -63,6 +68,12 @@ function applyFault(name: string): boolean {
 }
 
 function runSsh(argv: string[]): number {
+  const controlOperation = argv.indexOf("-O");
+  if (controlOperation !== -1 && argv[controlOperation + 1] === "exit") return 0;
+  const controlPath = argv
+    .find((argument) => argument.startsWith("-oControlPath="))
+    ?.slice("-oControlPath=".length);
+  if (controlPath) writeFileSync(controlPath, "fake-control-socket", "utf8");
   const commandArgs = operandsAfterTarget(argv);
   const remoteHome = requiredEnv("CCM_TEST_REMOTE_HOME");
   const env = {

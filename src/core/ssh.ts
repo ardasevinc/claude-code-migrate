@@ -1,12 +1,12 @@
 import { join } from "node:path";
-import type { FileEntry } from "../types/index.ts";
-import type { CodexPluginPolicy } from "../types/index.ts";
 import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
 import { CliError, ConnectivityError, ExecutionError } from "../errors.ts";
-import { log } from "../utils/logger.ts";
+import type { CodexPluginPolicy, FileEntry } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { log } from "../utils/logger.ts";
 import { runInheritedProcess, runProcess } from "../utils/process.ts";
 import { shellQuote } from "../utils/shell.ts";
+import { readVerifiedArchive } from "./archiver.ts";
 import { buildRemoteBackupPruneCommand } from "./backup-retention.ts";
 import {
   adaptCodexConfigForHost,
@@ -14,6 +14,7 @@ import {
   getCodexLocalMarketplaceSources,
   rewriteCodexMarketplaceSources,
 } from "./codex.ts";
+import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 import {
   applyCodexPluginPolicies,
   codexPluginPolicyCommandNames,
@@ -21,8 +22,7 @@ import {
   mergeCodexPluginPolicies,
 } from "./codex-plugin-policy.ts";
 import { mergeMcpServers, normalizeCodexMcpCommandPaths } from "./mcp.ts";
-import { readVerifiedArchive } from "./archiver.ts";
-import { adaptCodexHooksForHost } from "./codex-hooks.ts";
+import { assertSshSessionHost, type SshSession } from "./ssh-session.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
 export type PushAction = "claude" | "codex" | "shared" | "claude-shared-symlinks";
@@ -383,13 +383,14 @@ export function resolvePushActions(input: {
   return actions;
 }
 
-export async function testConnection(host: string): Promise<boolean> {
+export async function testConnection(host: string, session?: SshSession): Promise<boolean> {
   parseSshTarget(host);
-  const result = await runProcess(
-    "ssh",
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "echo ok"],
-    { nothrow: true },
-  );
+  if (session) assertSshSessionHost(session, host);
+  const result = session
+    ? await session.run("echo ok", { nothrow: true }, ["-oBatchMode=yes", "-oConnectTimeout=5"])
+    : await runProcess("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host, "echo ok"], {
+        nothrow: true,
+      });
 
   return result.exitCode === 0 && result.stdout.trim() === "ok";
 }
@@ -543,7 +544,7 @@ export function buildArchiveUploadArgs(
   useRsync: boolean,
 ): string[] {
   if (useRsync) {
-    return ["--partial", "--human-readable", "--info=progress2", archivePath, remoteSpec];
+    return ["--partial", "--progress", archivePath, remoteSpec];
   }
 
   return [archivePath, remoteSpec];

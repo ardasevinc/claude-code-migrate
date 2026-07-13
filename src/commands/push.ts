@@ -6,9 +6,10 @@ import { preparePushObservationRequest } from "../core/push-observation-request.
 import { applyPushProfile } from "../core/push-profile.ts";
 import { createSshPushExecutionAdapter } from "../core/push-ssh-adapter.ts";
 import { testConnection } from "../core/ssh.ts";
+import { createSshSession } from "../core/ssh-session.ts";
 import { parseSshTarget } from "../core/ssh-target.ts";
 import { checkVersionCompatibility } from "../core/version-checker.ts";
-import { BlockedError, ConnectivityError, UsageError } from "../errors.ts";
+import { BlockedError, ConnectivityError, ExecutionError, UsageError } from "../errors.ts";
 import { createRuntimeContext } from "../runtime/context.ts";
 import type { PushOptions } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
@@ -101,59 +102,87 @@ export async function pushCommand(
     ...(appliedProfile?.profile.pluginPolicies ?? {}),
   };
 
-  if (!options.dryRun) {
-    log.info(`Testing connection to ${host}...`);
-    const connected = await testConnection(host);
-    if (!connected) {
-      throw new ConnectivityError(`Cannot connect to ${host}. Check your SSH configuration.`);
+  const session = await createSshSession(host);
+  const execute = async () => {
+    if (!options.dryRun) {
+      log.info(`Testing connection to ${host}...`);
+      const connected = await testConnection(host, session);
+      if (!connected) {
+        throw new ConnectivityError(`Cannot connect to ${host}. Check your SSH configuration.`);
+      }
+      log.success("Connection established");
     }
-    log.success("Connection established");
-  }
 
-  if (!options.dryRun && providers.includes("claude") && !options.skipVersionCheck) {
-    const versionCheck = await checkVersionCompatibility(host);
-    if (versionCheck.warning) {
-      log.warn(versionCheck.warning);
+    if (!options.dryRun && providers.includes("claude") && !options.skipVersionCheck) {
+      const versionCheck = await checkVersionCompatibility(host, session);
+      if (versionCheck.warning) {
+        log.warn(versionCheck.warning);
+      }
     }
-  }
 
-  const preparedRequest = await preparePushObservationRequest({
-    host,
-    files,
-    providers,
-    policyOverrides,
-  });
-  const adapter = createSshPushExecutionAdapter({ mode: options.transport ?? "auto" });
-  const observation = await adapter.observe(preparedRequest);
-  const planned = await planPush({
-    files,
-    host,
-    providers,
-    policyOverrides,
-    configuredPolicyIds: Object.keys(config.providers.codex.plugin_policies),
-    profile: appliedProfile?.profile,
-    observation,
-    preparedRequest,
-    createdAt,
-  });
+    const preparedRequest = await preparePushObservationRequest({
+      host,
+      files,
+      providers,
+      policyOverrides,
+    });
+    const adapter = createSshPushExecutionAdapter({
+      mode: options.transport ?? "auto",
+      session,
+    });
+    const observation = await adapter.observe(preparedRequest);
+    const planned = await planPush({
+      files,
+      host,
+      providers,
+      policyOverrides,
+      configuredPolicyIds: Object.keys(config.providers.codex.plugin_policies),
+      profile: appliedProfile?.profile,
+      observation,
+      preparedRequest,
+      createdAt,
+    });
 
-  if (options.dryRun) {
-    if (options.json) {
-      console.log(JSON.stringify(planned.plan));
+    if (options.dryRun) {
+      if (options.json) {
+        console.log(JSON.stringify(planned.plan));
+        return;
+      }
+      log.info(`Push plan ${planned.plan.id} (${planned.plan.status})`);
+      log.info(`Providers: ${planned.plan.providers.join(", ")}`);
+      if (options.verbose)
+        for (const action of planned.plan.actions)
+          log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
       return;
     }
-    log.info(`Push plan ${planned.plan.id} (${planned.plan.status})`);
-    log.info(`Providers: ${planned.plan.providers.join(", ")}`);
-    if (options.verbose)
-      for (const action of planned.plan.actions)
-        log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
-    return;
-  }
 
-  if (planned.plan.status === "blocked") {
-    throw new BlockedError("Push plan is blocked");
+    if (planned.plan.status === "blocked") {
+      throw new BlockedError("Push plan is blocked");
+    }
+    log.info(`Executing push plan ${planned.plan.id}...`);
+    await executePlannedPush(planned, adapter, { context: createRuntimeContext() });
+    log.success(`Successfully pushed config to ${host}`);
+  };
+  let primaryError: unknown;
+  let failed = false;
+  try {
+    await execute();
+  } catch (error) {
+    failed = true;
+    primaryError = error;
   }
-  log.info(`Executing push plan ${planned.plan.id}...`);
-  await executePlannedPush(planned, adapter, { context: createRuntimeContext() });
-  log.success(`Successfully pushed config to ${host}`);
+  let cleanupError: unknown;
+  let cleanupFailed = false;
+  try {
+    await session.close();
+  } catch (error) {
+    cleanupFailed = true;
+    cleanupError = error;
+  }
+  if (failed && cleanupFailed)
+    throw new ExecutionError("Push failed and SSH session cleanup also failed", {
+      cause: new AggregateError([primaryError, cleanupError]),
+    });
+  if (failed) throw primaryError;
+  if (cleanupFailed) throw cleanupError;
 }
