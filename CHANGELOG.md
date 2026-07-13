@@ -5,8 +5,23 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
-See the commit history for work merged after v1.8.2. This section is intentionally left without
-release claims until the next version is cut.
+- Added fail-closed configuration, SSH-target, process, archive, staging, and interrupt handling.
+- Added atomic manifest-v2 archives with bounded streaming integrity verification, legacy archive
+  compatibility, and archive inspection.
+- Unified backup, restore, push, dry-run, and diff behavior around immutable redacted migration
+  plans.
+- Made local restore and remote push transactional with durable journals, explicit recovery,
+  crash/signal handling, managed-state verification, and redacted execution receipts.
+- Added resumable incremental rsync transport with archive fallback, sealed remote snapshots,
+  transfer accounting, and one multiplexed SSH session per push.
+- Added read-only health diagnostics, exact plan diffing, receipt inspection and drift
+  verification, transaction listing, and explicit recovery commands.
+- Added explicit target-bound host profiles with bounded assets, structured patches, plugin policy,
+  and receipt provenance.
+- Expanded the integration and fault-injection program across real subprocesses, transaction
+  boundaries, macOS, Linux, packed npm artifacts, and fixed-seed property tests.
+- Added a pack-once trusted-publishing workflow with exact registry digest reconciliation,
+  immutable package smoke tests, checksums, artifact attestation, and idempotent GitHub releases.
 
 ## [1.8.2] - 2026-07-12
 
