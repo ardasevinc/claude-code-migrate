@@ -88,12 +88,24 @@ export async function withPushPlan<T>(
     });
   }
 
-  const selectedProfile = options.profile ? config.profiles[options.profile] : undefined;
-  if (options.profile && !selectedProfile)
-    throw new UsageError(`Unknown profile: ${options.profile}`);
-  if (selectedProfile && targetArg)
+  const requestedHost = targetArg ?? config.target.host;
+  const explicitProfileName = options.profile;
+  const automaticProfileMatches =
+    explicitProfileName === undefined && options.autoProfile !== false
+      ? Object.entries(config.profiles).filter(([, profile]) => profile.host === requestedHost)
+      : [];
+  if (automaticProfileMatches.length > 1) {
+    throw new UsageError(
+      `Multiple profiles match target ${requestedHost}; choose one with --profile`,
+    );
+  }
+  const selectedProfileName = explicitProfileName ?? automaticProfileMatches[0]?.[0];
+  const selectedProfile = selectedProfileName ? config.profiles[selectedProfileName] : undefined;
+  if (explicitProfileName && !selectedProfile)
+    throw new UsageError(`Unknown profile: ${explicitProfileName}`);
+  if (explicitProfileName && targetArg)
     throw new UsageError("A profile supplies the SSH target; do not also pass a positional target");
-  const host = selectedProfile?.host ?? targetArg ?? config.target.host;
+  const host = selectedProfile?.host ?? requestedHost;
 
   if (host === "user@example.com") {
     throw new UsageError(
@@ -121,7 +133,7 @@ export async function withPushPlan<T>(
   try {
     appliedProfile = selectedProfile
       ? await applyPushProfile({
-          name: options.profile as string,
+          name: selectedProfileName as string,
           definition: selectedProfile,
           configDir: getConfigDir(),
           providers,
@@ -130,7 +142,7 @@ export async function withPushPlan<T>(
       : undefined;
   } catch (error) {
     throw new BlockedError(
-      `Cannot apply profile ${options.profile}: ${error instanceof Error ? error.message : String(error)}`,
+      `Cannot apply profile ${selectedProfileName}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
@@ -169,7 +181,13 @@ export async function withPushPlan<T>(
       mode: options.transport ?? "auto",
       session,
     });
+    if (!options.json) log.info(`Observing managed state on ${host}...`);
+    const observationStartedAt = Date.now();
     const observation = await adapter.observe(preparedRequest);
+    if (!options.json) {
+      const seconds = ((Date.now() - observationStartedAt) / 1_000).toFixed(1);
+      log.success(`Managed state observed (${seconds}s)`);
+    }
     const planned = await planPush({
       files,
       host,

@@ -129,6 +129,9 @@ Successful and failed mutating restores and pushes also write private execution 
 `${XDG_STATE_HOME:-~/.local/state}/ccm/receipts/`. Use the canonical `rcpt_...` filename stem:
 
 ```bash
+ccm receipts
+ccm inspect latest
+ccm verify latest
 ccm inspect rcpt_0123456789abcdef0123456789abcdef
 ccm inspect rcpt_0123456789abcdef0123456789abcdef --json
 ccm verify rcpt_0123456789abcdef0123456789abcdef
@@ -137,9 +140,25 @@ ccm verify rcpt_0123456789abcdef0123456789abcdef --remote arda@devbox
 
 Receipt verification re-observes only the receipt's symbolic managed roots and, when applicable,
 Codex plugin state, then compares fingerprints; it does not print file contents. Push receipts
-require the original target through `--remote`, and the target must match the receipt's redacted
-endpoint binding. Older schema-v1 receipts remain inspectable but report drift verification as
-unavailable because they do not carry an observation scope.
+use the original target when it can be matched safely from the configured target or profiles.
+Otherwise, supply it through `--remote`; the target must match the receipt's redacted endpoint
+binding. Older schema-v1 receipts remain inspectable but report drift verification as unavailable
+because they do not carry an observation scope.
+
+### Doctor and diff
+
+```bash
+ccm doctor                 # local checks plus the configured remote target
+ccm doctor --local         # explicitly skip remote checks
+ccm doctor --remote host   # override the configured remote target
+ccm diff                   # push diff against the configured target
+ccm diff push codex host   # explicit push diff
+ccm diff restore ./backup.tar.gz codex
+```
+
+Remote push planning reports observation progress in human output. JSON output remains one pure
+object. Observation is always fresh because an exact diff must not rely on stale managed-state
+data.
 
 ### Push
 
@@ -154,6 +173,10 @@ ccm push codex user@host --dry-run           # compact transfer + Codex plugin p
 ccm push codex user@host --dry-run --verbose # full file list when needed
 ```
 
+When exactly one profile has the selected target host, `push` and push `diff` apply it
+automatically. Use `--profile <name>` to select one explicitly or `--no-auto-profile` to push
+without automatic profile selection. Multiple matching profiles fail closed.
+
 ### Restore
 
 ```bash
@@ -161,6 +184,10 @@ ccm restore ./ccm-backup.tar.gz        # restore all providers in archive
 ccm restore ./ccm-backup.tar.gz codex  # restore only codex
 ccm restore ./ccm-backup.tar.gz --dry-run
 ```
+
+If a local restore stops in a recoverable transaction, `ccm transactions` prints the exact
+recovery commands. `ccm recover --rollback` and `ccm recover --accept` infer the transaction only
+when exactly one journal matches; pass the transaction ID whenever the choice is ambiguous.
 
 Restored Codex hook trust is deliberately removed. Review the restored hook commands and approve
 them again on the destination host before relying on them.

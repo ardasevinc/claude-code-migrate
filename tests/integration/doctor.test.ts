@@ -64,6 +64,48 @@ describe("doctor command", () => {
     }
   });
 
+  it("checks the configured target by default and supports an explicit local-only escape hatch", async () => {
+    const machine = await createFakeMachine("ccm-doctor-default-remote-");
+    const configDir = join(machine.home, ".config", "claude-code-migrate");
+    try {
+      await mkdir(configDir, { recursive: true });
+      await writeFile(
+        join(configDir, "config.toml"),
+        '[target]\ntype = "ssh"\nhost = "operator@example.test"\n',
+      );
+
+      const remote = await runCcm(["doctor", "--json"], machine);
+      expect(remote).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(JSON.parse(remote.stdout)).toMatchObject({
+        healthy: true,
+        remote: { targetRef: expect.stringMatching(/^endpoint_[a-f0-9]{64}$/) },
+        checks: expect.arrayContaining([
+          { id: "remote-connection", status: "ok", reasonCode: "connection-established" },
+        ]),
+      });
+      expect((await readCommandLog(machine)).some(({ command }) => command === "ssh")).toBe(true);
+
+      await writeFile(machine.commandLog, "", "utf8");
+      const local = await runCcm(["doctor", "--local", "--json"], machine);
+      expect(local).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(JSON.parse(local.stdout)).toMatchObject({
+        healthy: true,
+        checks: expect.arrayContaining([
+          { id: "remote-target", status: "warning", reasonCode: "explicitly-skipped" },
+        ]),
+      });
+      expect(await readCommandLog(machine)).toEqual([]);
+
+      const conflicting = await runCcm(
+        ["doctor", "--local", "--remote", "operator@example.test", "--json"],
+        machine,
+      );
+      expect(conflicting.exitCode).toBe(2);
+    } finally {
+      await machine.dispose();
+    }
+  });
+
   it("reports valid-negative health without losing JSON purity", async () => {
     const machine = await createFakeMachine("ccm-doctor-negative-");
     const stateRoot = join(machine.xdgStateHome, "ccm");

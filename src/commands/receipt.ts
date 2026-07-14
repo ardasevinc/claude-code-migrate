@@ -1,15 +1,55 @@
-import { type ExecutionReceipt, readExecutionReceipt } from "../core/execution-receipt.ts";
+import { loadConfig } from "../config/loader.ts";
+import {
+  type ExecutionReceipt,
+  executionReceiptEndpointRef,
+  listExecutionReceipts,
+  readExecutionReceipt,
+} from "../core/execution-receipt.ts";
 import {
   type ReceiptVerificationResult,
   verifyExecutionReceipt,
 } from "../core/receipt-verification.ts";
-import { BlockedError, type CcmExitCode, CliError, ReportedCliError } from "../errors.ts";
-import { createRuntimeContext } from "../runtime/context.ts";
+import {
+  BlockedError,
+  type CcmExitCode,
+  CliError,
+  ReportedCliError,
+  UsageError,
+} from "../errors.ts";
+import { createRuntimeContext, type RuntimeContext } from "../runtime/context.ts";
 
 interface ReceiptCommandOptions {
   readonly json?: boolean;
   readonly remote?: string;
   readonly files?: boolean;
+}
+
+export async function receiptsCommand(options: Pick<ReceiptCommandOptions, "json">): Promise<void> {
+  const receipts = await listExecutionReceipts(createRuntimeContext());
+  const projected = receipts.map((receipt) => ({
+    id: receipt.id,
+    migrationKind: receipt.kind,
+    providers: receipt.providers,
+    ...(receipt.profile === undefined ? {} : { profile: receipt.profile }),
+    outcome: receipt.outcome,
+    startedAt: receipt.startedAt,
+    ...(receipt.finishedAt === undefined ? {} : { finishedAt: receipt.finishedAt }),
+  }));
+  if (options.json) {
+    console.log(JSON.stringify({ receipts: projected }));
+    return;
+  }
+  if (projected.length === 0) {
+    console.log("No CCM receipts.");
+    return;
+  }
+  for (const receipt of projected) {
+    console.log(
+      `${receipt.id}  ${receipt.outcome}  ${receipt.migrationKind}  ${receipt.providers.join(",")}`,
+    );
+    console.log(`  started: ${receipt.startedAt}`);
+    if (receipt.profile) console.log(`  profile: ${receipt.profile}`);
+  }
 }
 
 export async function inspectReceiptCommand(
@@ -18,7 +58,8 @@ export async function inspectReceiptCommand(
 ): Promise<void> {
   await reportReceiptErrors("inspect", options, async () => {
     if (options.files) throw new CliError("--files is available only for archive inspection", 2);
-    const receipt = await readReceipt(createRuntimeContext(), receiptId);
+    const context = createRuntimeContext();
+    const receipt = await readReceipt(context, await resolveReceiptId(context, receiptId));
     const output = projectReceipt(receipt);
     if (options.json) console.log(JSON.stringify(output));
     else printReceipt(output);
@@ -31,14 +72,42 @@ export async function verifyReceiptCommand(
 ): Promise<void> {
   await reportReceiptErrors("verify", options, async () => {
     const context = createRuntimeContext();
-    const receipt = await readReceipt(context, receiptId);
+    const receipt = await readReceipt(context, await resolveReceiptId(context, receiptId));
+    const remoteTarget = options.remote ?? (await inferRemoteTarget(receipt));
     const output = await verifyExecutionReceipt(context, receipt, {
-      remoteTarget: options.remote,
+      remoteTarget,
     });
     if (options.json) console.log(JSON.stringify(output));
     else printVerification(output);
     if (!output.valid) throw new ReportedCliError(1);
   });
+}
+
+async function resolveReceiptId(context: RuntimeContext, requested: string): Promise<string> {
+  if (requested !== "latest") return requested;
+  const latest = (await listExecutionReceipts(context))[0];
+  if (!latest) throw new BlockedError("No execution receipts are available");
+  return latest.id;
+}
+
+async function inferRemoteTarget(receipt: ExecutionReceipt): Promise<string | undefined> {
+  if (receipt.verification?.mode !== "remote") return undefined;
+  let config: Awaited<ReturnType<typeof loadConfig>>;
+  try {
+    config = await loadConfig();
+  } catch {
+    return undefined;
+  }
+  const candidates = [config.target.host, ...Object.values(config.profiles).map(({ host }) => host)]
+    .filter((host) => host !== "user@example.com")
+    .filter((host, index, hosts) => hosts.indexOf(host) === index)
+    .filter(
+      (host) => executionReceiptEndpointRef("remote", host) === receipt.verification?.endpointRef,
+    );
+  if (candidates.length > 1) {
+    throw new UsageError("Multiple configured targets match this receipt; use --remote");
+  }
+  return candidates[0];
 }
 
 async function readReceipt(

@@ -222,6 +222,33 @@ export async function readExecutionReceipt(
   return receipt;
 }
 
+export async function listExecutionReceipts(
+  context: RuntimeContext,
+): Promise<readonly ExecutionReceipt[]> {
+  const directory = await ensurePrivateStateDirectory(context, "receipts");
+  const names = (await readdir(directory))
+    .filter((name) => /^rcpt_[a-f0-9]{32}\.json$/.test(name))
+    .sort();
+  if (names.length > MAX_RECEIPTS) throw new Error("Too many execution receipts");
+  const receipts: ExecutionReceipt[] = [];
+  for (const name of names) {
+    try {
+      const receipt = await readReceiptAt(join(directory, name));
+      if (receipt.id !== name.slice(0, -".json".length)) {
+        throw new Error("Execution receipt filename identity mismatch");
+      }
+      receipts.push(receipt);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+    }
+  }
+  return receipts.sort((left, right) =>
+    left.startedAt === right.startedAt
+      ? right.id.localeCompare(left.id)
+      : right.startedAt.localeCompare(left.startedAt),
+  );
+}
+
 export async function reconcileExecutionReceiptPublication(
   context: RuntimeContext,
   receiptId: string,

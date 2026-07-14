@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   finishExecutionReceipt,
+  listExecutionReceipts,
   readExecutionReceipt,
   startExecutionReceipt,
 } from "../../src/core/execution-receipt.ts";
@@ -77,6 +78,25 @@ async function fixture() {
 }
 
 describe("execution receipts", () => {
+  it("lists valid receipts newest first", async () => {
+    const state = await fixture();
+    try {
+      const first = await startExecutionReceipt(state.context, state.plan, {
+        verification: state.verification,
+      });
+      const second = await startExecutionReceipt(state.context, state.plan, {
+        verification: state.verification,
+      });
+
+      expect((await listExecutionReceipts(state.context)).map(({ id }) => id)).toEqual([
+        second.id,
+        first.id,
+      ]);
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
   it("durably publishes a private started receipt and a revisioned terminal receipt", async () => {
     const state = await fixture();
     try {

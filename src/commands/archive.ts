@@ -16,7 +16,7 @@ export async function inspectCommand(
   archiveArg: string,
   options: ArchiveCommandOptions,
 ): Promise<void> {
-  if (isExecutionReceiptId(archiveArg)) {
+  if (archiveArg === "latest" || isExecutionReceiptId(archiveArg)) {
     await inspectReceiptCommand(archiveArg, options);
     return;
   }
@@ -39,7 +39,7 @@ export async function verifyCommand(
   archiveArg: string,
   options: Pick<ArchiveCommandOptions, "json" | "remote">,
 ): Promise<void> {
-  if (isExecutionReceiptId(archiveArg)) {
+  if (archiveArg === "latest" || isExecutionReceiptId(archiveArg)) {
     await verifyReceiptCommand(archiveArg, options);
     return;
   }

@@ -44,13 +44,17 @@ async function expectSessionResidueRemoved(commands: readonly CommandLogEntry[])
 }
 
 describe("planned remote push", () => {
-  it("applies an explicit host-bound profile and exposes only symbolic provenance", async () => {
+  it("selects a unique host-bound profile and exposes only symbolic provenance", async () => {
     const machine = await createFakeMachine("ccm-planned-push-profile-");
     try {
       const canonicalHome = await realpath(machine.home);
       const configDir = join(canonicalHome, ".config/claude-code-migrate");
-      await mkdir(join(configDir, "profiles/devbox"), { recursive: true });
       await Promise.all([
+        mkdir(join(configDir, "profiles/devbox"), { recursive: true }),
+        mkdir(join(canonicalHome, ".codex"), { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(join(canonicalHome, ".codex/config.toml"), 'model = "source"\n'),
         writeFile(join(configDir, "profiles/devbox/AGENTS.md"), "devbox instructions\n"),
         writeFile(
           join(configDir, "config.toml"),
@@ -59,7 +63,7 @@ describe("planned remote push", () => {
       ]);
 
       const dryRun = await runCcm(
-        ["push", "codex", "--profile", "devbox", "--dry-run", "--json"],
+        ["push", "codex", "operator@example.test", "--dry-run", "--json"],
         machine,
         { env: { HOME: canonicalHome } },
       );
@@ -77,6 +81,21 @@ describe("planned remote push", () => {
       );
       expect(dryRun.stdout).not.toContain("profiles/devbox/AGENTS.md");
       expect(dryRun.stdout).not.toContain("model_reasoning_effort");
+
+      const unprofiled = await runCcm(
+        ["push", "codex", "operator@example.test", "--no-auto-profile", "--dry-run", "--json"],
+        machine,
+        { env: { HOME: canonicalHome } },
+      );
+      expect(unprofiled.exitCode, unprofiled.stderr).toBe(0);
+      const unprofiledPlan = JSON.parse(unprofiled.stdout) as {
+        profile?: string;
+        actions: Array<{ policyProvenance: string[] }>;
+      };
+      expect(unprofiledPlan.profile).toBeUndefined();
+      expect(unprofiledPlan.actions.flatMap((action) => action.policyProvenance)).not.toContain(
+        "profile.devbox.codex-config",
+      );
 
       const live = await runCcm(["push", "codex", "--profile", "devbox"], machine, {
         env: { HOME: canonicalHome },
@@ -100,6 +119,21 @@ describe("planned remote push", () => {
       );
       expect(inspected.stdout).not.toContain("profiles/devbox/AGENTS.md");
       expect(inspected.stdout).not.toContain("model_reasoning_effort");
+      const verified = await runCcm(["verify", receiptId as string, "--json"], machine, {
+        env: { HOME: canonicalHome },
+      });
+      expect(verified.exitCode, verified.stderr).toBe(0);
+      expect(JSON.parse(verified.stdout)).toMatchObject({ valid: true, status: "verified" });
+      const latest = await runCcm(["inspect", "latest", "--json"], machine, {
+        env: { HOME: canonicalHome },
+      });
+      expect(JSON.parse(latest.stdout)).toMatchObject({ receipt: { id: receiptId } });
+      const receipts = await runCcm(["receipts", "--json"], machine, {
+        env: { HOME: canonicalHome },
+      });
+      expect(JSON.parse(receipts.stdout)).toMatchObject({
+        receipts: [{ id: receiptId, profile: "devbox", outcome: "succeeded" }],
+      });
       expect(await readFile(join(machine.remoteHome, ".codex/AGENTS.md"), "utf8")).toBe(
         "devbox instructions\n",
       );
@@ -127,6 +161,18 @@ describe("planned remote push", () => {
         const result = await runCcm(args, machine);
         expect(result.exitCode).toBe(2);
       }
+      await writeFile(
+        join(configDir, "config.toml"),
+        '[profiles.devbox]\nhost = "operator@example.test"\n[profiles.worker]\nhost = "operator@example.test"\n',
+      );
+      const ambiguous = await runCcm(
+        ["push", "codex", "operator@example.test", "--dry-run"],
+        machine,
+      );
+      expect(ambiguous.exitCode).toBe(2);
+      expect(ambiguous.stderr).toContain("Multiple profiles match target");
+      expect(await readCommandLog(machine)).toEqual([]);
+
       await mkdir(join(machine.home, ".codex"), { recursive: true });
       await writeFile(join(machine.home, ".codex/config.toml"), "this is [not toml");
       await writeFile(
@@ -196,6 +242,12 @@ describe("planned remote push", () => {
         result.stdout.indexOf("Connection established"),
       );
       expect(result.stdout.indexOf("Connection established")).toBeLessThan(
+        result.stdout.indexOf("Observing managed state"),
+      );
+      expect(result.stdout.indexOf("Observing managed state")).toBeLessThan(
+        result.stdout.indexOf("Managed state observed"),
+      );
+      expect(result.stdout.indexOf("Managed state observed")).toBeLessThan(
         result.stdout.indexOf("Executing push plan"),
       );
       expect(result.stdout.indexOf("Executing push plan")).toBeLessThan(

@@ -11,6 +11,7 @@ interface DiffOptions {
 
 interface DiffPushOptions extends DiffOptions {
   readonly profile?: string;
+  readonly autoProfile?: boolean;
   readonly transport?: PushOptions["transport"];
   readonly providers?: string;
   readonly all?: boolean;
@@ -29,6 +30,7 @@ export async function diffPushCommand(
         dryRun: true,
         json: options.json,
         profile: options.profile,
+        autoProfile: options.autoProfile,
         transport: options.transport,
         providers: options.providers,
         all: options.all,

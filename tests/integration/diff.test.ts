@@ -35,10 +35,15 @@ describe("migration diff commands", () => {
       await Promise.all([
         mkdir(join(machine.home, ".codex"), { recursive: true }),
         mkdir(join(machine.remoteHome, ".codex"), { recursive: true }),
+        mkdir(join(machine.home, ".config/claude-code-migrate"), { recursive: true }),
       ]);
       await Promise.all([
         writeFile(join(machine.home, ".codex/config.toml"), 'model = "gpt-5.6"\n'),
         writeFile(join(machine.remoteHome, ".codex/canary"), "REMOTE-CANARY\n"),
+        writeFile(
+          join(machine.home, ".config/claude-code-migrate/config.toml"),
+          '[target]\ntype = "ssh"\nhost = "operator@example.test"\n\n[providers.claude]\nenabled = false\n\n[providers.codex]\nenabled = true\n',
+        ),
       ]);
 
       const dryRun = await runCcm(
@@ -49,11 +54,14 @@ describe("migration diff commands", () => {
         ["diff", "push", "codex", "operator@example.test", "--json"],
         machine,
       );
+      const bare = await runCcm(["diff", "--json"], machine);
 
       expect(dryRun).toMatchObject({ exitCode: 0, stderr: "" });
       expect(diff).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(bare).toMatchObject({ exitCode: 0, stderr: "" });
       expect(diff.stdout.trim().split("\n")).toHaveLength(1);
       expectExactProjection(JSON.parse(dryRun.stdout) as PlanJson, JSON.parse(diff.stdout));
+      expectExactProjection(JSON.parse(dryRun.stdout) as PlanJson, JSON.parse(bare.stdout));
       expect(await readFile(join(machine.remoteHome, ".codex/canary"), "utf8")).toBe(
         "REMOTE-CANARY\n",
       );

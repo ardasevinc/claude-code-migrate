@@ -1,4 +1,7 @@
-import { recoverLocalTransaction } from "../core/local-transaction.ts";
+import {
+  type LocalTransactionRecoveryMode,
+  recoverLocalTransaction,
+} from "../core/local-transaction.ts";
 import { listTransactionJournals, type TransactionJournal } from "../core/transaction-journal.ts";
 import { UsageError } from "../errors.ts";
 import { createRuntimeContext, type RuntimeContext } from "../runtime/context.ts";
@@ -18,26 +21,64 @@ export async function transactionsCommand(options: TransactionsOptions): Promise
 }
 
 export async function recoverCommand(
-  transactionId: string,
+  transactionId: string | undefined,
   options: RecoverOptions,
 ): Promise<void> {
   return recoverCommandWithContext(transactionId, options, createRuntimeContext());
 }
 
 export async function recoverCommandWithContext(
-  transactionId: string,
+  transactionId: string | undefined,
   options: RecoverOptions,
   context: RuntimeContext,
 ): Promise<void> {
-  if (!/^txn_[a-f0-9]{32}$/.test(transactionId))
-    throw new UsageError("Transaction ID must be a canonical txn_<hex> identifier");
   if (Boolean(options.rollback) === Boolean(options.accept))
     throw new UsageError("Choose exactly one recovery mode: --rollback or --accept");
-  const mode = options.rollback ? "rollback" : "accept";
-  const journal = await recoverLocalTransaction({ context, transactionId, mode });
+  const mode: LocalTransactionRecoveryMode = options.rollback ? "rollback" : "accept";
+  const resolvedTransactionId = resolveRecoveryTransactionId(
+    transactionId,
+    mode,
+    await listTransactionJournals(context),
+  );
+  const journal = await recoverLocalTransaction({
+    context,
+    transactionId: resolvedTransactionId,
+    mode,
+  });
   const result = { transactionId: journal.id, outcome: journal.state, mode };
   if (options.json) console.log(JSON.stringify(result));
   else console.log(`Transaction ${journal.id} ${journal.state}.`);
+}
+
+export function resolveRecoveryTransactionId(
+  requested: string | undefined,
+  mode: LocalTransactionRecoveryMode,
+  journals: readonly TransactionJournal[],
+): string {
+  if (requested !== undefined) {
+    if (!/^txn_[a-f0-9]{32}$/.test(requested)) {
+      throw new UsageError("Transaction ID must be a canonical txn_<hex> identifier");
+    }
+    return requested;
+  }
+  const candidates = journals.filter(
+    (journal) =>
+      journal.kind === "restore" &&
+      (mode === "rollback"
+        ? journal.state === "committing" ||
+          journal.state === "rolling_back" ||
+          journal.state === "recovery_required"
+        : journal.state === "committing" || journal.state === "recovery_required"),
+  );
+  if (candidates.length === 0) {
+    throw new UsageError(
+      `No local transaction can be ${mode === "rollback" ? "rolled back" : "accepted"}`,
+    );
+  }
+  if (candidates.length > 1) {
+    throw new UsageError("Multiple local transactions are recoverable; specify a transaction ID");
+  }
+  return candidates[0]?.id as string;
 }
 
 export async function transactionsCommandWithContext(
@@ -60,6 +101,10 @@ export async function transactionsCommandWithContext(
     console.log(`  updated: ${transaction.updatedAt}`);
     console.log(`  members: ${transaction.members.length}`);
     if (transaction.terminalErrorCode) console.log(`  recovery: ${transaction.terminalErrorCode}`);
+    if (transaction.kind === "restore" && transaction.state === "recovery_required") {
+      console.log(`  rollback: ccm recover ${transaction.id} --rollback`);
+      console.log(`  accept: ccm recover ${transaction.id} --accept`);
+    }
   }
 }
 

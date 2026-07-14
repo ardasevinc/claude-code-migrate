@@ -7,7 +7,7 @@ import { buildRemoteExecutableResolverShell } from "../core/push-observation.ts"
 import { createSshSession, type SshSession } from "../core/ssh-session.ts";
 import { parseSshTarget } from "../core/ssh-target.ts";
 import { inspectPrivateStateLayout } from "../core/transaction-journal.ts";
-import { ReportedCliError } from "../errors.ts";
+import { ReportedCliError, UsageError } from "../errors.ts";
 import { createRuntimeContext, type RuntimeContext } from "../runtime/context.ts";
 import type { Config } from "../types/index.ts";
 
@@ -21,6 +21,7 @@ interface DoctorCheck {
 
 interface DoctorOptions {
   readonly remote?: boolean | string;
+  readonly local?: boolean;
   readonly json?: boolean;
 }
 
@@ -50,6 +51,9 @@ export async function doctorCommandWithContext(
   context: RuntimeContext,
   dependencies: DoctorDependencies = defaultDependencies,
 ): Promise<void> {
+  if (options.local && options.remote !== undefined && options.remote !== false) {
+    throw new UsageError("Use either --local or --remote, not both");
+  }
   const checks: DoctorCheck[] = [];
   let config: Config | undefined;
   try {
@@ -91,8 +95,17 @@ export async function doctorCommandWithContext(
   }
 
   let remote: RemoteDoctorResult | undefined;
-  if (options.remote !== undefined && options.remote !== false) {
-    const host = typeof options.remote === "string" ? options.remote : config?.target.host;
+  const configuredHost = config?.target.host;
+  const explicitRemote = options.remote !== undefined && options.remote !== false;
+  const host =
+    typeof options.remote === "string"
+      ? options.remote
+      : configuredHost === "user@example.com"
+        ? undefined
+        : configuredHost;
+  if (options.local) {
+    checks.push(check("remote-target", "warning", "explicitly-skipped"));
+  } else if (explicitRemote || host !== undefined) {
     let validTarget = host !== undefined && host !== "user@example.com";
     try {
       if (validTarget && host !== undefined) parseSshTarget(host);
@@ -113,6 +126,8 @@ export async function doctorCommandWithContext(
       checks.push(...result.checks);
       remote = result.remote;
     }
+  } else {
+    checks.push(check("remote-target", "warning", "target-not-configured"));
   }
 
   const projected = [...checks].sort((left, right) => left.id.localeCompare(right.id));

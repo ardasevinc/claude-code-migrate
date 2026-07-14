@@ -28,7 +28,8 @@ enabled = true
 [backup]
 path = "~/backups/ccm"
 
-# Profiles are selected explicitly with ccm push --profile <name>.
+# A unique profile whose host matches the target is selected automatically.
+# Use --profile <name> to choose explicitly or --no-auto-profile to opt out.
 # [profiles.devbox]
 # host = "user@devbox"
 # claude_md = "profiles/devbox/CLAUDE.md"

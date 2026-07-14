@@ -8,11 +8,13 @@ import { doctorCommand } from "./commands/doctor.ts";
 import { pushCommand } from "./commands/push.ts";
 import { restoreCommand } from "./commands/restore.ts";
 import { recoverCommand, transactionsCommand } from "./commands/transactions.ts";
+import { receiptsCommand } from "./commands/receipt.ts";
 
 export function createCli(): Command {
   const program = new Command();
 
   program.exitOverride();
+  program.enablePositionalOptions();
 
   program
     .name("ccm")
@@ -28,8 +30,9 @@ export function createCli(): Command {
 
   program
     .command("doctor")
-    .description("Check local CCM health and optionally inspect one remote target")
+    .description("Check local CCM health and the configured remote target")
     .option("--remote [target]", "Explicitly inspect a remote SSH target")
+    .option("--local", "Check only local state and skip the configured remote", false)
     .option("--json", "Print one JSON object", false)
     .action(doctorCommand);
 
@@ -46,7 +49,15 @@ export function createCli(): Command {
 
   const diff = program
     .command("diff")
-    .description("Compare managed state using the execution plan");
+    .description("Compare managed state using the execution plan")
+    .enablePositionalOptions()
+    .option("--json", "Print one JSON object", false)
+    .option("--profile <name>", "Use an explicit host-bound profile")
+    .option("--no-auto-profile", "Disable unique host-bound profile selection")
+    .option("--transport <mode>", "Observation transport mode: auto, rsync, or archive", "auto")
+    .option("--providers <providers>", "Comma-separated providers to compare (claude,codex)")
+    .option("--all", "Compare all providers")
+    .action((options) => diffPushCommand(undefined, undefined, options));
   diff
     .command("push")
     .description("Compare local managed state with a remote target")
@@ -54,6 +65,7 @@ export function createCli(): Command {
     .argument("[target]", "SSH target (user@host) when provider is specified")
     .option("--json", "Print one JSON object", false)
     .option("--profile <name>", "Use an explicit host-bound profile")
+    .option("--no-auto-profile", "Disable unique host-bound profile selection")
     .option("--transport <mode>", "Observation transport mode: auto, rsync, or archive", "auto")
     .option("--providers <providers>", "Comma-separated providers to compare (claude,codex)")
     .option("--all", "Compare all providers")
@@ -74,6 +86,7 @@ export function createCli(): Command {
     .option("--dry-run", "Preview without transferring", false)
     .option("--json", "Print the push plan as one JSON object (dry-run only)", false)
     .option("--profile <name>", "Use an explicit host-bound profile")
+    .option("--no-auto-profile", "Disable unique host-bound profile selection")
     .option("--transport <mode>", "Transport mode: auto, rsync, or archive", "auto")
     .option("--skip-version-check", "Skip Claude version check", false)
     .option("--providers <providers>", "Comma-separated providers to push (claude,codex)")
@@ -82,9 +95,15 @@ export function createCli(): Command {
     .action(pushCommand);
 
   program
+    .command("receipts")
+    .description("List execution receipts newest first")
+    .option("--json", "Print one JSON object", false)
+    .action(receiptsCommand);
+
+  program
     .command("inspect")
     .description("Inspect a backup archive or execution receipt")
-    .argument("<archiveOrReceipt>", "Path to archive or canonical receipt ID")
+    .argument("<archiveOrReceipt>", "Path to archive, canonical receipt ID, or latest")
     .option("--files", "Include archived file metadata", false)
     .option("--json", "Print one JSON object", false)
     .action(inspectCommand);
@@ -92,7 +111,7 @@ export function createCli(): Command {
   program
     .command("verify")
     .description("Verify a backup archive or execution receipt")
-    .argument("<archiveOrReceipt>", "Path to archive or canonical receipt ID")
+    .argument("<archiveOrReceipt>", "Path to archive, canonical receipt ID, or latest")
     .option("--remote <target>", "Explicit remote target for a push receipt")
     .option("--json", "Print one JSON object", false)
     .action(verifyCommand);
@@ -106,7 +125,7 @@ export function createCli(): Command {
   program
     .command("recover")
     .description("Resolve a durable local CCM transaction")
-    .argument("<transaction>", "Canonical transaction ID")
+    .argument("[transaction]", "Canonical transaction ID; inferred when exactly one matches")
     .option("--rollback", "Restore the journaled pre-state", false)
     .option("--accept", "Accept only the exact journaled post-state", false)
     .option("--json", "Print one JSON object", false)

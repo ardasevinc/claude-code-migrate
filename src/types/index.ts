@@ -141,6 +141,7 @@ export interface PushOptions {
   dryRun: boolean;
   json?: boolean;
   profile?: string;
+  autoProfile?: boolean;
   skipVersionCheck: boolean;
   providers?: string;
   all?: boolean;

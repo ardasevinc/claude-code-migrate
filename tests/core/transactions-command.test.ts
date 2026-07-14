@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   recoverCommandWithContext,
+  resolveRecoveryTransactionId,
   transactionsCommandWithContext,
 } from "../../src/commands/transactions.ts";
 import {
@@ -106,5 +107,29 @@ describe("transactions command", () => {
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }
+  });
+
+  it("infers recovery only when exactly one journal matches the selected mode", async () => {
+    const journal = transitionTransactionJournal(
+      createTransactionJournal({
+        kind: "restore",
+        planId: "plan_recovery",
+        now: new Date("2026-07-13T00:00:00.000Z"),
+        members: [{ id: "codex-agents", rootCode: "codex-home" }],
+      }),
+      "recovery_required",
+      new Date("2026-07-13T00:00:00.001Z"),
+      { terminalErrorCode: "operator-action-required" },
+    );
+
+    expect(resolveRecoveryTransactionId(undefined, "rollback", [journal])).toBe(journal.id);
+    expect(resolveRecoveryTransactionId(undefined, "accept", [journal])).toBe(journal.id);
+    expect(() => resolveRecoveryTransactionId(undefined, "rollback", [])).toThrow(UsageError);
+    expect(() =>
+      resolveRecoveryTransactionId(undefined, "accept", [
+        journal,
+        { ...journal, id: `txn_${"b".repeat(32)}` },
+      ]),
+    ).toThrow("Multiple local transactions");
   });
 });
