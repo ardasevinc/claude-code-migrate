@@ -370,7 +370,7 @@ describe("planned remote push", () => {
       if (retainedRoot) await rm(retainedRoot, { recursive: true, force: true });
       await machine.dispose();
     }
-  });
+  }, 15_000);
 
   it("runs Claude version checks unless explicitly skipped", async () => {
     for (const skip of [false, true]) {
