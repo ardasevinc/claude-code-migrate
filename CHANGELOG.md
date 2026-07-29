@@ -5,6 +5,16 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-07-29
+
+- Added safe operator defaults for remote health checks, push diffing, unique host-profile
+  selection, recent receipt access, endpoint-bound verification, and unambiguous recovery.
+- Made remote managed-state observation scale across large Codex plugin and shared-skill trees
+  while preserving bounded exact inventory verification.
+- Accepted current rich Codex plugin-list records and retained actionable timeout, buffer, and
+  protocol failure details.
+- Hardened trusted-release registry smoke against bounded npm propagation delays.
+
 ## [1.12.0] - 2026-07-13
 
 - Added fail-closed configuration, SSH-target, process, archive, staging, and interrupt handling.
@@ -116,7 +126,8 @@ the `vX.Y.Z` form.
 
 - Initial ccm CLI for migrating Claude Code configuration.
 
-[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.12.0...HEAD
+[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.0...HEAD
+[1.13.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.2...v1.12.0
 [1.8.2]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.0...v1.8.1
