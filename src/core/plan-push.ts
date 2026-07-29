@@ -345,13 +345,19 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       (id) =>
         !(input.observation.facts.codexPluginList.installed as readonly string[]).includes(id),
     ),
-    manifests,
+    manifests.filter(({ path }) => !path.endsWith("/api_marketplace.json")),
   );
   const marketplaceProjection = invalidManifestLocation
     ? ({ ok: false, error: "marketplace manifest path/name mismatch" } as const)
     : projected;
-  const incomingMarkets = new Set(
+  const incomingMarketplaceNames = new Set(
     marketplaceProjection.ok ? marketplaceProjection.incomingMarketplaceNames : [],
+  );
+  const incomingMarkets = new Set(
+    manifests.flatMap(({ path }) => {
+      const local = /^codex\/\.ccm\/marketplaces\/([^/]+)\//.exec(path);
+      return local?.[1] && incomingMarketplaceNames.has(local[1]) ? [local[1]] : [];
+    }),
   );
   const projectedMarkets = new Map(input.observation.facts.marketplacePayloads);
   for (const name of incomingMarkets) projectedMarkets.set(name, true);
@@ -587,17 +593,20 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
   const projectedCaptures = new Map(input.observation.facts.captures);
   if (transformed.claudeMcp) projectedCaptures.set("claude-mcp", transformed.claudeMcp);
   if (transformed.codexConfig) projectedCaptures.set("codex-config", transformed.codexConfig);
+  const projectPluginList = (installedIds: readonly string[]) => {
+    const installed = [...new Set(installedIds)].sort();
+    const installedSet = new Set(installed);
+    return {
+      status: "ok" as const,
+      installed,
+      available: [...availablePlugins].filter((id) => !installedSet.has(id)).sort(),
+    };
+  };
+  const projectedFilesystemPluginList =
+    pluginList.status === "ok" ? projectPluginList(pluginList.installed) : pluginList;
   const projectedPluginList =
     pluginList.status === "ok"
-      ? (() => {
-          const installed = [...new Set([...pluginList.installed, ...pluginInstalls])].sort();
-          const installedSet = new Set(installed);
-          return {
-            status: "ok" as const,
-            installed,
-            available: [...availablePlugins].filter((id) => !installedSet.has(id)).sort(),
-          };
-        })()
+      ? projectPluginList([...pluginList.installed, ...pluginInstalls])
       : pluginList;
   const filesystemPostFingerprint = pushStateFingerprint({
     capabilities: input.observation.capabilities,
@@ -609,6 +618,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       sharedSkillNames: syncSharedSkills
         ? [...new Set([...input.observation.facts.sharedSkillNames, ...incomingSharedNames])].sort()
         : input.observation.facts.sharedSkillNames,
+      codexPluginList: projectedFilesystemPluginList,
     },
   });
   const stagedPostFingerprint = pushStateFingerprint({

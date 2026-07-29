@@ -325,6 +325,112 @@ describe("push migration planning", () => {
     );
   });
 
+  it("verifies marketplace-driven plugin availability before commit", async () => {
+    const config = 'model = "gpt-5"\n';
+    const manifest = JSON.stringify({
+      name: "local",
+      plugins: [{ name: "fresh", source: "./plugins/fresh" }],
+    });
+    const curatedManifest = JSON.stringify({
+      name: "openai-curated",
+      plugins: [{ name: "curated-fresh", source: "./plugins/curated-fresh" }],
+    });
+    const apiManifest = JSON.stringify({
+      name: "openai-api-curated",
+      plugins: [{ name: "api-only", source: "./plugins/api-only" }],
+    });
+    const files = [
+      {
+        sourcePath: "/unused/config",
+        relativePath: "codex/config.toml",
+        isSymlink: false,
+        mcpServersOnly: config,
+      },
+      {
+        sourcePath: "/unused/marketplace",
+        relativePath: "codex/.ccm/marketplaces/local/.agents/plugins/marketplace.json",
+        isSymlink: false,
+        mcpServersOnly: manifest,
+      },
+      {
+        sourcePath: "/unused/curated-marketplace",
+        relativePath: "codex/.tmp/plugins/.agents/plugins/marketplace.json",
+        isSymlink: false,
+        mcpServersOnly: curatedManifest,
+      },
+      {
+        sourcePath: "/unused/api-marketplace",
+        relativePath: "codex/.tmp/plugins/.agents/plugins/api_marketplace.json",
+        isSymlink: false,
+        mcpServersOnly: apiManifest,
+      },
+    ];
+    const base = observation();
+    const target = {
+      ...base,
+      facts: {
+        ...base.facts,
+        codexPluginList: {
+          status: "ok" as const,
+          installed: [],
+          available: ["keep@other", "stale@local", "stale@openai-curated"],
+        },
+      },
+    };
+    const planned = await planPush({
+      files,
+      host: "target",
+      providers: ["codex"],
+      observation: target,
+    });
+    const finalInventory = files.map((file) => {
+      const bytes = Buffer.from(file.mcpServersOnly);
+      return {
+        path: file.relativePath,
+        type: "file" as const,
+        mode: 0o644 as const,
+        size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      };
+    });
+    const final = {
+      ...target,
+      inventory: finalInventory,
+      facts: {
+        ...target.facts,
+        captures: new Map([["codex-config", Buffer.from(config)]]),
+        marketplacePayloads: new Map([["local", true]]),
+        codexPluginList: {
+          status: "ok" as const,
+          installed: [],
+          available: ["curated-fresh@openai-curated", "fresh@local", "keep@other"],
+        },
+      },
+    };
+    let observations = 0;
+    let commits = 0;
+    await executePlannedPush(planned, {
+      observe: async (request) => ({
+        ...(observations++ === 0 ? target : final),
+        requestIdentity: request.requestIdentity,
+      }),
+      prepare: async () => ({
+        apply: async () => {},
+        commit: async () => {
+          commits += 1;
+        },
+        applyEffect: async () => {},
+        acknowledgeFailedEffects: async () => {},
+        abort: async () => {},
+        isCommitted: () => false,
+        verifyCommit: async () => {},
+        verifyRollback: async () => {},
+        cleanup: async () => {},
+      }),
+    });
+    expect(commits).toBe(1);
+  });
+
   it("executes a sealed plugin add and verifies the disjoint final plugin state", async () => {
     const successReceiptState = await receiptFixture();
     const failureReceiptState = await receiptFixture();

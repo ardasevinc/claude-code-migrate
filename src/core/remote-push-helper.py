@@ -23,7 +23,6 @@ import tarfile
 import time
 
 VERSION = 1
-SAFE_NAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+@-")
 TERMINAL = ("committed", "committed_with_failed_effects", "aborted", "cancelled")
 ACTIVE_WORKSPACE_FD = None
 ACTIVE_CHILD = None
@@ -452,7 +451,9 @@ def plugin_is_installed(home_fd, token, record, plugin_id):
 
 
 def safe_component(name):
-    return bool(name) and name not in (".", "..") and len(name.encode()) <= 255 and all(c in SAFE_NAME for c in name)
+    return (isinstance(name, str) and bool(name) and name not in (".", "..") and
+            len(name.encode("utf-8")) <= 255 and "\\" not in name and "/" not in name and
+            all(ord(c) > 0x1f and ord(c) != 0x7f for c in name))
 
 
 def logical_parts(logical):

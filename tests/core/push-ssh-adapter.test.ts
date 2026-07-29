@@ -8,6 +8,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   writeFile,
@@ -362,6 +363,45 @@ describe("SSH remote push helper adapter", () => {
     expect(linkDests).toEqual([undefined, join(f.cacheHome, "ccm/staging/v1/ready", snapshotId)]);
     expect(await readFile(join(f.home, ".codex/rules/incoming.md"), "utf8")).toBe("newer");
   }, 15_000);
+
+  it("imports portable spaces and unicode in sealed incremental paths", async () => {
+    const f = await fixture();
+    const relativePath = "codex/rules/ü spaced.md";
+    await rename(join(f.source, "codex/rules/incoming.md"), join(f.source, relativePath));
+    const originalEntry = f.stagedInventory[0];
+    if (!originalEntry) throw new Error("missing staged fixture entry");
+    const stagedInventory = [{ ...originalEntry, path: relativePath }];
+    const transport: PushSshTransport = {
+      ...f.transport,
+      async run(host, command, options) {
+        if (command === "command -v rsync")
+          return { stdout: "/usr/bin/rsync\n", stderr: "", exitCode: 0, signal: null };
+        return f.transport.run(host, command, options);
+      },
+      async hasLocalRsync() {
+        return true;
+      },
+      async syncTree(localTree, _host, remoteDirectory) {
+        await cp(localTree, remoteDirectory, { recursive: true, force: true });
+      },
+    };
+    const session = await createSshPushExecutionAdapter({ transport, mode: "rsync" }).prepare({
+      archivePath: f.archive,
+      archiveSha256: f.sha,
+      archiveSize: f.archiveSize,
+      treePath: f.source,
+      snapshotId: "e".repeat(64),
+      stagedInventory,
+      observationRequest: f.request,
+      observation: f.observation,
+      actions: [{ action: f.action, binding: f.binding }],
+    });
+    await session.apply(f.action, f.binding);
+    await session.commit();
+    await session.verifyCommit();
+    await session.cleanup();
+    expect(await readFile(join(f.home, ".codex/rules/ü spaced.md"), "utf8")).toBe("new");
+  });
 
   it("preserves an interrupted incoming snapshot for an exact retry", async () => {
     const f = await fixture();
