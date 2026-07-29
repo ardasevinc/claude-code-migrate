@@ -54,6 +54,16 @@ printf '<%s>|<%s>|<%s>\n' "$(findcmd relative-tool)" "$(findcmd function_tool)" 
   it("allows a sixty-second managed-tree scan", () => {
     expect(PUSH_OBSERVATION_TIMEOUT_MS).toBe(60_000);
   });
+
+  it("uses one bounded Python inventory traversal instead of per-entry shell processes", () => {
+    const probe = buildRemotePushObservationProbe([incoming("codex/skills/new")]);
+    expect(probe).toContain("import base64,hashlib,os,stat,sys");
+    expect(probe).toContain("max_entries=100000");
+    expect(probe).toContain("max_total=4294967296");
+    expect(probe).not.toContain("walk(){");
+    expect(probe).not.toContain('sha256sum "$live"');
+  });
+
   it("uses exactly one argv SSH transport call and does not invoke codex", async () => {
     const calls: unknown[][] = [];
     const observed = await observeRemotePushTarget({
@@ -273,6 +283,34 @@ printf '<%s>|<%s>|<%s>\n' "$(findcmd relative-tool)" "$(findcmd function_tool)" 
       status: "ok",
       installed: ["a@market"],
       available: ["z@market"],
+    });
+  });
+
+  it("projects current rich Codex plugin records down to validated IDs", () => {
+    const query = { codexPluginList: true };
+    const raw = JSON.stringify({
+      installed: [
+        {
+          pluginId: "a@market",
+          name: "a",
+          enabled: true,
+          source: { source: "local", path: "/private/plugin" },
+        },
+      ],
+      available: [{ pluginId: "b@market", version: "1.2.3", installed: false }],
+    });
+    expect(
+      parseRemotePushObservation(
+        envelope(`CMD\t${e("codex")}\t-`, `PLUGINS\tok\t${e(raw)}`),
+        [],
+        query,
+      ).facts,
+    ).toMatchObject({
+      codexPluginList: {
+        status: "ok",
+        installed: ["a@market"],
+        available: ["b@market"],
+      },
     });
   });
 

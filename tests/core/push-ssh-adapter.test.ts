@@ -24,7 +24,7 @@ import {
 } from "../../src/core/push-ssh-adapter.ts";
 import { BlockedError, ConnectivityError, ExecutionError } from "../../src/errors.ts";
 import { cleanupInterruptResources } from "../../src/utils/interrupt-cleanup.ts";
-import { runProcess } from "../../src/utils/process.ts";
+import { ProcessError, runProcess } from "../../src/utils/process.ts";
 
 const roots: string[] = [];
 afterEach(async () =>
@@ -1034,7 +1034,11 @@ describe("SSH remote push helper adapter", () => {
         run: async () => ({ stdout: "junk\n", stderr: "", exitCode: 0, signal: null }),
       },
     });
-    await expect(adapter.observe(f.request)).rejects.toBeInstanceOf(ExecutionError);
+    await expect(adapter.observe(f.request)).rejects.toMatchObject({
+      name: "ExecutionError",
+      message: "Remote push observation protocol failed: Invalid push observation envelope",
+      exitCode: 5,
+    });
   });
 
   it("classifies observation transport loss by mutation stage", async () => {
@@ -1051,6 +1055,32 @@ describe("SSH remote push helper adapter", () => {
     await expect(adapter.observe(f.request, { mutationStarted: true })).rejects.toBeInstanceOf(
       ExecutionError,
     );
+  });
+
+  it.each([
+    ["process timed out after 60000ms"],
+    ["output exceeded 67108864 byte buffer limit"],
+  ])("reports local observation process failure: %s", async (detail) => {
+    const f = await fixture();
+    const adapter = createSshPushExecutionAdapter({
+      transport: {
+        ...f.transport,
+        run: async () => {
+          throw new ProcessError("ssh", {
+            stdout: "",
+            stderr: "",
+            exitCode: null,
+            signal: "SIGTERM",
+            error: detail,
+          });
+        },
+      },
+    });
+    await expect(adapter.observe(f.request)).rejects.toMatchObject({
+      name: "ExecutionError",
+      message: `Remote push observation failed: ${detail}`,
+      exitCode: 5,
+    });
   });
 
   it("classifies transport loss after remote mutation starts as ExecutionError", async () => {

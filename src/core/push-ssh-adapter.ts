@@ -501,9 +501,17 @@ export function createSshPushExecutionAdapter(
                 timeout: probeOptions.timeout,
               });
             } catch (error) {
+              if (error instanceof ProcessError && error.result.error) {
+                throw new ExecutionError(`Remote push observation failed: ${error.result.error}`, {
+                  cause: error,
+                });
+              }
               throw new ConnectivityError("Remote push observation transport failed", {
                 cause: error,
               });
+            }
+            if (result.error) {
+              throw new ExecutionError(`Remote push observation failed: ${result.error}`);
             }
             if (isConnectivityResult(result))
               throw new ConnectivityError("Remote push observation transport failed");
@@ -512,10 +520,13 @@ export function createSshPushExecutionAdapter(
         },
       });
     } catch (error) {
-      if (!(error instanceof ConnectivityError))
-        throw error instanceof ExecutionError
-          ? error
-          : new ExecutionError("Remote push observation protocol failed", { cause: error });
+      if (!(error instanceof ConnectivityError)) {
+        if (error instanceof ExecutionError) throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new ExecutionError(`Remote push observation protocol failed: ${detail}`, {
+          cause: error,
+        });
+      }
       throw transportError(
         error,
         "Remote push observation failed",

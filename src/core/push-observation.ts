@@ -174,6 +174,61 @@ function validateExistencePath(path: string): void {
     throw new Error(`Invalid query path: ${JSON.stringify(path)}`);
 }
 
+function buildPythonInventoryProgram(): string {
+  return [
+    "import base64,hashlib,os,stat,sys",
+    `max_entries=${MAX_PUSH_OBSERVATION_ENTRIES}`,
+    `max_file=${MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES}`,
+    `max_total=${MAX_PUSH_OBSERVATION_INVENTORY_TOTAL_BYTES}`,
+    "home=os.fsencode(sys.argv[1])",
+    "count=0",
+    "total=0",
+    "def dec(value): return base64.b64decode(value,validate=True)",
+    "def enc(value): return base64.b64encode(value)",
+    "def emit(logical,kind,mode,size,digest): sys.stdout.buffer.write(b'ENTRY\\t'+enc(logical)+b'\\t'+kind+b'\\t'+mode+b'\\t'+str(size).encode()+b'\\t'+digest+b'\\n')",
+    "def walk(logical,live):",
+    " global count,total",
+    " name=os.path.basename(live)",
+    " if name==b'.git' or logical==b'codex/skills/.system' or logical.startswith(b'codex/skills/.system/'): return",
+    " try: meta=os.lstat(live)",
+    " except FileNotFoundError: return",
+    " if stat.S_ISLNK(meta.st_mode):",
+    "  target=os.readlink(live)",
+    "  digest=hashlib.sha256(b'ccm:inventory:symlink-target\\0'+target).hexdigest().encode()",
+    "  size=len(target)",
+    "  kind=b'symlink'",
+    "  mode=b'755'",
+    " elif stat.S_ISREG(meta.st_mode):",
+    "  size=meta.st_size",
+    "  if size>max_file: raise SystemExit(42)",
+    "  digestor=hashlib.sha256()",
+    "  with open(live,'rb',buffering=0) as source:",
+    "   for chunk in iter(lambda:source.read(1024*1024),b''): digestor.update(chunk)",
+    "  digest=digestor.hexdigest().encode()",
+    "  kind=b'file'",
+    "  mode=b'755' if meta.st_mode&0o111 else b'644'",
+    " elif stat.S_ISDIR(meta.st_mode):",
+    "  with os.scandir(live) as directory:",
+    "   children=sorted(directory,key=lambda child:child.name if isinstance(child.name,bytes) else os.fsencode(child.name))",
+    "  for child in children:",
+    "   child_name=child.name if isinstance(child.name,bytes) else os.fsencode(child.name)",
+    "   walk(logical+b'/'+child_name,live+b'/'+child_name)",
+    "  return",
+    " else: raise SystemExit(43)",
+    " count+=1",
+    " total+=size",
+    " if count>max_entries or total>max_total: raise SystemExit(42)",
+    " emit(logical,kind,mode,size,digest)",
+    "for encoded_root in sys.argv[2:]:",
+    " logical=dec(encoded_root)",
+    " if logical.startswith(b'claude/'): live=home+b'/.claude/'+logical[len(b'claude/'):]",
+    " elif logical.startswith(b'codex/'): live=home+b'/.codex/'+logical[len(b'codex/'):]",
+    " elif logical.startswith(b'shared/agents/'): live=home+b'/.agents/'+logical[len(b'shared/agents/'):]",
+    " else: raise SystemExit(44)",
+    " walk(logical,live)",
+  ].join("\n");
+}
+
 /** One probe with no explicit writes. Reads may update atime; re-observation seals shell TOCTOU at apply time. */
 export function buildRemotePushObservationProbe(
   incoming: readonly InventoryEntry[],
@@ -187,6 +242,7 @@ export function buildRemotePushObservationProbe(
     ...new Set([...(queries.commandNames ?? []), ...(queries.codexPluginList ? ["codex"] : [])]),
   ].sort();
   const encoded = (values: readonly string[]) => values.map((v) => q(b64(v))).join(" ");
+  const inventoryProgram = q(buildPythonInventoryProgram());
   return `set -eu
 emit(){ printf '%s' "$1"; shift; for field do printf '\\t%s' "$field"; done; printf '\\n'; }
 enc(){ if printf '' | base64 2>/dev/null | grep -q '^$'; then base64 | tr -d '\\n'; else base64 | tr -d '\\n'; fi; }
@@ -208,8 +264,7 @@ codex_path=; for x in ${encoded(commandNames)}; do n=$(dec "$x"); p=$(findcmd "$
 for x in ${encoded([...new Set(queries.pathExistence ?? [])].sort())}; do p=$(dec "$x"); case "$p" in '~/'*) live="$home/\${p#??}";; *) live=$p;; esac; v=false; [ -e "$live" ] || [ -L "$live" ] && v=true; emit EXISTS "$x" "$v"; done
 for x in ${encoded([...new Set(queries.capturePaths ?? [])].sort())}; do p=$(dec "$x"); if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
 for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "$x"); case "$i" in claude-mcp) p="$home/.claude.json";; codex-config) p="$home/.codex/config.toml";; *) exit 44;; esac; if [ -f "$p" ] && [ ! -L "$p" ]; then z=$(size "$p"); [ "$z" -le ${MAX_PUSH_OBSERVATION_CAPTURE_FILE_BYTES} ] || exit 42; emit CAPTURE "$x" "$z" "$(hash <"$p")" "$(enc <"$p")"; else emit CAPTURE "$x" -; fi; done
-walk(){ ( logical=$1; live=$2; [ -e "$live" ] || [ -L "$live" ] || return 0; n=\${live##*/}; [ "$n" = .git ] && return 0; case "$logical" in codex/skills/.system|codex/skills/.system/*) return 0;; esac; if [ -L "$live" ]; then z=$("$python_path" -I -c 'import os,sys; sys.stdout.buffer.write(os.fsencode(os.readlink(sys.argv[1])))' "$live"|wc -c|tr -d ' '); h=$( (printf 'ccm:inventory:symlink-target\\0'; "$python_path" -I -c 'import os,sys; sys.stdout.buffer.write(os.fsencode(os.readlink(sys.argv[1])))' "$live") | hash); emit ENTRY "$(printf '%s' "$logical"|enc)" symlink 755 "$z" "$h"; elif [ -f "$live" ]; then z=$(size "$live"); [ "$z" -le ${MAX_PUSH_OBSERVATION_INVENTORY_FILE_BYTES} ] || exit 42; m=$(mode "$live"); if [ $((0$m & 0111)) -ne 0 ]; then m=755; else m=644; fi; emit ENTRY "$(printf '%s' "$logical"|enc)" file "$m" "$z" "$(hash <"$live")"; elif [ -d "$live" ]; then for c in "$live"/* "$live"/.[!.]* "$live"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; n=\${c##*/}; walk "$logical/$n" "$c"; done; else exit 43; fi; ); }
-for x in ${encoded(roots)}; do l=$(dec "$x"); case "$l" in claude/*) p="$home/.claude/\${l#claude/}";; codex/*) p="$home/.codex/\${l#codex/}";; shared/agents/*) p="$home/.agents/\${l#shared/agents/}";; *) exit 44;; esac; walk "$l" "$p"; done
+"$python_path" -I -c ${inventoryProgram} "$home" ${encoded(roots)}
 for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
 ${queries.sharedSkillNames ? `if [ -d "$home/.agents/skills" ] && [ ! -L "$home/.agents/skills" ]; then for p in "$home/.agents/skills"/*; do [ -d "$p" ] && [ ! -L "$p" ] || continue; emit SKILL "$(printf '%s' "\${p##*/}"|enc)"; done; fi` : ":"}
 ${queries.codexPluginList ? `if [ -z "$codex_path" ]; then emit PLUGINS missing; elif output=$("$codex_path" plugin list --available --json 2>/dev/null); then z=$(printf '%s' "$output"|wc -c|tr -d ' '); [ "$z" -le ${MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES} ] || exit 45; emit PLUGINS ok "$(printf '%s' "$output"|enc)"; else emit PLUGINS failed; fi` : ":"}
@@ -219,7 +274,7 @@ printf 'END\\n'`;
 function parsePluginIds(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) throw new Error(`Invalid Codex plugin list ${field}`);
   const ids = value.map((item) => {
-    if (!item || typeof item !== "object" || Object.keys(item).some((key) => key !== "pluginId"))
+    if (!item || typeof item !== "object" || Array.isArray(item))
       throw new Error(`Invalid Codex plugin list ${field}`);
     const id = (item as { pluginId?: unknown }).pluginId;
     if (
