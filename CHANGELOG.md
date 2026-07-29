@@ -5,6 +5,13 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-07-29
+
+- Accepted portable spaces and Unicode in incremental remote paths so current Codex plugin
+  payloads can be synchronized.
+- Corrected pre-commit marketplace and plugin-availability projections to match the current Codex
+  CLI surface.
+
 ## [1.13.0] - 2026-07-29
 
 - Added safe operator defaults for remote health checks, push diffing, unique host-profile
@@ -126,7 +133,8 @@ the `vX.Y.Z` form.
 
 - Initial ccm CLI for migrating Claude Code configuration.
 
-[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.0...HEAD
+[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.1...HEAD
+[1.13.1]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.0...v1.13.1
 [1.13.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.2...v1.12.0
 [1.8.2]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.1...v1.8.2
