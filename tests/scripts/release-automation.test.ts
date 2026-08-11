@@ -372,9 +372,12 @@ describe("release contract", () => {
     expect(workflow).toContain("release-registry.ts decide");
     expect(workflow).toContain("release-registry.ts verify");
     expect(workflow).toContain("already-published");
-    expect(workflow).toContain("actions/attest@a1948c3f048ba23858d222213b7c278aabede763");
+    expect(workflow).toMatch(/uses: actions\/attest@[0-9a-f]{40} # v\d+\.\d+\.\d+/);
     expect(workflow).toContain("gh release upload");
     expect(workflow).toContain("--clobber");
-    expect(workflow).not.toMatch(/uses: [^\n]+@(v\d+|main|master)\s*$/m);
+    expect(workflow).not.toMatch(/uses: [^\n]+@(v\d+|main|master)\s*(?:#.*)?$/m);
+    for (const reference of workflow.matchAll(/uses: [^\n]+@([^\s#]+)/g)) {
+      expect(reference[1]).toMatch(/^[0-9a-f]{40}$/);
+    }
   });
 });

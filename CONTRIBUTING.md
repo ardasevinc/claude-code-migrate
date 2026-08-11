@@ -26,3 +26,13 @@ existing TypeScript patterns, and add regression coverage for behavior changes.
 
 For release mechanics, see [`docs/releasing.md`](docs/releasing.md). Maintainer credentials and
 publishing configuration are not required for ordinary contributions.
+
+## Dependency maintenance
+
+`bun.lock` is the dependency source of truth. GitHub Dependabot tracks GitHub Actions only; the
+scheduled [`bun-dependencies.yml`](.github/workflows/bun-dependencies.yml) workflow refreshes Bun
+dependencies and opens a pull request when the lockfile changes. Run `bun audit` and
+`bun install --frozen-lockfile` before merging dependency updates.
+
+The globally linked `ccm` command is a checkout-oriented development install. Release confidence
+comes from the isolated packed-artifact and registry-install smokes in CI, not from that symlink.
