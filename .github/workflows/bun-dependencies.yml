@@ -43,6 +43,16 @@ jobs:
             exit 0
           fi
 
+          open_prs=$(gh pr list \
+            --state open \
+            --base main \
+            --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("automation/bun-dependencies-"))] | length')
+          if [ "$open_prs" -gt 0 ]; then
+            echo "A Bun dependency update pull request is already open"
+            exit 0
+          fi
+
           branch="automation/bun-dependencies-${GITHUB_RUN_ID}"
           git switch -c "$branch"
           git config user.name "github-actions[bot]"
