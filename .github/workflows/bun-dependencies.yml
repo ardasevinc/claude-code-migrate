@@ -38,22 +38,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-            if git diff --quiet -- package.json bun.lock; then
-              echo "Bun dependencies are current"
-              exit 0
-            fi
+          if git diff --quiet -- package.json bun.lock; then
+            echo "Bun dependencies are current"
+            exit 0
+          fi
 
-            open_prs=$(gh pr list \
-              --state open \
-              --base main \
-              --json headRefName \
-              --jq '[.[] | select(.headRefName | startswith("automation/bun-dependencies-"))] | length')
-            if [ "$open_prs" -gt 0 ]; then
-              echo "A Bun dependency update pull request is already open"
-              exit 0
-            fi
+          open_prs=$(gh pr list \
+            --state open \
+            --base main \
+            --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("automation/bun-dependencies-"))] | length')
+          if [ "$open_prs" -gt 0 ]; then
+            echo "A Bun dependency update pull request is already open"
+            exit 0
+          fi
 
-            branch="automation/bun-dependencies-${GITHUB_RUN_ID}"
+          branch="automation/bun-dependencies-${GITHUB_RUN_ID}"
           git switch -c "$branch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
