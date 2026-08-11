@@ -5,6 +5,15 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-08-11
+
+- Updated runtime and development dependencies, including the Bun type definitions and current
+  compatible `chalk`, `commander`, and `smol-toml` releases.
+- Pinned the vulnerable PostCSS and Nanoid transitive chain to patched compatible releases.
+- Hardened workflow action pin verification and advanced the checked-in action revisions.
+- Moved dependency refreshes to a Bun-aware scheduled workflow while retaining Dependabot for
+  GitHub Actions updates.
+
 ## [1.13.1] - 2026-07-29
 
 - Accepted portable spaces and Unicode in incremental remote paths so current Codex plugin
@@ -133,7 +142,8 @@ the `vX.Y.Z` form.
 
 - Initial ccm CLI for migrating Claude Code configuration.
 
-[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.1...HEAD
+[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.2...HEAD
+[1.13.2]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.1...v1.13.2
 [1.13.1]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.0...v1.13.1
 [1.13.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.8.2...v1.12.0
