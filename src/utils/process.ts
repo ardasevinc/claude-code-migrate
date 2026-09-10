@@ -70,7 +70,8 @@ async function executeProcess(
       cwd: options.cwd,
       env: options.env,
       shell: false,
-      stdio: stdio === "inherit" ? "inherit" : "pipe",
+      // Captured commands receive no input. An unwritten stdin socket can stall SSH multiplexing.
+      stdio: stdio === "inherit" ? "inherit" : ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

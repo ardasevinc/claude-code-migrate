@@ -11,6 +11,39 @@ import {
 } from "../../src/utils/process.ts";
 
 describe("process runner", () => {
+  it.each([
+    ["capture", runProcess],
+    ["stream", runStreamingProcess],
+  ] as const)("closes unused input and drains large output in %s mode", async (mode, run) => {
+    const bytes = 3 * 1024 * 1024;
+    const write =
+      mode === "stream"
+        ? vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+        : undefined;
+    try {
+      const result = await run(
+        process.execPath,
+        [
+          "-e",
+          `process.stdin.on('end', () => process.stdout.write('x'.repeat(${bytes}) + 'EOF')); process.stdin.resume();`,
+        ],
+        { maxBuffer: mode === "stream" ? 1024 : bytes + 3, timeoutMs: 3000 },
+      );
+      expect(result).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
+      if (mode === "stream") {
+        expect(result.stdout.length).toBeLessThanOrEqual(1024);
+        expect(write?.mock.calls.reduce((total, [chunk]) => total + Buffer.byteLength(chunk), 0)).toBe(
+          bytes + 3,
+        );
+      } else {
+        expect(result.stdout.length).toBe(bytes + 3);
+      }
+      expect(result.stdout.endsWith("EOF")).toBe(true);
+    } finally {
+      write?.mockRestore();
+    }
+  });
+
   it("terminates a process after timeoutMs", async () => {
     const started = Date.now();
     await expect(
