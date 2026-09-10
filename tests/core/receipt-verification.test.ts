@@ -167,6 +167,7 @@ describe("execution receipt drift verification", () => {
     }
   });
 
+  // Seven real shell/Python observations need room for hosted macOS scheduling latency.
   it("requires the bound target and verifies remote inventory before closing SSH", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-receipt-verify-remote-")));
     const home = join(root, "home");
@@ -281,7 +282,7 @@ describe("execution receipt drift verification", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("closes remote verification sessions and preserves probe plus cleanup failures", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-receipt-verify-cleanup-")));
