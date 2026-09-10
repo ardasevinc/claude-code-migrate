@@ -49,40 +49,44 @@ describe("planned remote push", () => {
     ["auto", true],
     ["archive", false],
     ["archive", true],
-  ] as const)("summarizes %s transfers with verbose=%s", async (transport, verbose) => {
-    const machine = await createFakeMachine("ccm-transfer-output-");
-    try {
-      await mkdir(join(machine.home, ".codex"));
-      await writeFile(join(machine.home, ".codex/config.toml"), 'model="demo"\n');
-      const result = await runCcm(
-        [
-          "push",
-          "codex",
-          "operator@example.test",
-          "--transport",
-          transport,
-          ...(verbose ? ["--verbose"] : []),
-        ],
-        machine,
-        { env: { CCM_TEST_TRANSFER_OUTPUT: "TRANSFER-FILE-CANARY\n" } },
-      );
-      expect(result.exitCode, result.stderr).toBe(0);
-      expect(result.stdout).toContain("Syncing 1 file");
-      expect(result.stdout).toContain("Payload ready (1 file):");
-      expect(result.stdout.includes("TRANSFER-FILE-CANARY")).toBe(verbose);
-      const uploads = (await readCommandLog(machine)).filter(
-        ({ command }) => command === "rsync" || command === "scp",
-      );
-      expect(uploads.length).toBeGreaterThan(0);
-      for (const { command, args } of uploads) {
-        expect(command).toBe(transport === "archive" ? "scp" : "rsync");
-        if (command === "rsync") expect(args.includes("--progress")).toBe(verbose);
+  ] as const)(
+    "summarizes %s transfers with verbose=%s",
+    async (transport, verbose) => {
+      const machine = await createFakeMachine("ccm-transfer-output-");
+      try {
+        await mkdir(join(machine.home, ".codex"));
+        await writeFile(join(machine.home, ".codex/config.toml"), 'model="demo"\n');
+        const result = await runCcm(
+          [
+            "push",
+            "codex",
+            "operator@example.test",
+            "--transport",
+            transport,
+            ...(verbose ? ["--verbose"] : []),
+          ],
+          machine,
+          { env: { CCM_TEST_TRANSFER_OUTPUT: "TRANSFER-FILE-CANARY\n" } },
+        );
+        expect(result.exitCode, result.stderr).toBe(0);
+        expect(result.stdout).toContain("Syncing 1 file");
+        expect(result.stdout).toContain("Payload ready (1 file):");
+        expect(result.stdout.includes("TRANSFER-FILE-CANARY")).toBe(verbose);
+        const uploads = (await readCommandLog(machine)).filter(
+          ({ command }) => command === "rsync" || command === "scp",
+        );
+        expect(uploads.length).toBeGreaterThan(0);
+        for (const { command, args } of uploads) {
+          expect(command).toBe(transport === "archive" ? "scp" : "rsync");
+          if (command === "rsync") expect(args.includes("--progress")).toBe(verbose);
+        }
+        expectOneClosedSession(await readCommandLog(machine));
+      } finally {
+        await machine.dispose();
       }
-      expectOneClosedSession(await readCommandLog(machine));
-    } finally {
-      await machine.dispose();
-    }
-  }, 15_000);
+    },
+    15_000,
+  );
 
   it("shows upload failure diagnostics without verbose", async () => {
     const machine = await createFakeMachine("ccm-transfer-failure-output-");
