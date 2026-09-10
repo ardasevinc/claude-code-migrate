@@ -10,6 +10,7 @@ export interface HostCapabilities {
 
 export interface CodexPluginPolicyDecision {
   pluginId: string;
+  sourcePluginId?: string;
   enabled: boolean;
   policy: CodexPluginPolicy;
   action: "enable" | "disable" | "preserve";
@@ -54,6 +55,11 @@ export function mergeCodexPluginPolicies(
 ): Record<string, CodexPluginPolicy> {
   return {
     ...DEFAULT_CODEX_PLUGIN_POLICIES,
+    ...Object.fromEntries(
+      Object.entries(DEFAULT_CODEX_PLUGIN_POLICIES)
+        .filter(([id]) => id.endsWith("@openai-curated"))
+        .map(([id, policy]) => [id.replace(/@openai-curated$/, "@openai-curated-remote"), policy]),
+    ),
     ...overrides,
   };
 }
@@ -225,7 +231,11 @@ export function evaluateCodexPluginPolicy(
   return { pluginId, enabled: true, policy, action: "enable", reason: "host matches policy" };
 }
 
-function upsertCodexPluginEnabled(rawConfig: string, pluginId: string, enabled: boolean): string {
+export function upsertCodexPluginEnabled(
+  rawConfig: string,
+  pluginId: string,
+  enabled: boolean,
+): string {
   const sectionPattern = new RegExp(
     `(^\\[plugins\\.(?:${tomlSectionNamePattern(pluginId)})\\]\\n)([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))`,
     "m",

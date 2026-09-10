@@ -360,13 +360,10 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
   const marketplaceProjection = invalidManifestLocation
     ? ({ ok: false, error: "marketplace manifest path/name mismatch" } as const)
     : projected;
-  const incomingMarketplaceNames = new Set(
-    marketplaceProjection.ok ? marketplaceProjection.incomingMarketplaceNames : [],
-  );
   const incomingMarkets = new Set(
     manifests.flatMap(({ path }) => {
       const local = /^codex\/\.ccm\/marketplaces\/([^/]+)\//.exec(path);
-      return local?.[1] && incomingMarketplaceNames.has(local[1]) ? [local[1]] : [];
+      return local?.[1] ? [local[1]] : [];
     }),
   );
   const projectedMarkets = new Map(input.observation.facts.marketplacePayloads);
@@ -538,7 +535,10 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       reversibility: "reversible",
       policyProvenance: ["shared-skill-view.default"],
     });
-  for (const pluginId of pluginInstalls)
+  for (const pluginId of pluginInstalls) {
+    const sourceId =
+      transformed.pluginDecisions.find((item) => item.pluginId === pluginId)?.sourcePluginId ??
+      pluginId;
     actions.push({
       operation: "external-effect",
       disposition: "update",
@@ -549,13 +549,15 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       reversibility: "compensatable",
       policyProvenance: [
         "plugin-install.runtime",
-        ...(profilePolicyIds.has(pluginId) && profilePluginPolicyCode
+        ...((profilePolicyIds.has(sourceId) || profilePolicyIds.has(pluginId)) &&
+        profilePluginPolicyCode
           ? [profilePluginPolicyCode]
-          : configuredPolicyIds.has(pluginId)
+          : configuredPolicyIds.has(sourceId) || configuredPolicyIds.has(pluginId)
             ? ["plugin-policy.config"]
             : ["plugin-policy.default"]),
       ],
     });
+  }
 
   const phaseRank = { materialize: 0, commit: 1, "post-commit": 2 } as const;
   actions.sort((left, right) => {
@@ -761,7 +763,15 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     ],
     settings,
     adaptations: [
-      ...describeConfigChanges(captures.codexConfig ?? null, transformed.codexConfig),
+      ...describeConfigChanges(captures.codexConfig ?? null, transformed.codexConfig).filter(
+        (line) => !/^(Add|Update|Remove) plugin /.test(line),
+      ),
+      ...transformed.pluginDecisions
+        .filter((decision) => decision.sourcePluginId)
+        .map(
+          (decision) =>
+            `Use target catalog: ${displayText(decision.sourcePluginId ?? "")} -> ${displayText(decision.pluginId)}`,
+        ),
       ...transformed.pluginDecisions
         .filter((decision) => decision.action !== "enable")
         .map(describePluginPolicyDecision),

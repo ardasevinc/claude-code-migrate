@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "smol-toml";
 import { describe, expect, it } from "vitest";
 import { fingerprint } from "../../src/core/migration-plan.ts";
 import {
@@ -34,6 +35,131 @@ function observation(
 }
 
 describe("pure push host transforms", () => {
+  it("disables unavailable runtime plugins without blocking portable config", async () => {
+    const result = await transformPushInputs(
+      {
+        codexConfig: Buffer.from(`model = "gpt-5"
+[marketplaces.openai-primary-runtime]
+source_type = "local"
+source = "/Users/source/runtime"
+[plugins."documents@openai-primary-runtime"]
+enabled = true
+`),
+      },
+      observation({ codexPluginList: { status: "ok", installed: [], available: [] } }),
+    );
+    const config = parse(Buffer.from(result.codexConfig ?? []).toString());
+    expect(config.model).toBe("gpt-5");
+    expect(config.marketplaces).toBeUndefined();
+    expect(config.plugins).toEqual({ "documents@openai-primary-runtime": { enabled: false } });
+    expect(result.pluginDesires).toEqual([]);
+    expect(result.pluginDecisions[0]?.reason).toContain("unavailable on the target");
+  });
+
+  it("keeps working target runtime registrations at their native paths", async () => {
+    const config = `[marketplaces.openai-bundled]
+source_type = "local"
+source = "/home/target/.codex/.tmp/bundled-marketplaces/openai-bundled"
+[plugins."browser@openai-bundled"]
+enabled = true
+`;
+    const result = await transformPushInputs(
+      { codexConfig: Buffer.from(config.replace("/home/target/", "/Users/source/")) },
+      observation({
+        captures: new Map([["codex-config", Buffer.from(config)]]),
+        marketplacePayloads: new Map([["openai-bundled", true]]),
+        codexPluginList: { status: "ok", installed: [], available: ["browser@openai-bundled"] },
+      }),
+    );
+    expect(Buffer.from(result.codexConfig ?? []).toString()).toContain(
+      "/home/target/.codex/.tmp/bundled-marketplaces/openai-bundled",
+    );
+    expect(result.pluginDesires).toEqual(["browser@openai-bundled"]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("maps legacy curated IDs only when the target confirms their replacements", async () => {
+    const result = await transformPushInputs(
+      {
+        codexConfig: Buffer.from(`[plugins."build-web-apps@openai-curated"]
+enabled = true
+[plugins."test-android-apps@openai-curated"]
+enabled = true
+`),
+      },
+      observation({
+        codexPluginList: {
+          status: "ok",
+          installed: [],
+          available: [
+            "build-web-apps@openai-curated-remote",
+            "test-android-apps@openai-curated-remote",
+          ],
+        },
+      }),
+    );
+    expect(result.pluginDesires).toEqual(["build-web-apps@openai-curated-remote"]);
+    expect(result.pluginDecisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          pluginId: "build-web-apps@openai-curated-remote",
+          sourcePluginId: "build-web-apps@openai-curated",
+        }),
+        expect.objectContaining({
+          pluginId: "test-android-apps@openai-curated-remote",
+          enabled: false,
+          reason: "missing command adb",
+        }),
+      ]),
+    );
+  });
+
+  it("honors explicit runtime requirements and target preserve policies", async () => {
+    const id = "documents@openai-primary-runtime";
+    const config = `[plugins."${id}"]\nenabled = true\n`;
+    const target = observation({
+      captures: new Map([["codex-config", Buffer.from(config)]]),
+      codexPluginList: { status: "ok", installed: [], available: [] },
+    });
+    const required = await transformPushInputs({ codexConfig: Buffer.from(config) }, target, {
+      [id]: { mode: "always" },
+    });
+    expect(required.pluginDesires).toEqual([id]);
+    const preserved = await transformPushInputs({ codexConfig: Buffer.from(config) }, target, {
+      [id]: { mode: "preserve" },
+    });
+    expect(preserved.pluginDesires).toEqual([]);
+    expect(preserved.pluginDecisions[0]).toMatchObject({ enabled: true, action: "preserve" });
+  });
+
+  it("does not mistake a failed observation for unavailable runtime plugins", async () => {
+    const id = "documents@openai-primary-runtime";
+    const result = await transformPushInputs(
+      { codexConfig: Buffer.from(`[plugins."${id}"]\nenabled = true\n`) },
+      observation(),
+    );
+    expect(result.pluginDesires).toEqual([id]);
+  });
+
+  it("rejects conflicting legacy and current settings before effects", async () => {
+    await expect(
+      transformPushInputs(
+        {
+          codexConfig: Buffer.from(
+            `[plugins."demo@openai-curated"]\nenabled = true\n[plugins."demo@openai-curated-remote"]\nenabled = false\n`,
+          ),
+        },
+        observation({
+          codexPluginList: {
+            status: "ok",
+            installed: [],
+            available: ["demo@openai-curated-remote"],
+          },
+        }),
+      ),
+    ).rejects.toThrow("Conflicting plugin settings");
+  });
+
   it("derives complete logical captures and command queries before probing", () => {
     const queries = derivePushObservationQueries(
       {
