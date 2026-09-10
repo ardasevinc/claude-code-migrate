@@ -121,6 +121,7 @@ export async function withPushPlan<T>(
     providers,
     includeClaudeSettingsLocal: config.providers.claude.settings_local,
     includeClaudeMcpConfig: config.providers.claude.mcp_config,
+    includeCodexRuntimeMarketplaces: false,
     dryRun: options.dryRun,
     quiet: options.json || options.dryRun,
   });

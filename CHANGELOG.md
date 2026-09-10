@@ -5,6 +5,20 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-09-10
+
+- Drain captured stdout and stderr concurrently through EOF, fixing remaining intermittent
+  stalls in large SSH observations after connection preflight.
+- Use the target's own Codex runtime catalogs instead of predicting plugin availability from
+  copied vendor manifests. Disable unavailable runtime plugins with human-readable reasons
+  while continuing the portable config and skills push. Explicit `always` policies still require
+  availability, and `preserve` policies retain target values.
+- Resolve legacy curated plugin IDs to the target's current remote catalog only when observed
+  there, retaining host policies and reporting the renamed requests. Keep working native runtime
+  registrations and custom marketplace transfers. Backups continue to retain runtime snapshots.
+- Ignore runtime-owned manifest schema changes when projecting availability; only portable
+  custom catalogs can change the predicted catalog.
+
 ## [1.14.1] - 2026-09-10
 
 - Close unused subprocess input to prevent intermittent SSH observation stalls in interactive

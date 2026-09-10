@@ -1,3 +1,5 @@
+import { isCodexManagedMarketplace } from "./codex.ts";
+
 const SAFE_ID_PART = /^[A-Za-z0-9._-]+$/;
 
 export interface CodexMarketplaceManifestInput {
@@ -38,6 +40,7 @@ export function projectCodexMarketplaceAvailability(
   for (const input of manifests) {
     const parsed = parseManifest(input);
     if (!parsed.ok) return parsed;
+    if (isCodexManagedMarketplace(parsed.name)) continue;
 
     const previous = marketplaces.get(parsed.name);
     if (previous && !setsEqual(previous, parsed.pluginNames)) {
@@ -77,6 +80,9 @@ function parseManifest(
   if (typeof value.name !== "string" || !SAFE_ID_PART.test(value.name)) {
     return { ok: false, error: `${input.path}: invalid marketplace name` };
   }
+  // Runtime schemas may evolve independently; these snapshots cannot change availability.
+  if (isCodexManagedMarketplace(value.name))
+    return { ok: true, name: value.name, pluginNames: new Set() };
   if (!Array.isArray(value.plugins)) {
     return { ok: false, error: `${input.path}: plugins must be an array` };
   }

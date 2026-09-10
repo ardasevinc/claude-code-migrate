@@ -5,15 +5,16 @@ import type { CodexPluginPolicy } from "../types/index.ts";
 import {
   adaptCodexConfigForHost,
   getCodexLocalMarketplaceSources,
+  isCodexManagedMarketplace,
   rewriteCodexMarketplaceSources,
 } from "./codex.ts";
 import { adaptCodexHooksForHost } from "./codex-hooks.ts";
 import {
-  applyCodexPluginPolicies,
   type CodexPluginPolicyDecision,
   codexPluginPolicyCommandNames,
   mergeCodexPluginPolicies,
 } from "./codex-plugin-policy.ts";
+import { adaptCodexPushPlugins } from "./codex-push-plugins.ts";
 import { getCodexMcpCommandPathCandidates, normalizeCodexMcpCommandPaths } from "./mcp.ts";
 import type { PushObservationQueries, PushTargetObservation } from "./push-observation.ts";
 import { mergeClaudeMcpStrict, stripAllCodexHookTrust } from "./restore-transforms.ts";
@@ -130,10 +131,16 @@ export async function transformPushInputs(
     );
     config = normalized.content;
     warnings.push(...normalized.warnings);
+    const applied = adaptCodexPushPlugins(config, target, policyOverrides);
+    config = applied.content;
+    pluginDecisions = applied.decisions;
+    warnings.push(...applied.warnings);
     const marketplaces = await rewriteCodexMarketplaceSources(config, async (source) =>
-      target.facts.marketplacePayloads.get(source.name)
-        ? join(paths.codexDir, ".ccm", "marketplaces", source.name)
-        : null,
+      isCodexManagedMarketplace(source.name)
+        ? source.source
+        : target.facts.marketplacePayloads.get(source.name)
+          ? join(paths.codexDir, ".ccm", "marketplaces", source.name)
+          : null,
     );
     config = marketplaces.content;
     warnings.push(...marketplaces.warnings);
@@ -157,13 +164,6 @@ export async function transformPushInputs(
     );
     config = host.content;
     warnings.push(...host.warnings);
-    const remoteConfig = target.facts.captures.get("codex-config");
-    const applied = applyCodexPluginPolicies(config, target.capabilities, policyOverrides, {
-      preserveConfigRaw: remoteConfig ? text(remoteConfig) : undefined,
-    });
-    config = applied.content;
-    pluginDecisions = applied.decisions;
-    warnings.push(...applied.warnings);
   }
   return {
     claudeMcp,

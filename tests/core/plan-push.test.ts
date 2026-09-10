@@ -449,7 +449,7 @@ describe("push migration planning", () => {
         codexPluginList: {
           status: "ok" as const,
           installed: [],
-          available: ["curated-fresh@openai-curated", "fresh@local", "keep@other"],
+          available: ["fresh@local", "keep@other", "stale@openai-curated"],
         },
       },
     };

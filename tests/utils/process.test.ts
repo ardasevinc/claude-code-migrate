@@ -11,6 +11,27 @@ import {
 } from "../../src/utils/process.ts";
 
 describe("process runner", () => {
+  it("fully drains concurrent chunked stdout and stderr before returning", async () => {
+    const result = await runProcess(
+      process.execPath,
+      [
+        "-e",
+        `
+      const { once } = require("node:events");
+      async function emit(stream, character) {
+        for (let i = 0; i < 96; i++) {
+          if (!stream.write(character.repeat(65536))) await once(stream, "drain");
+        }
+        stream.write("EOF");
+      }
+      Promise.all([emit(process.stdout, "o"), emit(process.stderr, "e")]);
+    `,
+      ],
+      { timeoutMs: 5000 },
+    );
+    expect(result.stdout).toBe(`${"o".repeat(96 * 65536)}EOF`);
+    expect(result.stderr).toBe(`${"e".repeat(96 * 65536)}EOF`);
+  });
   it.each([
     ["capture", runProcess],
     ["stream", runStreamingProcess],
@@ -171,10 +192,11 @@ describe("process runner", () => {
   });
 
   it("reports buffer overflow when nothrow is enabled", async () => {
-    const result = await runProcess(process.execPath, ["-e", "process.stdout.write('12345')"], {
-      maxBuffer: 4,
-      nothrow: true,
-    });
+    const result = await runProcess(
+      process.execPath,
+      ["-e", "process.stdout.write('12345'); setInterval(() => {}, 1000)"],
+      { maxBuffer: 4, nothrow: true },
+    );
 
     expect(result).toMatchObject({
       exitCode: null,

@@ -10,24 +10,44 @@ const manifest = (path: string, name: string, plugins: string[]) => ({
 });
 
 describe("Codex marketplace availability projection", () => {
+  it("does not manufacture availability from runtime manifests or depend on their schema", () => {
+    const result = projectCodexMarketplaceAvailability(
+      ["existing@openai-bundled"],
+      [
+        manifest("marketplace.json", "openai-bundled", ["phantom"]),
+        {
+          path: "marketplace.json",
+          content: JSON.stringify({
+            name: "openai-primary-runtime",
+            plugins: { future: "schema" },
+          }),
+        },
+      ],
+    );
+    expect(result).toEqual({
+      ok: true,
+      availablePluginIds: ["existing@openai-bundled"],
+      incomingMarketplaceNames: [],
+    });
+  });
   it("replaces stale IDs per incoming marketplace and sorts the result", () => {
     expect(
       projectCodexMarketplaceAvailability(
-        ["stale@openai-curated", "keep@other", "old@openai-api-curated"],
+        ["stale@custom", "keep@other", "old@custom-api"],
         [
-          manifest("marketplace.json", "openai-curated", ["linear", "atlassian"]),
-          manifest("api_marketplace.json", "openai-api-curated", ["game-studio"]),
+          manifest("marketplace.json", "custom", ["linear", "atlassian"]),
+          manifest("api_marketplace.json", "custom-api", ["game-studio"]),
         ],
       ),
     ).toEqual({
       ok: true,
       availablePluginIds: [
-        "atlassian@openai-curated",
-        "game-studio@openai-api-curated",
+        "atlassian@custom",
+        "game-studio@custom-api",
         "keep@other",
-        "linear@openai-curated",
+        "linear@custom",
       ],
-      incomingMarketplaceNames: ["openai-api-curated", "openai-curated"],
+      incomingMarketplaceNames: ["custom", "custom-api"],
     });
   });
 

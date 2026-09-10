@@ -4,7 +4,11 @@ import { collectionPathsForHome, PROVIDERS, SHARED_ARCHIVE_PREFIX } from "../con
 import { createRuntimeContext } from "../runtime/context.ts";
 import type { CollectionPaths, CollectorOptions, FileEntry, ProviderName } from "../types/index.ts";
 import { log } from "../utils/logger.ts";
-import { discoverCodexLocalMarketplaceSources, getConfiguredCodexPluginNames } from "./codex.ts";
+import {
+  discoverCodexLocalMarketplaceSources,
+  getConfiguredCodexPluginNames,
+  isCodexManagedMarketplace,
+} from "./codex.ts";
 import { detectCodexMcpPathWarnings, extractMcpServers } from "./mcp.ts";
 
 interface CollectContext {
@@ -417,6 +421,11 @@ async function collectProviderFiles(
     }
 
     for (const marketplaceSource of await discoverCodexLocalMarketplaceSources(codexConfigPath)) {
+      if (
+        options.includeCodexRuntimeMarketplaces === false &&
+        isCodexManagedMarketplace(marketplaceSource.name)
+      )
+        continue;
       if (!(await isDirectory(marketplaceSource.source))) {
         if (!options.quiet)
           log.warn(
@@ -436,7 +445,11 @@ async function collectProviderFiles(
     const rawConfig = await readFile(codexConfigPath, "utf8").catch(() => "");
     const curatedRoot = join(basePath, ".tmp", "plugins");
     const curatedArchivePrefix = join(providerName, ".tmp", "plugins");
-    if (rawConfig && (await isDirectory(curatedRoot))) {
+    if (
+      options.includeCodexRuntimeMarketplaces !== false &&
+      rawConfig &&
+      (await isDirectory(curatedRoot))
+    ) {
       const configuredPluginNames = new Set(
         getConfiguredCodexPluginNames(rawConfig, "openai-curated"),
       );

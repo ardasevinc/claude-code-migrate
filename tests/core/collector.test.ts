@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile as writeFileFs } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, writeFile as writeFileFs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -238,6 +238,28 @@ source = "${marketplaceDir}"
     expect(paths).toContain(
       "codex/.ccm/marketplaces/openai-bundled/plugins/browser/.codex-plugin/plugin.json",
     );
+    const pushFiles = await collectFiles({
+      providers: ["codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      includeCodexRuntimeMarketplaces: false,
+      context: createRuntimeContext({ home: rootDir }),
+    });
+    expect(pushFiles.some((file) => file.relativePath.includes(".ccm/marketplaces"))).toBe(false);
+    await writeFixtureFile(
+      join(codexDir, "config.toml"),
+      `[marketplaces.custom]\nsource_type = "local"\nsource = "${marketplaceDir}"\n`,
+    );
+    const customFiles = await collectFiles({
+      providers: ["codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      includeCodexRuntimeMarketplaces: false,
+      context: createRuntimeContext({ home: rootDir }),
+    });
+    expect(
+      customFiles.some((file) => file.relativePath.includes(".ccm/marketplaces/custom/")),
+    ).toBe(true);
   });
 
   it("collects configured implicit curated plugin payloads without the full catalog", async () => {
@@ -284,6 +306,16 @@ source = "${marketplaceDir}"
     expect(JSON.parse(marketplace?.mcpServersOnly ?? "{}").plugins).toEqual([
       { name: "build-web-apps" },
     ]);
+    const pushFiles = await collectFiles({
+      providers: ["codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      includeCodexRuntimeMarketplaces: false,
+      context: createRuntimeContext({ home: rootDir }),
+    });
+    expect(pushFiles.some((file) => file.relativePath.startsWith("codex/.tmp/plugins"))).toBe(
+      false,
+    );
   });
 
   it("collects claude, codex, and shared once for multi-provider pushes", async () => {

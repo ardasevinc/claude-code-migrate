@@ -138,8 +138,22 @@ async function executeProcess(
       chunks.push(chunk);
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk, process.stdout));
-    child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk, process.stderr));
+    // Consume both streams concurrently, including their final bytes before child close.
+    const drain = async (
+      source: typeof child.stdout,
+      chunks: Buffer[],
+      target: NodeJS.WriteStream,
+    ) => {
+      if (!source) return;
+      for await (const chunk of source) capture(chunks, chunk as Buffer, target);
+    };
+    const output = Promise.all([
+      drain(child.stdout, stdout, process.stdout),
+      drain(child.stderr, stderr, process.stderr),
+    ]).catch((error: unknown) => {
+      bufferError = error instanceof Error ? error.message : String(error);
+      child.kill("SIGKILL");
+    });
 
     const finish = (result: ProcessResult, cause?: unknown) => {
       if (settled) return;
@@ -163,7 +177,8 @@ async function executeProcess(
       if (timeout) clearTimeout(timeout);
       finish({ stdout: "", stderr: "", exitCode: null, signal: null, error: error.message }, error);
     });
-    child.on("close", (exitCode, signal) => {
+    child.on("close", async (exitCode, signal) => {
+      await output;
       childClosed = true;
       resolveChildClosed();
       unregisterInterruptCleanup();

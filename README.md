@@ -53,8 +53,14 @@ Built-in policy keeps clearly platform-specific plugins off incompatible hosts:
 | `test-android-apps@openai-curated` | `adb` available |
 | `computer-use@openai-bundled` | macOS GUI host |
 
-Unknown enabled plugins are treated as portable by default. Disallowed plugins are disabled in the
-target `config.toml`; they are not uninstalled from the target cache.
+Pushes use the target's own OpenAI runtime catalogs. Copying a bundled or primary-runtime manifest
+does not make its plugins available. Unavailable runtime plugins are disabled in the target config
+with a reason in the dry run; portable config and skills still sync. Working target runtime paths
+are preserved, and backups still include runtime snapshots. Custom marketplaces continue to copy.
+
+Legacy `@openai-curated` IDs use `@openai-curated-remote` when the target confirms the same plugin
+there. The host policies above apply to both names. Unknown custom plugins still require confirmed
+availability. Disabled plugins are not uninstalled from the target cache.
 
 `ccm push --dry-run` stays non-mutating, but for Codex it now also probes the target and previews
 plugin policy/install decisions.
@@ -257,7 +263,7 @@ path = "~/backups/ccm"
 Codex plugin policy fields:
 
 - `mode = "auto"` evaluates optional host requirements.
-- `mode = "always"` keeps the plugin enabled and installs it if available.
+- `mode = "always"` explicitly requires the plugin, blocking before upload if unavailable.
 - `mode = "never"` disables the plugin on the target.
 - `mode = "preserve"` restores the target's previous enabled/disabled value after overlay copy.
 - `os = ["darwin" | "linux" | "windows"]` restricts `auto` to specific operating systems.

@@ -6,6 +6,18 @@ import { parse } from "smol-toml";
 const LOCAL_PATH_PATTERN = /^(\/|\.\/|\.\.\/|~\/)/;
 const SAFE_MARKETPLACE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
+/** These catalogs are owned by Codex, not activated by copying their manifests. */
+export function isCodexManagedMarketplace(name: string): boolean {
+  return [
+    "openai-curated",
+    "openai-api-curated",
+    "openai-bundled",
+    "openai-bundled-alpha",
+    "openai-primary-runtime",
+    "openai-curated-remote",
+  ].includes(name);
+}
+
 interface CodexMarketplaceConfig {
   source_type?: string;
   source?: string;

@@ -131,6 +131,8 @@ export interface CollectorOptions {
   providers: ProviderName[];
   includeClaudeSettingsLocal: boolean;
   includeClaudeMcpConfig: boolean;
+  /** Backups retain runtime snapshots; pushes use the target's own Codex catalogs. */
+  includeCodexRuntimeMarketplaces?: boolean;
   dryRun?: boolean;
   quiet?: boolean;
   paths?: Partial<CollectionPaths>;
