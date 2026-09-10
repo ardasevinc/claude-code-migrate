@@ -6,9 +6,9 @@ import {
   ProcessError,
   type ProcessOptions,
   type ProcessResult,
-  runInheritedProcess,
   runProcess,
   runStreamingProcess,
+  type StreamingProcessOptions,
 } from "../utils/process.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
@@ -24,9 +24,9 @@ export interface SshSession {
   upload(
     command: "scp" | "rsync",
     args: readonly string[],
-    options?: ProcessOptions,
+    options?: StreamingProcessOptions,
   ): Promise<ProcessResult>;
-  streamRsync(args: readonly string[], options?: ProcessOptions): Promise<ProcessResult>;
+  streamRsync(args: readonly string[], options?: StreamingProcessOptions): Promise<ProcessResult>;
   close(): Promise<void>;
 }
 
@@ -128,7 +128,7 @@ export async function createSshSession(
     run: (command, processOptions = {}, sshOptions = []) =>
       run("ssh", [...options, ...sshOptions, host, command], processOptions),
     upload: (command, args, processOptions = {}) =>
-      runInheritedProcess(
+      runStreamingProcess(
         command,
         command === "scp" ? [...options, ...args] : [`--rsh=${rsyncShell}`, ...args],
         processOptions,

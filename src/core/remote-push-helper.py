@@ -9,11 +9,14 @@ the only component allowed to mutate the target home.
 import base64
 import errno
 import fcntl
+import functools
+import grp
 import gzip
 import hashlib
 import hmac
 import json
 import os
+import pwd
 import select
 import signal
 import stat
@@ -252,7 +255,25 @@ def absolute_parts(path, label):
     return parts
 
 
-def open_absolute_directory(path, label, private=False):
+@functools.lru_cache(maxsize=128)
+def private_user_group(gid, uid):
+    # Like Debian's OpenSSH private-group rule, include both explicit members
+    # and accounts whose primary group is gid. An empty gr_mem is not enough.
+    try:
+        group = grp.getgrgid(gid)
+        members = {entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == gid}
+        members.update(pwd.getpwnam(name).pw_uid for name in group.gr_mem)
+        return members == {uid}
+    except (KeyError, OSError):
+        return False
+
+
+def unsafe_executable_writers(info):
+    return (bool(info.st_mode & stat.S_IWOTH) or
+            bool(info.st_mode & stat.S_IWGRP) and not private_user_group(info.st_gid, info.st_uid))
+
+
+def open_absolute_directory(path, label, private=False, executable=False):
     parts = absolute_parts(path, label)
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -266,14 +287,16 @@ def open_absolute_directory(path, label, private=False):
             if after.st_uid not in (0, os.geteuid()):
                 os.close(child)
                 fail("unsafe %s owner" % label)
-            writable = stat.S_IMODE(after.st_mode) & 0o022
+            writable = (unsafe_executable_writers(after) if executable
+                        else stat.S_IMODE(after.st_mode) & 0o022)
             if writable and not (after.st_mode & stat.S_ISVTX):
                 os.close(child)
-                fail("unsafe %s ancestry mode" % label)
+                location = " at /" + "/".join(parts[:index + 1]) if executable else ""
+                fail("unsafe %s ancestry mode%s" % (label, location))
             os.close(fd)
             fd = child
             if index == len(parts) - 1:
-                if after.st_uid != os.geteuid():
+                if after.st_uid != os.geteuid() and not (executable and after.st_uid == 0):
                     fail("unsafe %s owner" % label)
                 if private and stat.S_IMODE(after.st_mode) & 0o077:
                     fail("unsafe %s mode" % label)
@@ -329,7 +352,7 @@ def open_executable(path):
     # would reintroduce a path-swap race between observation and pinning.
     parts = absolute_parts(path, "plugin command")
     try:
-        parent_fd = (open_absolute_directory("/" + "/".join(parts[:-1]), "plugin command parent")
+        parent_fd = (open_absolute_directory("/" + "/".join(parts[:-1]), "plugin command parent", executable=True)
                      if parts[:-1] else os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)))
     except OSError as error:
         if error.errno in (errno.ELOOP, errno.ENOTDIR):
@@ -348,6 +371,8 @@ def open_executable(path):
             if (not same_object(before, current) or not stat.S_ISREG(current.st_mode) or
                     not current.st_mode & 0o111):
                 fail("Codex command must be a resolved executable regular file")
+            if current.st_uid not in (0, os.geteuid()) or unsafe_executable_writers(current):
+                fail("unsafe Codex command owner or write permissions: " + path)
             if current.st_size > MAX_PLUGIN_COMMAND_BYTES:
                 fail("Codex command exceeds pinning limit")
             return fd

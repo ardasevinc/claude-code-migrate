@@ -44,6 +44,72 @@ async function expectSessionResidueRemoved(commands: readonly CommandLogEntry[])
 }
 
 describe("planned remote push", () => {
+  it.each([
+    ["auto", false],
+    ["auto", true],
+    ["archive", false],
+    ["archive", true],
+  ] as const)(
+    "summarizes %s transfers with verbose=%s",
+    async (transport, verbose) => {
+      const machine = await createFakeMachine("ccm-transfer-output-");
+      try {
+        await mkdir(join(machine.home, ".codex"));
+        await writeFile(join(machine.home, ".codex/config.toml"), 'model="demo"\n');
+        const result = await runCcm(
+          [
+            "push",
+            "codex",
+            "operator@example.test",
+            "--transport",
+            transport,
+            ...(verbose ? ["--verbose"] : []),
+          ],
+          machine,
+          { env: { CCM_TEST_TRANSFER_OUTPUT: "TRANSFER-FILE-CANARY\n" } },
+        );
+        expect(result.exitCode, result.stderr).toBe(0);
+        expect(result.stdout).toContain("Syncing 1 file");
+        expect(result.stdout).toContain("Payload ready (1 file):");
+        expect(result.stdout.includes("TRANSFER-FILE-CANARY")).toBe(verbose);
+        const uploads = (await readCommandLog(machine)).filter(
+          ({ command }) => command === "rsync" || command === "scp",
+        );
+        expect(uploads.length).toBeGreaterThan(0);
+        for (const { command, args } of uploads) {
+          expect(command).toBe(transport === "archive" ? "scp" : "rsync");
+          if (command === "rsync") expect(args.includes("--progress")).toBe(verbose);
+        }
+        expectOneClosedSession(await readCommandLog(machine));
+      } finally {
+        await machine.dispose();
+      }
+    },
+    15_000,
+  );
+
+  it("shows upload failure diagnostics without verbose", async () => {
+    const machine = await createFakeMachine("ccm-transfer-failure-output-");
+    try {
+      await mkdir(join(machine.home, ".codex"));
+      await writeFile(join(machine.home, ".codex/config.toml"), 'model="demo"\n');
+      await armFault(machine, "rsync", {
+        exitCode: 23,
+        stderr: "rsync: transfer destination is full\n",
+      });
+      const result = await runCcm(["push", "codex", "operator@example.test"], machine);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("rsync: transfer destination is full");
+      expect(result.stdout).not.toContain("Payload ready (1 file):");
+      expect(
+        await lstat(join(machine.remoteHome, ".codex/config.toml")).catch(() => null),
+      ).toBeNull();
+      expectOneClosedSession(await readCommandLog(machine));
+    } finally {
+      await machine.dispose();
+    }
+  }, 15_000);
+
   it("selects a unique host-bound profile and exposes only symbolic provenance", async () => {
     const machine = await createFakeMachine("ccm-planned-push-profile-");
     try {
@@ -248,9 +314,9 @@ describe("planned remote push", () => {
         result.stdout.indexOf("Managed state observed"),
       );
       expect(result.stdout.indexOf("Managed state observed")).toBeLessThan(
-        result.stdout.indexOf("Executing push plan"),
+        result.stdout.indexOf("Applying planned changes"),
       );
-      expect(result.stdout.indexOf("Executing push plan")).toBeLessThan(
+      expect(result.stdout.indexOf("Applying planned changes")).toBeLessThan(
         result.stdout.indexOf("Successfully pushed config"),
       );
       expect(result.stdout).toContain("Successfully pushed config to operator@example.test");

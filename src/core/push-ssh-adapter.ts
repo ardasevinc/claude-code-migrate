@@ -4,10 +4,10 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BlockedError, ConnectivityError, ExecutionError } from "../errors.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
+import { log } from "../utils/logger.ts";
 import {
   ProcessError,
   type ProcessResult,
-  runInheritedProcess,
   runProcess,
   runStreamingProcess,
 } from "../utils/process.ts";
@@ -26,7 +26,7 @@ import {
   pushStateFingerprint,
 } from "./push-observation.ts";
 import { pushObservationRequestIdentity } from "./push-observation-request.ts";
-import { buildArchiveUploadArgs } from "./ssh.ts";
+import { buildArchiveUploadArgs, formatBytes } from "./ssh.ts";
 import { assertSshSessionHost, type SshSession } from "./ssh-session.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
@@ -58,33 +58,60 @@ export interface PushTransportMetrics {
   readonly reusedBytes: number | null;
 }
 
-const defaultTransport: PushSshTransport = {
-  run: (host, command, options = {}) =>
-    runProcess("ssh", [host, command], {
-      nothrow: options.nothrow,
-      maxBuffer: options.maxBuffer,
-      timeoutMs: options.timeout,
-    }),
-  async upload(localPath, host, remotePath, useRsync) {
-    await runInheritedProcess(
-      useRsync ? "rsync" : "scp",
-      buildArchiveUploadArgs(localPath, `${host}:${remotePath}`, useRsync),
-    );
-  },
-  async hasLocalRsync() {
-    return (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
-  },
-  async syncTree(localTree, host, remoteDirectory, options = {}) {
-    const result = await runStreamingProcess(
-      "rsync",
-      buildIncrementalRsyncArgs(localTree, `${host}:${remoteDirectory}`, options.linkDest),
-      { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024 },
-    );
-    return parseRsyncTransportMetrics(`${result.stdout}\n${result.stderr}`, options.payloadBytes);
-  },
-};
+export function formatTransferSummary(
+  files: string,
+  metrics: PushTransportMetrics,
+  elapsedMs: number,
+): string {
+  const seconds = elapsedMs / 1000;
+  const details = [
+    metrics.transferredBytes === null
+      ? "transfer size unavailable"
+      : `${formatBytes(metrics.transferredBytes)} transferred`,
+    ...(metrics.reusedBytes === null ? [] : [`${formatBytes(metrics.reusedBytes)} reused`]),
+    `${seconds.toFixed(1)}s`,
+    ...(metrics.transferredBytes === null || seconds <= 0
+      ? []
+      : [`${formatBytes(Math.round(metrics.transferredBytes / seconds))}/s avg payload`]),
+  ];
+  return `Payload ready (${files}): ${details.join(", ")}`;
+}
 
-function sessionTransport(session: SshSession): PushSshTransport {
+function defaultTransport(verbose: boolean): PushSshTransport {
+  return {
+    run: (host, command, options = {}) =>
+      runProcess("ssh", [host, command], {
+        nothrow: options.nothrow,
+        maxBuffer: options.maxBuffer,
+        timeoutMs: options.timeout,
+      }),
+    async upload(localPath, host, remotePath, useRsync) {
+      await runStreamingProcess(
+        useRsync ? "rsync" : "scp",
+        buildArchiveUploadArgs(localPath, `${host}:${remotePath}`, useRsync, verbose),
+        { quiet: !verbose, maxBuffer: 64 * 1024 },
+      );
+    },
+    async hasLocalRsync() {
+      return (await runProcess("which", ["rsync"], { nothrow: true })).exitCode === 0;
+    },
+    async syncTree(localTree, host, remoteDirectory, options = {}) {
+      const result = await runStreamingProcess(
+        "rsync",
+        buildIncrementalRsyncArgs(
+          localTree,
+          `${host}:${remoteDirectory}`,
+          options.linkDest,
+          verbose,
+        ),
+        { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024, quiet: !verbose },
+      );
+      return parseRsyncTransportMetrics(`${result.stdout}\n${result.stderr}`, options.payloadBytes);
+    },
+  };
+}
+
+function sessionTransport(session: SshSession, verbose: boolean): PushSshTransport {
   return {
     run: (host, command, options = {}) => {
       assertSshSessionHost(session, host);
@@ -98,7 +125,8 @@ function sessionTransport(session: SshSession): PushSshTransport {
       assertSshSessionHost(session, host);
       await session.upload(
         useRsync ? "rsync" : "scp",
-        buildArchiveUploadArgs(localPath, `${host}:${remotePath}`, useRsync),
+        buildArchiveUploadArgs(localPath, `${host}:${remotePath}`, useRsync, verbose),
+        { quiet: !verbose, maxBuffer: 64 * 1024 },
       );
     },
     async hasLocalRsync() {
@@ -107,8 +135,13 @@ function sessionTransport(session: SshSession): PushSshTransport {
     async syncTree(localTree, host, remoteDirectory, options = {}) {
       assertSshSessionHost(session, host);
       const result = await session.streamRsync(
-        buildIncrementalRsyncArgs(localTree, `${host}:${remoteDirectory}`, options.linkDest),
-        { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024 },
+        buildIncrementalRsyncArgs(
+          localTree,
+          `${host}:${remoteDirectory}`,
+          options.linkDest,
+          verbose,
+        ),
+        { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 64 * 1024, quiet: !verbose },
       );
       return parseRsyncTransportMetrics(`${result.stdout}\n${result.stderr}`, options.payloadBytes);
     },
@@ -140,13 +173,14 @@ export function buildIncrementalRsyncArgs(
   localTree: string,
   remoteDirectory: string,
   linkDest?: string,
+  verbose = false,
 ): string[] {
   return [
     "--archive",
     "--delete",
     "--partial",
     "--partial-dir=.rsync-partial",
-    "--progress",
+    ...(verbose ? ["--verbose", "--progress"] : []),
     "--stats",
     "--exclude=/.ccm-manifest.json",
     ...(linkDest ? [`--link-dest=${linkDest}`] : []),
@@ -466,12 +500,15 @@ export function createSshPushExecutionAdapter(
     helperPath?: string;
     mode?: PushTransportMode;
     session?: SshSession;
+    verbose?: boolean;
   } = {},
 ): PushExecutionAdapter {
   if (options.transport && options.session)
     throw new BlockedError("Push adapter accepts either an SSH session or a custom transport");
+  const verbose = options.verbose ?? false;
   const transport =
-    options.transport ?? (options.session ? sessionTransport(options.session) : defaultTransport);
+    options.transport ??
+    (options.session ? sessionTransport(options.session, verbose) : defaultTransport(verbose));
   const helperPath = options.helperPath ?? HELPER_PATH;
   const mode = options.mode ?? "auto";
   let transportMetrics: PushTransportMetrics = {
@@ -622,6 +659,8 @@ export function createSshPushExecutionAdapter(
       let snapshotSealed = false;
       let stagingRoot: string | undefined;
       const payloadBytes = inventory.reduce((total, entry) => total + entry.size, 0);
+      const fileCount = inventory.filter((entry) => entry.type === "file").length;
+      const fileLabel = `${fileCount.toLocaleString("en-US")} ${fileCount === 1 ? "file" : "files"}`;
       if (useIncremental) {
         const stagingCommand = `${shellQuote(pythonPath)} -I -B -c ${shellQuote(stagingBootstrapProgram())} ${shellQuote(home)} ${shellQuote(input.snapshotId as string)}`;
         let staged: ProcessResult;
@@ -717,6 +756,13 @@ export function createSshPushExecutionAdapter(
         await writeFile(manifestPath, manifestBytes, { mode: 0o600 });
         try {
           await transport.upload(helperPath, host, join(workspace, "helper.py"), rsyncAvailable);
+          const transferStartedAt = Date.now();
+          if (!snapshotSealed) {
+            const size = useIncremental ? payloadBytes : input.archiveSize;
+            log.info(
+              `Syncing ${fileLabel} (${formatBytes(size)}) via ${useIncremental ? "rsync" : "archive"}...`,
+            );
+          }
           if (useIncremental) {
             if (snapshotSealed)
               transportMetrics = { transferredBytes: 0, reusedBytes: payloadBytes };
@@ -740,6 +786,15 @@ export function createSshPushExecutionAdapter(
               rsyncAvailable,
             );
             transportMetrics = { transferredBytes: input.archiveSize, reusedBytes: 0 };
+          }
+          if (snapshotSealed) {
+            log.success(
+              `Reused staged snapshot: ${fileLabel} (${formatBytes(payloadBytes)}), no payload upload needed`,
+            );
+          } else {
+            log.success(
+              formatTransferSummary(fileLabel, transportMetrics, Date.now() - transferStartedAt),
+            );
           }
           await transport.upload(
             manifestPath,

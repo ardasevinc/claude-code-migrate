@@ -140,6 +140,8 @@ function operandsAfterTarget(argv: string[]): string[] {
 }
 
 function copyTransport(argv: string[]): void {
+  if (process.env.CCM_TEST_TRANSFER_OUTPUT)
+    process.stdout.write(process.env.CCM_TEST_TRANSFER_OUTPUT);
   const operands = argv.filter((argument) => !argument.startsWith("-"));
   if (operands.length < 2) throw new Error(`${command} fixture requires source and destination`);
   const source = transportPath(operands.at(-2) as string);

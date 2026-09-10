@@ -542,15 +542,16 @@ export function buildArchiveUploadArgs(
   archivePath: string,
   remoteSpec: string,
   useRsync: boolean,
+  verbose = false,
 ): string[] {
   if (useRsync) {
-    return ["--partial", "--progress", archivePath, remoteSpec];
+    return ["--partial", ...(verbose ? ["--progress"] : []), archivePath, remoteSpec];
   }
 
   return [archivePath, remoteSpec];
 }
 
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
   }
