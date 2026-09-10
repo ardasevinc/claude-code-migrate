@@ -413,7 +413,7 @@ def start_pinned_plugin(home_fd, token, record, arguments, stdout=None):
 
 def plugin_is_installed(home_fd, token, record, plugin_id):
     process = start_pinned_plugin(home_fd, token, record,
-                                  ["plugin", "list", "--available", "--json"],
+                                  ["plugin", "list", "--json"],
                                   stdout=subprocess.PIPE)
     try:
         raw = wait_plugin_output(process, MAX_PLUGIN_LIST_BYTES)
@@ -421,7 +421,7 @@ def plugin_is_installed(home_fd, token, record, plugin_id):
             fail("Codex plugin reconciliation failed; retained backups preserved")
         try:
             parsed = json.loads(raw.decode("utf-8"))
-            if not isinstance(parsed, dict) or set(parsed) != set(("installed", "available")):
+            if not isinstance(parsed, dict) or not all(field in parsed for field in ("installed", "available")):
                 raise ValueError("invalid plugin list object")
             ids_by_status = {}
             for field, expected_installed in (("installed", True), ("available", False)):

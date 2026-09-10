@@ -496,25 +496,33 @@ export function createSshPushExecutionAdapter(
             let result: ProcessResult;
             try {
               result = await transport.run(host, command, {
+                nothrow: true,
                 quiet: true,
                 maxBuffer: probeOptions.maxBuffer,
                 timeout: probeOptions.timeout,
               });
             } catch (error) {
-              if (error instanceof ProcessError && error.result.error) {
-                throw new ExecutionError(`Remote push observation failed: ${error.result.error}`, {
+              if (error instanceof ProcessError) {
+                result = error.result;
+              } else {
+                throw new ConnectivityError("Remote push observation transport failed", {
                   cause: error,
                 });
               }
-              throw new ConnectivityError("Remote push observation transport failed", {
-                cause: error,
-              });
             }
             if (result.error) {
               throw new ExecutionError(`Remote push observation failed: ${result.error}`);
             }
-            if (isConnectivityResult(result))
-              throw new ConnectivityError("Remote push observation transport failed");
+            if (isConnectivityResult(result) || result.signal !== null) {
+              const detail = result.stderr
+                .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+                .trim()
+                .slice(0, 512);
+              throw new ConnectivityError(
+                `Remote push observation transport failed${detail ? `: ${detail}` : ""}`,
+                { cause: new ProcessError("ssh", result) },
+              );
+            }
             return result;
           },
         },

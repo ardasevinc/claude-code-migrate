@@ -6,9 +6,9 @@ import { configCommand } from "./commands/config.ts";
 import { diffPushCommand, diffRestoreCommand } from "./commands/diff.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { pushCommand } from "./commands/push.ts";
+import { receiptsCommand } from "./commands/receipt.ts";
 import { restoreCommand } from "./commands/restore.ts";
 import { recoverCommand, transactionsCommand } from "./commands/transactions.ts";
-import { receiptsCommand } from "./commands/receipt.ts";
 
 export function createCli(): Command {
   const program = new Command();
@@ -51,6 +51,7 @@ export function createCli(): Command {
     .command("diff")
     .description("Compare managed state using the execution plan")
     .enablePositionalOptions()
+    .option("--verbose", "Show all setting and file changes", false)
     .option("--json", "Print one JSON object", false)
     .option("--profile <name>", "Use an explicit host-bound profile")
     .option("--no-auto-profile", "Disable unique host-bound profile selection")
@@ -61,6 +62,7 @@ export function createCli(): Command {
   diff
     .command("push")
     .description("Compare local managed state with a remote target")
+    .option("--verbose", "Show all setting and file changes", false)
     .argument("[providerOrTarget]", "Provider name (claude|codex) or SSH target (user@host)")
     .argument("[target]", "SSH target (user@host) when provider is specified")
     .option("--json", "Print one JSON object", false)
@@ -73,6 +75,7 @@ export function createCli(): Command {
   diff
     .command("restore")
     .description("Compare an archive with local managed state")
+    .option("--verbose", "Show all setting and file changes", false)
     .argument("<archive>", "Path to archive")
     .argument("[provider]", "Optional provider (claude|codex)")
     .option("--json", "Print one JSON object", false)
@@ -83,7 +86,7 @@ export function createCli(): Command {
     .description("Push configuration to a remote machine")
     .argument("[providerOrTarget]", "Provider name (claude|codex) or SSH target (user@host)")
     .argument("[target]", "SSH target (user@host) when provider is specified")
-    .option("--dry-run", "Preview without transferring", false)
+    .option("--dry-run", "Explain target changes without transferring", false)
     .option("--json", "Print the push plan as one JSON object (dry-run only)", false)
     .option("--profile <name>", "Use an explicit host-bound profile")
     .option("--no-auto-profile", "Disable unique host-bound profile selection")
@@ -91,7 +94,7 @@ export function createCli(): Command {
     .option("--skip-version-check", "Skip Claude version check", false)
     .option("--providers <providers>", "Comma-separated providers to push (claude,codex)")
     .option("--all", "Push all providers")
-    .option("--verbose", "Show the full dry-run file list", false)
+    .option("--verbose", "Show all dry-run setting and file changes", false)
     .action(pushCommand);
 
   program

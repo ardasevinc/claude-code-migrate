@@ -19,6 +19,7 @@ import type { CollectionPaths, ProviderName } from "../types/index.ts";
 import { registerInterruptCleanup } from "../utils/interrupt-cleanup.ts";
 import { scanArchive } from "./archive-reader.ts";
 import { pruneLocalBackupsIfParentExists } from "./backup-retention.ts";
+import { describeConfigChanges, displayText } from "./config-preview.ts";
 import {
   type ExecutionReceipt,
   type ExecutionReceiptAction,
@@ -56,6 +57,7 @@ import {
   type MigrationPlan,
   type PlanDependency,
 } from "./migration-plan.ts";
+import { registerMigrationPreview } from "./migration-preview.ts";
 import { observeLocalRestoreTarget, type RestoreTargetObservation } from "./restore-observation.ts";
 import {
   bytesSha256,
@@ -481,6 +483,41 @@ export async function planRestore(input: PlanRestoreInput): Promise<PlannedResto
     createdAt: input.createdAt ?? input.context.now().toISOString(),
   });
   const planned = Object.freeze({ plan });
+  let previousConfig: Uint8Array | null = null;
+  const configEntry = observation.inventory.find((entry) => entry.path === "codex/config.toml");
+  if (transformed.codexConfig && configEntry?.type === "file") {
+    previousConfig = await input.context.files.readFile(join(input.paths.codexDir, "config.toml"));
+    if (bytesSha256(previousConfig) !== configEntry.sha256)
+      throw new RestoreTargetPlanError(
+        "Codex settings changed while preparing the preview; retry the restore.",
+      );
+  }
+  registerMigrationPreview(planned, {
+    target: "this machine",
+    before: [
+      ...observation.inventory,
+      ...(observation.claudeMcp.bytes && transformed.claudeMcp
+        ? [claudeMcpManagedEntry(observation.claudeMcp.bytes)]
+        : []),
+    ],
+    after: [
+      ...staged,
+      ...(transformed.claudeMcp ? [claudeMcpManagedEntry(transformed.claudeMcp)] : []),
+    ],
+    settings: [
+      ...describeConfigChanges(previousConfig, transformed.codexConfig),
+      ...describeConfigChanges(
+        observation.claudeMcp.bytes ?? null,
+        transformed.claudeMcp,
+        "json",
+      ).map((line) => `Claude: ${line}`),
+    ],
+    adaptations: describeConfigChanges(captured.codexConfig ?? null, transformed.codexConfig),
+    warnings: [
+      ...(scan.archive.format === "v1" ? ["This legacy backup has no integrity manifest."] : []),
+      ...transformed.warnings.map(displayText),
+    ],
+  });
   const actionBindings = new Map<string, RestoreActionBinding>();
   for (const action of actions) {
     const id = deriveActionId(action);

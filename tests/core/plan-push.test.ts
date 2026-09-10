@@ -68,6 +68,52 @@ async function planPush(input: Omit<PlanPushInput, "preparedRequest">) {
 }
 
 describe("push migration planning", () => {
+  it("treats marketplace fixtures in skills and plugin payloads as ordinary files", async () => {
+    const files = [
+      "shared/agents/lazy-skills/asc/tests/fixtures/.agents/plugins/marketplace.json",
+      "codex/skills/demo/marketplace.json",
+      "codex/.ccm/marketplaces/local/plugins/demo/fixtures/marketplace.json",
+      "codex/.tmp/plugins/.agents/plugins/api_marketplace.json",
+    ].map((relativePath) => ({
+      sourcePath: "/fixture",
+      relativePath,
+      isSymlink: false,
+      mcpServersOnly: "ordinary fixture data, not a Codex marketplace",
+    }));
+    const result = await planPush({
+      files,
+      host: "target",
+      providers: ["codex"],
+      observation: observation(),
+    });
+    expect(result.plan.status).toBe("ready");
+    expect(
+      result.plan.preconditions.find((item) => item.id === "marketplace-projection-valid")?.status,
+    ).toBe("satisfied");
+  });
+
+  it("allows growing marketplace metadata beyond the configuration capture limit", async () => {
+    const result = await planPush({
+      files: [
+        {
+          sourcePath: "/fixture",
+          relativePath: "codex/.ccm/marketplaces/local/.agents/plugins/marketplace.json",
+          isSymlink: false,
+          mcpServersOnly: JSON.stringify({
+            name: "local",
+            plugins: [
+              { name: "demo", source: "./plugins/demo", description: "x".repeat(5 * 1024 * 1024) },
+            ],
+          }),
+        },
+      ],
+      host: "target",
+      providers: ["codex"],
+      observation: observation(),
+    });
+    expect(result.plan.status).toBe("ready");
+  });
+
   it("rejects an observation made for a different prepared request", async () => {
     const preparedRequest = await preparePushObservationRequest({
       host: "target",

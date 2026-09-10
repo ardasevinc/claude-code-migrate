@@ -1,6 +1,7 @@
 import { getConfigDir, loadConfig } from "../config/loader.ts";
 import { getEnabledProviders, resolvePushArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
+import { renderMigrationPreview } from "../core/migration-preview.ts";
 import {
   executePlannedPush,
   type PlannedPush,
@@ -24,18 +25,12 @@ export async function pushCommand(
   arg2: string | undefined,
   options: PushOptions,
 ): Promise<void> {
-  return withPushPlan(arg1, arg2, options, async ({ planned, adapter, host }) => {
+  const preview = await withPushPlan(arg1, arg2, options, async ({ planned, adapter, host }) => {
     if (options.dryRun) {
       if (options.json) {
-        console.log(JSON.stringify(planned.plan));
-        return;
+        return JSON.stringify(planned.plan);
       }
-      log.info(`Push plan ${planned.plan.id} (${planned.plan.status})`);
-      log.info(`Providers: ${planned.plan.providers.join(", ")}`);
-      if (options.verbose)
-        for (const action of planned.plan.actions)
-          log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
-      return;
+      return renderMigrationPreview(planned, options);
     }
 
     if (planned.plan.status === "blocked") throw new BlockedError("Push plan is blocked");
@@ -46,6 +41,7 @@ export async function pushCommand(
     log.success(`Successfully pushed config to ${host}`);
     if (receiptId) log.info(`Receipt: ${receiptId}`);
   });
+  if (preview !== undefined) console.log(preview);
 }
 
 export interface PreparedPushCommand {
@@ -126,7 +122,7 @@ export async function withPushPlan<T>(
     includeClaudeSettingsLocal: config.providers.claude.settings_local,
     includeClaudeMcpConfig: config.providers.claude.mcp_config,
     dryRun: options.dryRun,
-    quiet: options.json,
+    quiet: options.json || options.dryRun,
   });
 
   let appliedProfile: Awaited<ReturnType<typeof applyPushProfile>> | undefined;

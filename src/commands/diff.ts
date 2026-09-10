@@ -1,4 +1,5 @@
-import { type MigrationDiffProjection, projectMigrationDiff } from "../core/migration-diff.ts";
+import { projectMigrationDiff } from "../core/migration-diff.ts";
+import { renderMigrationPreview } from "../core/migration-preview.ts";
 import { type CcmExitCode, CliError, ReportedCliError } from "../errors.ts";
 import { createRuntimeContext } from "../runtime/context.ts";
 import type { PushOptions } from "../types/index.ts";
@@ -7,6 +8,7 @@ import { prepareRestorePlan } from "./restore.ts";
 
 interface DiffOptions {
   readonly json?: boolean;
+  readonly verbose?: boolean;
 }
 
 interface DiffPushOptions extends DiffOptions {
@@ -23,7 +25,7 @@ export async function diffPushCommand(
   options: DiffPushOptions,
 ): Promise<void> {
   await reportDiffErrors("push", options, async () => {
-    const projection = await withPushPlan(
+    const output = await withPushPlan(
       arg1,
       arg2,
       {
@@ -36,9 +38,12 @@ export async function diffPushCommand(
         all: options.all,
         skipVersionCheck: false,
       },
-      async ({ planned }) => projectMigrationDiff(planned.plan),
+      async ({ planned }) =>
+        options.json
+          ? JSON.stringify(projectMigrationDiff(planned.plan))
+          : renderMigrationPreview(planned, options),
     );
-    printMigrationDiff(projection, options);
+    console.log(output);
   });
 }
 
@@ -49,20 +54,12 @@ export async function diffRestoreCommand(
 ): Promise<void> {
   await reportDiffErrors("restore", options, async () => {
     const planned = await prepareRestorePlan(archive, provider, createRuntimeContext());
-    printMigrationDiff(projectMigrationDiff(planned.plan), options);
+    console.log(
+      options.json
+        ? JSON.stringify(projectMigrationDiff(planned.plan))
+        : renderMigrationPreview(planned, options),
+    );
   });
-}
-
-function printMigrationDiff(diff: MigrationDiffProjection, options: DiffOptions): void {
-  if (options.json) {
-    console.log(JSON.stringify(diff));
-    return;
-  }
-  console.log(
-    `${capitalize(diff.migrationKind)} diff ${diff.planId} (${diff.status}): ${diff.counts.changed}/${diff.counts.actions} planned managed-state change(s)`,
-  );
-  for (const action of diff.actions)
-    console.log(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
 }
 
 async function reportDiffErrors(
@@ -97,8 +94,4 @@ function diffErrorCode(exitCode: CcmExitCode): string {
       5: "execution-failed",
     } as const
   )[exitCode];
-}
-
-function capitalize(value: string): string {
-  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }

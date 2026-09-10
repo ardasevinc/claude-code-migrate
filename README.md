@@ -169,9 +169,27 @@ ccm push user@host              # all enabled providers + shared
 ccm push claude user@host       # claude + shared
 ccm push --all user@host        # all providers + shared, regardless of config enablement
 ccm push --providers claude,codex user@host
-ccm push codex user@host --dry-run           # compact transfer + Codex plugin plan
-ccm push codex user@host --dry-run --verbose # full file list when needed
+ccm push codex user@host --dry-run           # explain settings, skills, and plugin changes
+ccm push codex user@host --dry-run --verbose # every setting and changed file
+ccm push codex user@host --dry-run --json    # stable, redacted execution plan for automation
 ```
+
+Human previews compare the target with the final adapted configuration. They show model and
+permission changes, named MCP servers and plugins, file counts grouped by purpose, and any
+blockers. Source adaptations are listed separately: for example, dropping a Mac-only MCP server
+or disabling an iOS plugin on Linux. Credentials and arbitrary configuration values are hidden.
+Unchanged files are summarized; `--verbose` expands settings and file paths. Backup, restore,
+and `diff` use the same human presentation. JSON plans and diff schemas remain unchanged.
+
+Plugin observation scales with plugin identities rather than verbose catalog metadata. ccm
+validates and deduplicates IDs on the target before transport and accepts additional CLI metadata
+fields. The full catalog has a separate 32 MiB input budget and 30-second deadline; the compact
+identity list retains its 1 MiB budget. Real marketplace manifests have a 32 MiB planning budget,
+independent of the 4 MiB configuration-file budget. Exceeding a budget reports which limit failed,
+instead of claiming SSH is broken. Hung catalog processes and their children are stopped. Plugin
+recovery queries installed plugins only, so unrelated catalog growth cannot break reconciliation.
+Files named `marketplace.json` inside skills or test fixtures are ordinary payload files; only
+actual Codex marketplace entry points affect plugin availability.
 
 When exactly one profile has the selected target host, `push` and push `diff` apply it
 automatically. Use `--profile <name>` to select one explicitly or `--no-auto-profile` to push

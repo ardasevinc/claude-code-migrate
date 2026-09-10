@@ -744,6 +744,21 @@ describe("remote push helper", () => {
     });
   });
 
+  it("reconciles installed plugins without reading the available catalog", () => {
+    const script = `import json,runpy,subprocess,sys
+ns=runpy.run_path(sys.argv[1])
+def start(home,token,record,args,stdout):
+ assert args==['plugin','list','--json'],args
+ data={'installed':[{'pluginId':'demo@test','installed':True}],'available':[],'futureMetadata':True}
+ return subprocess.Popen([sys.executable,'-c','import sys;sys.stdout.write(sys.argv[1])',json.dumps(data)],stdout=stdout,start_new_session=True)
+ns['plugin_is_installed'].__globals__['start_pinned_plugin']=start
+assert ns['plugin_is_installed'](None,None,{},'demo@test') is True
+print('installed')`;
+    const result = spawnSync(python, ["-I", "-c", script, helper], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("installed");
+  });
+
   it("commits reversible state before effects and never rolls committed files back", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-effect-command-")));
     roots.push(root);
