@@ -5,6 +5,17 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-09-10
+
+- Close unused subprocess input to prevent intermittent SSH observation stalls in interactive
+  terminals, including large inventories. Keep interactive inherited input unchanged.
+- Accept Codex installations in verified private user groups and root-owned system directories.
+  Check primary and explicit group membership; retain shared-group, world-write, symlink, and
+  executable integrity safeguards without changing remote permissions.
+- Summarize live transfers with file count, payload size, transferred/reused bytes, elapsed time,
+  and average payload speed. Gate raw rsync and helper-upload output behind `--verbose`, retain
+  bounded diagnostics, and keep warnings and transfer failures visible by default.
+
 ## [1.14.0] - 2026-09-10
 
 - Explain human dry runs and diffs in terms of target settings, named skills, plugin installs,
