@@ -79,11 +79,21 @@ describe("migration diff commands", () => {
       await writeFile(join(source.home, ".codex/config.toml"), 'model = "source"\n');
       await writeFile(join(target.home, ".codex/config.toml"), 'model = "target"\n');
       const archive = join(source.root, "diff.tar.gz");
+      const previewBackup = await runCcm(["backup", "codex", archive, "--dry-run"], source);
+      expect(previewBackup.exitCode, previewBackup.stderr).toBe(0);
+      expect(previewBackup.stdout).toContain("Archive contents:");
+      expect(previewBackup.stdout).not.toContain("plan_");
+      await expect(readFile(archive)).rejects.toThrow();
       const backup = await runCcm(["backup", "codex", archive], source);
       expect(backup.exitCode, backup.stderr).toBe(0);
 
       const dryRun = await runCcm(["restore", archive, "codex", "--dry-run", "--json"], target);
       const diff = await runCcm(["diff", "restore", archive, "codex", "--json"], target);
+      const humanRestore = await runCcm(["restore", archive, "codex", "--dry-run"], target);
+      const humanDiff = await runCcm(["diff", "restore", archive, "codex", "--verbose"], target);
+      expect(humanRestore.stdout).toContain("Model: target -> source");
+      expect(humanRestore.stdout).not.toContain("plan_");
+      expect(humanDiff.stdout).toContain("Update ~/.codex/config.toml");
 
       expect(dryRun).toMatchObject({ exitCode: 0, stderr: "" });
       expect(diff).toMatchObject({ exitCode: 0, stderr: "" });
@@ -126,7 +136,10 @@ describe("migration diff commands", () => {
     }
   });
 
-  it("does not print a success object before SSH cleanup succeeds", async () => {
+  it.each([
+    "diff",
+    "push",
+  ] as const)("does not print a %s success object before SSH cleanup succeeds", async (command) => {
     const machine = await createFakeMachine("ccm-diff-cleanup-error-");
     let retainedRoot: string | undefined;
     try {
@@ -140,16 +153,24 @@ describe("migration diff commands", () => {
       );
 
       const result = await runCcm(
-        ["diff", "push", "codex", "operator@example.test", "--json"],
+        command === "diff"
+          ? ["diff", "push", "codex", "operator@example.test", "--json"]
+          : ["push", "codex", "operator@example.test", "--dry-run", "--json"],
         machine,
       );
-      expect(result).toMatchObject({ exitCode: 5, stderr: "" });
-      expect(result.stdout.trim().split("\n")).toHaveLength(1);
-      expect(JSON.parse(result.stdout)).toMatchObject({
-        kind: "diff-error",
-        migrationKind: "push",
-        error: { code: "execution-failed", exitCode: 5 },
-      });
+      expect(result.exitCode).toBe(5);
+      if (command === "diff") {
+        expect(result.stderr).toBe("");
+        expect(result.stdout.trim().split("\n")).toHaveLength(1);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          kind: "diff-error",
+          migrationKind: "push",
+          error: { code: "execution-failed", exitCode: 5 },
+        });
+      } else {
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("Could not close multiplexed SSH session");
+      }
       const controlPath = (await readCommandLog(machine))
         .flatMap(({ args }) =>
           args.flatMap((argument) => /-oControlPath=([^\s]+)/.exec(argument)?.[1] ?? []),

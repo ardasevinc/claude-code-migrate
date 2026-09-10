@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
+import { ExecutionError } from "../errors.ts";
 import { type ProcessResult, runProcess } from "../utils/process.ts";
 import { shellQuote } from "../utils/shell.ts";
 import type { HostCapabilities } from "./codex-plugin-policy.ts";
@@ -10,6 +11,11 @@ import {
   inventoryFingerprint,
 } from "./inventory.ts";
 import { fingerprint, type PlanFingerprint } from "./migration-plan.ts";
+import {
+  buildPluginObservationProgram,
+  MAX_PLUGIN_CATALOG_BYTES,
+  PLUGIN_CATALOG_TIMEOUT_SECONDS,
+} from "./push-plugin-observation.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
 export const MAX_PUSH_OBSERVATION_ENTRIES = 100_000;
@@ -124,6 +130,7 @@ export function pushStateFingerprint(state: PushState): PlanFingerprint {
 const defaultTransport: PushObservationTransport = {
   async run(host, argvCommand, options) {
     return runProcess("ssh", [host, argvCommand], {
+      nothrow: true,
       maxBuffer: options.maxBuffer,
       timeoutMs: options.timeout,
     });
@@ -267,7 +274,7 @@ for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "
 "$python_path" -I -c ${inventoryProgram} "$home" ${encoded(roots)}
 for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
 ${queries.sharedSkillNames ? `if [ -d "$home/.agents/skills" ] && [ ! -L "$home/.agents/skills" ]; then for p in "$home/.agents/skills"/*; do [ -d "$p" ] && [ ! -L "$p" ] || continue; emit SKILL "$(printf '%s' "\${p##*/}"|enc)"; done; fi` : ":"}
-${queries.codexPluginList ? `if [ -z "$codex_path" ]; then emit PLUGINS missing; elif output=$("$codex_path" plugin list --available --json 2>/dev/null); then z=$(printf '%s' "$output"|wc -c|tr -d ' '); [ "$z" -le ${MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES} ] || exit 45; emit PLUGINS ok "$(printf '%s' "$output"|enc)"; else emit PLUGINS failed; fi` : ":"}
+${queries.codexPluginList ? `if [ -z "$codex_path" ]; then emit PLUGINS missing; else "$python_path" -I -c ${q(buildPluginObservationProgram(MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES))} "$codex_path"; fi` : ":"}
 printf 'END\\n'`;
 }
 
@@ -549,8 +556,20 @@ export async function observeRemotePushTarget(input: {
       .join("")
       .trim()
       .slice(0, 512);
-    throw new Error(
-      `Remote push observation failed (${result.exitCode})${stderr ? `: ${stderr}` : ""}`,
+    const reasons: Record<number, string> = {
+      41: "Remote home directory is invalid",
+      42: "Managed files exceed the observation size or entry limit",
+      43: "Managed state contains an unsupported file type",
+      44: "Remote observation contains an invalid path or query",
+      45: `Codex plugin IDs exceed the ${MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES}-byte observation limit`,
+      46: "Remote Python 3 is missing or cannot be executed",
+      47: `Codex plugin catalog exceeds the ${MAX_PLUGIN_CATALOG_BYTES}-byte input limit`,
+      48: `Codex plugin list timed out after ${PLUGIN_CATALOG_TIMEOUT_SECONDS} seconds`,
+      49: "Codex plugin list returned invalid JSON, schema, or plugin IDs",
+    };
+    const reason = result.exitCode === null ? undefined : reasons[result.exitCode];
+    throw new ExecutionError(
+      `Remote push observation failed (${result.exitCode})${reason ? `: ${reason}` : stderr ? `: ${stderr}` : ""}`,
     );
   }
   return parseRemotePushObservation(

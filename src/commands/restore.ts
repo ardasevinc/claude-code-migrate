@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { collectionPathsForHome } from "../config/providers.ts";
 import { resolveRestoreProvider } from "../core/arg-parser.ts";
+import { renderMigrationPreview } from "../core/migration-preview.ts";
 import {
   executePlannedRestore,
   type PlannedRestore,
@@ -35,11 +36,7 @@ export async function restoreCommandWithContext(
       console.log(JSON.stringify(planned.plan));
       return;
     }
-    log.info(`Restore plan ${planned.plan.id} (${planned.plan.status})`);
-    log.info(`Providers: ${planned.plan.providers.join(", ")}`);
-    if (options.verbose)
-      for (const action of planned.plan.actions)
-        log.dim(`  ${action.phase}: ${action.operation} ${action.scope} (${action.disposition})`);
+    console.log(renderMigrationPreview(planned, options));
     return;
   }
   const receiptId = await executePlannedRestore(planned);

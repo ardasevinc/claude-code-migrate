@@ -1081,6 +1081,52 @@ describe("SSH remote push helper adapter", () => {
     });
   });
 
+  it.each([
+    41, 42, 43, 44, 45, 46, 47, 48, 49,
+  ])("preserves remote probe failure %s as an execution error", async (exitCode) => {
+    const f = await fixture();
+    for (const throwing of [false, true]) {
+      const result = { stdout: "private capture bytes", stderr: "", exitCode, signal: null };
+      const adapter = createSshPushExecutionAdapter({
+        transport: {
+          ...f.transport,
+          run: async (_host, _command, options) => {
+            expect(options?.nothrow).toBe(true);
+            if (throwing) throw new ProcessError("ssh", result);
+            return result;
+          },
+        },
+      });
+      await expect(adapter.observe(f.request)).rejects.toMatchObject({
+        name: "ExecutionError",
+        exitCode: 5,
+        message: expect.stringMatching(
+          new RegExp(`Remote push observation failed \\(${exitCode}\\): .+`),
+        ),
+      });
+    }
+  });
+
+  it("retains bounded SSH diagnostics for real connectivity failures", async () => {
+    const f = await fixture();
+    const adapter = createSshPushExecutionAdapter({
+      transport: {
+        ...f.transport,
+        run: async () => ({
+          stdout: "",
+          stderr: "Connection refused\n",
+          exitCode: 255,
+          signal: null,
+        }),
+      },
+    });
+    await expect(adapter.observe(f.request)).rejects.toMatchObject({
+      name: "ConnectivityError",
+      exitCode: 4,
+      message: "Remote push observation transport failed: Connection refused",
+    });
+  });
+
   it("classifies observation transport loss by mutation stage", async () => {
     const f = await fixture();
     const adapter = createSshPushExecutionAdapter({

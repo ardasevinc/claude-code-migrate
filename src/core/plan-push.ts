@@ -5,6 +5,11 @@ import type { RuntimeContext } from "../runtime/context.ts";
 import type { CodexPluginPolicy, FileEntry, ProviderName } from "../types/index.ts";
 import { projectCodexMarketplaceAvailability } from "./codex-marketplace-projection.ts";
 import {
+  describeConfigChanges,
+  describePluginPolicyDecision,
+  displayText,
+} from "./config-preview.ts";
+import {
   type ExecutionReceipt,
   type ExecutionReceiptAction,
   type ExecutionReceiptOutcome,
@@ -39,6 +44,7 @@ import {
   type PlanDependency,
   type PlanFingerprint,
 } from "./migration-plan.ts";
+import { registerMigrationPreview } from "./migration-preview.ts";
 import {
   type PushObservationQueries,
   type PushTargetObservation,
@@ -49,6 +55,7 @@ import {
   preparePushObservationRequest,
   pushObservationRequestIdentity,
 } from "./push-observation-request.ts";
+import { MAX_PLUGIN_CATALOG_BYTES } from "./push-plugin-observation.ts";
 import {
   applyResolvedCodexProfile,
   type ResolvedPushProfile,
@@ -249,6 +256,13 @@ function groupAction(
   };
 }
 
+function marketplaceName(path: string): string | undefined {
+  if (path === "codex/.tmp/plugins/.agents/plugins/marketplace.json") return "openai-curated";
+  return /^codex\/\.ccm\/marketplaces\/([^/]+)\/\.agents\/plugins\/marketplace\.json$/.exec(
+    path,
+  )?.[1];
+}
+
 export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
   if (input.profile && input.profile.host !== input.host)
     throw new Error("Push profile host does not match the planned target");
@@ -286,14 +300,17 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     const isDecisionInput =
       ["claude/.mcp-config.json", "codex/config.toml", "codex/hooks.json"].includes(
         file.relativePath,
-      ) || /\/(?:api_)?marketplace\.json$/.test(file.relativePath);
+      ) || marketplaceName(file.relativePath) !== undefined;
     if (!isDecisionInput) continue;
+    const limit = marketplaceName(file.relativePath) ? MAX_PLUGIN_CATALOG_BYTES : 4 * 1024 * 1024;
+    if (file.mcpServersOnly === undefined && (await lstat(file.sourcePath)).size > limit)
+      throw new Error(`Push decision input exceeds ${limit}-byte size limit: ${file.relativePath}`);
     const bytes =
       file.mcpServersOnly === undefined
         ? await readFile(file.sourcePath)
         : Buffer.from(file.mcpServersOnly);
-    if (bytes.byteLength > 4 * 1024 * 1024)
-      throw new Error(`Push decision input exceeds size limit: ${file.relativePath}`);
+    if (bytes.byteLength > limit)
+      throw new Error(`Push decision input exceeds ${limit}-byte size limit: ${file.relativePath}`);
     const mode =
       file.mcpServersOnly === undefined && ((await lstat(file.sourcePath)).mode & 0o111) !== 0
         ? 0o755
@@ -323,15 +340,8 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     const bytes = decisionBytes.get(file.relativePath);
     if (!bytes) continue;
     decisionHashes.set(file.relativePath, createHash("sha256").update(bytes).digest("hex"));
-    if (!/\/(?:api_)?marketplace\.json$/.test(file.relativePath)) continue;
-    let expectedName: string | undefined;
-    const local = /^codex\/\.ccm\/marketplaces\/([^/]+)\//.exec(file.relativePath);
-    if (local?.[1]) expectedName = local[1];
-    else if (file.relativePath === "codex/.tmp/plugins/.agents/plugins/marketplace.json")
-      expectedName = "openai-curated";
-    else if (file.relativePath === "codex/.tmp/plugins/.agents/plugins/api_marketplace.json")
-      expectedName = "openai-api-curated";
-    else invalidManifestLocation = true;
+    const expectedName = marketplaceName(file.relativePath);
+    if (expectedName === undefined) continue;
     try {
       const parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as { name?: unknown };
       if (parsed.name !== expectedName) invalidManifestLocation = true;
@@ -729,6 +739,49 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     createdAt: input.createdAt,
   });
   const planned = Object.freeze({ plan });
+  const targetMcp = input.observation.facts.captures.get("claude-mcp");
+  const settings = [
+    ...describeConfigChanges(
+      input.observation.facts.captures.get("codex-config") ?? null,
+      transformed.codexConfig,
+    ),
+    ...describeConfigChanges(targetMcp ?? null, transformed.claudeMcp, "json").map(
+      (line) => `Claude: ${line}`,
+    ),
+  ];
+  registerMigrationPreview(planned, {
+    target: `${input.host} (${input.observation.capabilities.os}, ${input.observation.capabilities.arch})`,
+    before: [
+      ...input.observation.inventory,
+      ...(targetMcp && transformed.claudeMcp ? [claudeMcpManagedEntry(targetMcp)] : []),
+    ],
+    after: [
+      ...stagedFinal,
+      ...(transformed.claudeMcp ? [claudeMcpManagedEntry(transformed.claudeMcp)] : []),
+    ],
+    settings,
+    adaptations: [
+      ...describeConfigChanges(captures.codexConfig ?? null, transformed.codexConfig),
+      ...transformed.pluginDecisions
+        .filter((decision) => decision.action !== "enable")
+        .map(describePluginPolicyDecision),
+    ],
+    effects: pluginInstalls.map((id) => `Install ${displayText(id)}`),
+    warnings: transformed.warnings.map(displayText),
+    blockers: [
+      ...(!marketplaceProjection.ok
+        ? [`Marketplace cannot be validated: ${displayText(marketplaceProjection.error)}`]
+        : []),
+      ...(unresolvedPlugins.length && pluginList.status !== "ok"
+        ? [
+            `Cannot read Codex plugins on the target (${pluginList.status}). Check the target's Codex installation.`,
+          ]
+        : []),
+      ...(marketplaceProjection.ok ? unresolvedPlugins : []).map(
+        (id) => `Required plugin ${displayText(id)} is not confirmed available on the target.`,
+      ),
+    ],
+  });
   const actionBindings = new Map<string, PushActionBinding>();
   const groups = groupManagedTopLevelEntries(overlayIncoming);
   for (const action of actions) {

@@ -270,6 +270,39 @@ describe("planned remote push", () => {
     }
   }, 30_000);
 
+  it("explains the target settings and skill changes in human dry runs", async () => {
+    const machine = await createFakeMachine("ccm-human-push-");
+    try {
+      await mkdir(join(machine.home, ".codex"), { recursive: true });
+      await mkdir(join(machine.remoteHome, ".codex"), { recursive: true });
+      await mkdir(join(machine.home, ".agents/skills/demo"), { recursive: true });
+      await writeFile(
+        join(machine.home, ".codex/config.toml"),
+        'model="new-model"\napi_key="SOURCE-SECRET"\n',
+      );
+      await writeFile(
+        join(machine.remoteHome, ".codex/config.toml"),
+        'model="old-model"\napi_key="TARGET-SECRET"\n',
+      );
+      await writeFile(join(machine.home, ".agents/skills/demo/SKILL.md"), "demo");
+      const result = await runCcm(["push", "codex", "operator@example.test", "--dry-run"], machine);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout).toContain("Model: old-model -> new-model");
+      expect(result.stdout).toContain("Shared skills: 1 new (demo)");
+      expect(result.stdout).not.toMatch(/SOURCE-SECRET|TARGET-SECRET|plan_[a-f0-9]+|materialize/);
+      expect(await readFile(join(machine.remoteHome, ".codex/config.toml"), "utf8")).toContain(
+        'model="old-model"',
+      );
+      expect(
+        (await readCommandLog(machine)).some(
+          ({ command }) => command === "scp" || command === "rsync",
+        ),
+      ).toBe(false);
+    } finally {
+      await machine.dispose();
+    }
+  });
+
   it("prints pure plan JSON and keeps dry-run read-only", async () => {
     const machine = await createFakeMachine("ccm-planned-push-json-");
     try {

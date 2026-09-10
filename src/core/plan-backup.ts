@@ -16,6 +16,7 @@ import {
   type MigrationPlan,
   type PlanFingerprint,
 } from "./migration-plan.ts";
+import { registerMigrationPreview } from "./migration-preview.ts";
 
 interface BackupPlanResources {
   readonly files: readonly FileEntry[];
@@ -140,6 +141,17 @@ export async function planBackup(input: PlanBackupInput): Promise<PlannedBackup>
     createdAt: input.createdAt,
   });
   const planned = Object.freeze({ plan });
+  registerMigrationPreview(planned, {
+    target: input.outputPath,
+    before: [],
+    after: inventory,
+    blockers:
+      plan.status === "blocked"
+        ? [
+            "The archive destination already exists or is not a regular file. Choose another path, or use --force to replace an existing archive.",
+          ]
+        : [],
+  });
   resources.set(planned, {
     files: input.files.map((file) => Object.freeze({ ...file })),
     outputPath: input.outputPath,

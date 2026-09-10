@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { loadConfig } from "../config/loader.ts";
 import { getEnabledProviders, resolveBackupArguments } from "../core/arg-parser.ts";
 import { collectFiles } from "../core/collector.ts";
+import { renderMigrationPreview } from "../core/migration-preview.ts";
 import { executePlannedBackup, planBackup } from "../core/plan-backup.ts";
 import { BlockedError, UsageError } from "../errors.ts";
 import { createRuntimeContext, type RuntimeContext } from "../runtime/context.ts";
@@ -96,18 +97,7 @@ export async function backupCommandWithContext(
       console.log(JSON.stringify(planned.plan));
       return;
     }
-    log.info(`Backup plan ${planned.plan.id} (${planned.plan.status})`);
-    log.info(`Files to include: ${files.length}`);
-
-    if (options.verbose)
-      for (const file of files) {
-        const displayPath =
-          file.relativePath === "claude/.mcp-config.json"
-            ? "~/.claude.json (MCP)"
-            : file.relativePath;
-        log.file(displayPath);
-      }
-
+    console.log(renderMigrationPreview(planned, options));
     return;
   }
 
