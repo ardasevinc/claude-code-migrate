@@ -57,6 +57,13 @@ automatically; `actions/attest` separately records the GitHub artifact attestati
 
 ## Reruns and failure boundaries
 
+The scheduled Bun dependency refresh needs the repository Actions setting **Allow GitHub Actions
+to create and approve pull requests** enabled. Keep default workflow permissions read-only;
+the refresh workflow explicitly requests only the permissions needed to push its update branch,
+open a PR, and dispatch CI. It does not approve or merge dependency updates. The explicit
+`workflow_dispatch` gives bot-created PRs the required checks without relying on implicit
+token-triggered events.
+
 - Before publication, any verification failure is safe: no registry or release state changed.
 - If npm already has the version with both exact tarball digests, the workflow skips publication
   and continues verification. A different digest fails closed because npm versions are immutable.
