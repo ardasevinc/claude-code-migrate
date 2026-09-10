@@ -20,6 +20,7 @@ import { pushObservationRequestIdentity } from "../../src/core/push-observation-
 import {
   buildIncrementalRsyncArgs,
   createSshPushExecutionAdapter,
+  formatTransferSummary,
   type PushSshTransport,
   parseRsyncTransportMetrics,
 } from "../../src/core/push-ssh-adapter.ts";
@@ -110,6 +111,29 @@ async function fixture(options: { readonly externalCache?: boolean } = {}) {
 }
 
 describe("SSH remote push helper adapter", () => {
+  it("shows transfer metadata with an honest payload rate and unknown measurements", () => {
+    expect(
+      formatTransferSummary("4 files", { transferredBytes: 1024, reusedBytes: 2048 }, 2000),
+    ).toBe(
+      "Payload ready (4 files): 1.0 KiB transferred, 2.0 KiB reused, 2.0s, 512 B/s avg payload",
+    );
+    expect(
+      formatTransferSummary("4 files", { transferredBytes: null, reusedBytes: null }, 1000),
+    ).toBe("Payload ready (4 files): transfer size unavailable, 1.0s");
+    expect(formatTransferSummary("1 file", { transferredBytes: 0, reusedBytes: 1 }, 0)).not.toMatch(
+      /NaN|Infinity|\/s/,
+    );
+  });
+
+  it("requests summary stats by default and full file progress only in verbose mode", () => {
+    const quiet = buildIncrementalRsyncArgs("/source", "/target");
+    expect(quiet).toContain("--stats");
+    expect(quiet).not.toContain("--progress");
+    expect(quiet).not.toContain("--verbose");
+    expect(buildIncrementalRsyncArgs("/source", "/target", undefined, true)).toEqual(
+      expect.arrayContaining(["--stats", "--progress", "--verbose"]),
+    );
+  });
   const helperRequest = (command: string): Record<string, unknown> | undefined => {
     const encoded = /'([A-Za-z0-9+/=]+)'$/.exec(command)?.[1];
     if (!encoded) return undefined;

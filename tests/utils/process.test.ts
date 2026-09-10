@@ -14,10 +14,11 @@ describe("process runner", () => {
   it.each([
     ["capture", runProcess],
     ["stream", runStreamingProcess],
+    ["quiet", runStreamingProcess],
   ] as const)("closes unused input and drains large output in %s mode", async (mode, run) => {
     const bytes = 3 * 1024 * 1024;
     const write =
-      mode === "stream"
+      mode !== "capture"
         ? vi.spyOn(process.stdout, "write").mockImplementation(() => true)
         : undefined;
     try {
@@ -27,20 +28,41 @@ describe("process runner", () => {
           "-e",
           `process.stdin.on('end', () => process.stdout.write('x'.repeat(${bytes}) + 'EOF')); process.stdin.resume();`,
         ],
-        { maxBuffer: mode === "stream" ? 1024 : bytes + 3, timeoutMs: 3000 },
+        {
+          maxBuffer: mode === "capture" ? bytes + 3 : 1024,
+          timeoutMs: 3000,
+          quiet: mode === "quiet",
+        },
       );
       expect(result).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
-      if (mode === "stream") {
+      if (mode !== "capture") {
         expect(result.stdout.length).toBeLessThanOrEqual(1024);
-        expect(write?.mock.calls.reduce((total, [chunk]) => total + Buffer.byteLength(chunk), 0)).toBe(
-          bytes + 3,
-        );
+        expect(
+          write?.mock.calls.reduce((total, [chunk]) => total + Buffer.byteLength(chunk), 0),
+        ).toBe(mode === "quiet" ? 0 : bytes + 3);
       } else {
         expect(result.stdout.length).toBe(bytes + 3);
       }
       expect(result.stdout.endsWith("EOF")).toBe(true);
     } finally {
       write?.mockRestore();
+    }
+  });
+
+  it.each([
+    [0, "warning"],
+    [23, "transfer failed"],
+  ])("preserves quiet transfer diagnostics at exit %i", async (exitCode, diagnostic) => {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await runStreamingProcess(
+        process.execPath,
+        ["-e", `process.stderr.write(${JSON.stringify(diagnostic)}); process.exitCode=${exitCode}`],
+        { quiet: true, nothrow: true },
+      );
+      expect(write.mock.calls.map(([chunk]) => chunk.toString()).join("")).toBe(diagnostic);
+    } finally {
+      write.mockRestore();
     }
   });
 

@@ -34,7 +34,7 @@ export async function pushCommand(
     }
 
     if (planned.plan.status === "blocked") throw new BlockedError("Push plan is blocked");
-    log.info(`Executing push plan ${planned.plan.id}...`);
+    log.info("Applying planned changes...");
     const receiptId = await executePlannedPush(planned, adapter, {
       context: createRuntimeContext(),
     });
@@ -176,6 +176,7 @@ export async function withPushPlan<T>(
     const adapter = createSshPushExecutionAdapter({
       mode: options.transport ?? "auto",
       session,
+      verbose: options.verbose,
     });
     if (!options.json) log.info(`Observing managed state on ${host}...`);
     const observationStartedAt = Date.now();

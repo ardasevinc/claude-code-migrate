@@ -94,7 +94,7 @@ export function createCli(): Command {
     .option("--skip-version-check", "Skip Claude version check", false)
     .option("--providers <providers>", "Comma-separated providers to push (claude,codex)")
     .option("--all", "Push all providers")
-    .option("--verbose", "Show all dry-run setting and file changes", false)
+    .option("--verbose", "Show all dry-run details and raw transfer output", false)
     .action(pushCommand);
 
   program

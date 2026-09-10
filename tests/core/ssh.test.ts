@@ -50,10 +50,13 @@ describe("ssh helpers", () => {
     );
   });
 
-  it("uses rsync progress when available and falls back to scp", () => {
+  it("gates archive upload progress behind verbose and falls back to scp", () => {
     expect(
       buildArchiveUploadArgs("/tmp/archive;touch nope", "host:/tmp/archive.tar.gz", true),
-    ).toEqual(["--partial", "--progress", "/tmp/archive;touch nope", "host:/tmp/archive.tar.gz"]);
+    ).toEqual(["--partial", "/tmp/archive;touch nope", "host:/tmp/archive.tar.gz"]);
+    expect(
+      buildArchiveUploadArgs("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", true, true),
+    ).toContain("--progress");
     expect(
       buildArchiveUploadArgs("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", false),
     ).toEqual(["/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz"]);

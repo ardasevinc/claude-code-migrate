@@ -181,6 +181,17 @@ or disabling an iOS plugin on Linux. Credentials and arbitrary configuration val
 Unchanged files are summarized; `--verbose` expands settings and file paths. Backup, restore,
 and `diff` use the same human presentation. JSON plans and diff schemas remain unchanged.
 
+Live pushes summarize the payload file count, transferred and reused bytes, elapsed time, and
+average payload speed. Helper uploads and raw rsync output stay quiet; use `ccm push --verbose`
+for individual file progress and complete transfer output. Warnings and failure diagnostics
+remain visible by default. A ready payload is staged data; the final success message confirms
+the configuration was applied and verified.
+
+Remote Codex commands may live in user-owned or root-owned installation directories. Group
+writability is accepted only when account and group records confirm the file owner's private
+group, including primary-group membership. Shared-group and world-writable commands remain
+blocked, and transaction workspaces retain their stricter private permissions.
+
 Plugin observation scales with plugin identities rather than verbose catalog metadata. ccm
 validates and deduplicates IDs on the target before transport and accepts additional CLI metadata
 fields. The full catalog has a separate 32 MiB input budget and 30-second deadline; the compact

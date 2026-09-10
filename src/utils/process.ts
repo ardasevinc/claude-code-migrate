@@ -11,6 +11,11 @@ export interface ProcessOptions {
   timeoutMs?: number;
 }
 
+export interface StreamingProcessOptions extends ProcessOptions {
+  /** Hide routine output; still print warnings and failure diagnostics. */
+  quiet?: boolean;
+}
+
 export interface ProcessResult {
   stdout: string;
   stderr: string;
@@ -50,20 +55,20 @@ export async function runInheritedProcess(
   return executeProcess(command, args, options, "inherit");
 }
 
-/** Streams child output to this process while retaining only a bounded tail for parsing. */
+/** Drains child output with bounded diagnostic tails, optionally hiding routine output. */
 export async function runStreamingProcess(
   command: string,
   args: readonly string[] = [],
-  options: ProcessOptions = {},
+  options: StreamingProcessOptions = {},
 ): Promise<ProcessResult> {
-  return executeProcess(command, args, options, "tee");
+  return executeProcess(command, args, options, options.quiet ? "tail" : "tee");
 }
 
 async function executeProcess(
   command: string,
   args: readonly string[],
   options: ProcessOptions,
-  stdio: "pipe" | "inherit" | "tee",
+  stdio: "pipe" | "inherit" | "tee" | "tail",
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -113,8 +118,8 @@ async function executeProcess(
 
     const capture = (chunks: Buffer[], chunk: Buffer, stream: NodeJS.WriteStream) => {
       if (settled || bufferError) return;
-      if (stdio === "tee") {
-        stream.write(chunk);
+      if (stdio === "tee" || stdio === "tail") {
+        if (stdio === "tee") stream.write(chunk);
         chunks.push(chunk);
         let tailBytes = chunks.reduce((total, item) => total + item.length, 0);
         while (tailBytes > maxBuffer && chunks.length > 1) {
@@ -170,6 +175,12 @@ async function executeProcess(
         signal,
         ...(bufferError || timeoutError ? { error: bufferError ?? timeoutError } : {}),
       };
+      if (stdio === "tail") {
+        const diagnostic =
+          result.stderr ||
+          (result.exitCode !== 0 || result.signal !== null || result.error ? result.stdout : "");
+        if (diagnostic) process.stderr.write(diagnostic);
+      }
       finish(result, result.error ? new Error(result.error) : undefined);
     });
   });
