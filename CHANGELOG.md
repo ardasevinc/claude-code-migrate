@@ -5,6 +5,22 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-09-10
+
+- Explain human dry runs and diffs in terms of target settings, named skills, plugin installs,
+  host adaptations, and actual changed files. Keep credentials hidden and JSON contracts stable.
+- Make blocked and already-current previews explicit; expand complete details with `--verbose`.
+- Normalize growing Codex catalogs to validated, deduplicated plugin IDs before transport,
+  accepting additional metadata without expanding the observation payload. Bound catalog reads
+  independently by bytes and time, and clean up hung or cancelled subprocesses and descendants.
+- Preserve remote probe exit codes and actionable size, timeout, Python, and protocol diagnostics
+  instead of misclassifying all nonzero exits as SSH failures.
+- Scope marketplace projection to real Codex entry points, leaving test fixtures and API-only
+  catalogs as ordinary payload files. Allow larger marketplace metadata independently of config limits.
+- Query installed plugins only during recovery, avoiding unrelated catalog growth.
+- Print push previews only after SSH cleanup succeeds.
+- Update Vitest to 4.1.11 to address GHSA-82fw-gwwq-j7x9 in development dependencies.
+
 ## [1.13.2] - 2026-08-11
 
 - Updated runtime and development dependencies, including the Bun type definitions and current
@@ -142,7 +158,8 @@ the `vX.Y.Z` form.
 
 - Initial ccm CLI for migrating Claude Code configuration.
 
-[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.2...HEAD
+[Unreleased]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.14.0...HEAD
+[1.14.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.2...v1.14.0
 [1.13.2]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.1...v1.13.2
 [1.13.1]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.13.0...v1.13.1
 [1.13.0]: https://github.com/ardasevinc/claude-code-migrate/compare/v1.12.0...v1.13.0
