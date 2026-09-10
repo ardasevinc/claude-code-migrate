@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -66,3 +67,6 @@ jobs:
             --head "$branch" \
             --title "chore: refresh Bun dependencies" \
             --body $'Automated Bun dependency refresh.\n\nCI must pass before merge.'
+
+          # Token-created PR events may require approval; dispatch the read-only CI explicitly.
+          gh workflow run ci.yml --ref "$branch"
