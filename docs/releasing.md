@@ -68,6 +68,9 @@ token-triggered events.
 - If npm already has the version with both exact tarball digests, the workflow skips publication
   and continues verification. A different digest fails closed because npm versions are immutable.
 - Registry verification must succeed before attestation or GitHub release creation.
+- npm may accept a publish while the package is still processing. Registry verification polls
+  every ten seconds for up to ten minutes of waiting before failing. If processing takes longer,
+  rerun the failed workflow after the version becomes available; keep the published tag unchanged.
 - GitHub release reruns replace the notes and clobber only the two managed assets: the exact
   tarball and `SHA256SUMS`.
 - Failed workflows are rerun from GitHub Actions. Never delete or move a published tag to retry.

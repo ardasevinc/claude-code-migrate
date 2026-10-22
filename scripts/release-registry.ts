@@ -88,8 +88,10 @@ export async function waitForPublishedRelease(
     readonly sleep?: (milliseconds: number) => Promise<void>;
   } = {},
 ): Promise<void> {
-  const attempts = options.attempts ?? 12;
-  const delayMs = options.delayMs ?? 5_000;
+  // npm can accept a publish before its processing makes the version readable.
+  // Allow ten minutes of polling waits while keeping caller overrides bounded.
+  const attempts = options.attempts ?? 61;
+  const delayMs = options.delayMs ?? 10_000;
   if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 120) {
     throw new Error("registry verification attempts are invalid");
   }

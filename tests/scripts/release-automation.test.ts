@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { gzipSync } from "node:zlib";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "vitest";
 import { prepareRelease } from "../../scripts/prepare-release.ts";
 import { decidePublication, waitForPublishedRelease } from "../../scripts/release-registry.ts";
@@ -10,8 +10,8 @@ import { smokePackage, smokeRegistryPackage } from "../../scripts/smoke-package.
 import {
   assertPackedContents,
   assertReleaseVersions,
-  changelogSection,
   type CommandRunner,
+  changelogSection,
   readTarEntries,
   verifyRelease,
 } from "../../scripts/verify-release.ts";
@@ -295,6 +295,54 @@ describe("release contract", () => {
       ),
     ).resolves.toBeUndefined();
     expect(sleeps).toBe(2);
+  });
+
+  test("waits for delayed npm processing beyond the former one-minute window", async () => {
+    const identity = {
+      name: "claude-code-migrate",
+      version: "1.14.3",
+      shasum: "a".repeat(40),
+      integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}`,
+    };
+    let elapsed = 0;
+    let lookups = 0;
+    await expect(
+      waitForPublishedRelease(identity, {
+        lookup: async () => {
+          lookups += 1;
+          return elapsed >= 90_000 ? identity : undefined;
+        },
+        sleep: async (milliseconds) => {
+          elapsed += milliseconds;
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(elapsed).toBe(90_000);
+    expect(lookups).toBe(10);
+  });
+
+  test("stops polling an unpublished version after ten minutes of waiting", async () => {
+    const identity = {
+      name: "claude-code-migrate",
+      version: "1.14.3",
+      shasum: "a".repeat(40),
+      integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}`,
+    };
+    let elapsed = 0;
+    let lookups = 0;
+    await expect(
+      waitForPublishedRelease(identity, {
+        lookup: async () => {
+          lookups += 1;
+          return undefined;
+        },
+        sleep: async (milliseconds) => {
+          elapsed += milliseconds;
+        },
+      }),
+    ).rejects.toThrow("before timeout");
+    expect(elapsed).toBe(600_000);
+    expect(lookups).toBe(61);
   });
 
   test("smokes the immutable registry name and version under an isolated home", async () => {
