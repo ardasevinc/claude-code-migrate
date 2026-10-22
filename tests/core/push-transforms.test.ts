@@ -35,6 +35,44 @@ function observation(
 }
 
 describe("pure push host transforms", () => {
+  it("probes Claude MCP executables and skips unavailable incoming servers without deleting target ones", async () => {
+    const inputs = {
+      claudeMcp: Buffer.from(
+        JSON.stringify({
+          mcpServers: {
+            xcode: { command: "xcrun", args: ["mcpbridge"] },
+            local: { command: "/Users/source/bin/tool" },
+            cloud: { type: "http", url: "https://example.test/mcp" },
+          },
+        }),
+      ),
+    };
+    expect(derivePushObservationQueries(inputs).commandNames).toEqual(
+      expect.arrayContaining(["xcrun", "tool"]),
+    );
+    const result = await transformPushInputs(
+      inputs,
+      observation({
+        commandPaths: new Map([
+          ["xcrun", null],
+          ["tool", "/home/target/bin/tool"],
+        ]),
+        captures: new Map([
+          ["claude-mcp", Buffer.from('{"mcpServers":{"existing":{"command":"keep"}}}')],
+        ]),
+      }),
+    );
+    const merged = JSON.parse(Buffer.from(result.claudeMcp ?? []).toString());
+    expect(merged.mcpServers).toEqual({
+      existing: { command: "keep" },
+      local: { command: "/home/target/bin/tool" },
+      cloud: { type: "http", url: "https://example.test/mcp" },
+    });
+    expect(result.warnings).toContain(
+      "Claude MCP xcode: command xcrun is unavailable on the target; incoming server skipped",
+    );
+  });
+
   it("disables unavailable runtime plugins without blocking portable config", async () => {
     const result = await transformPushInputs(
       {
@@ -184,6 +222,10 @@ command = "/Users/source/demo"
     expect(queries.commandNames).toEqual(expect.arrayContaining(["demo", "guard", "special"]));
     expect(queries.marketplaceNames).toEqual(["local"]);
     expect(queries.codexPluginList).toBe(true);
+    expect(queries.codexPluginScope).toEqual({
+      marketplaceNames: ["local"],
+      pluginIds: ["plugin@market"],
+    });
   });
 
   it("merges MCP strictly and adapts config, marketplaces, hooks, and trust from facts", async () => {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
-import { parse } from "smol-toml";
+import { parse, type TomlTable } from "smol-toml";
+import { editToml, isTomlTable } from "./toml-edit.ts";
 
 const PATH_PATTERN = /^(\/|\.\/|\.\.\/|~\/)/;
 
@@ -46,6 +47,8 @@ const EVENT_LABELS: Record<string, string> = {
   PreCompact: "pre_compact",
   PostCompact: "post_compact",
   SessionStart: "session_start",
+  SessionEnd: "session_end",
+  Interrupt: "interrupt",
   UserPromptSubmit: "user_prompt_submit",
   SubagentStart: "subagent_start",
   SubagentStop: "subagent_stop",
@@ -176,10 +179,25 @@ function canonicalize(value: unknown): unknown {
 function removeHookStateSection(rawConfig: string, key: string): string {
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const start = rawConfig.indexOf(header);
-  if (start === -1) return rawConfig;
+  if (start === -1)
+    return editToml(
+      rawConfig,
+      (document) => {
+        if (isTomlTable(document.hooks) && isTomlTable(document.hooks.state))
+          delete document.hooks.state[key];
+      },
+      rawConfig,
+    );
   const next = rawConfig.indexOf("\n[", start + header.length);
   const end = next === -1 ? rawConfig.length : next + 1;
-  return `${rawConfig.slice(0, start)}${rawConfig.slice(end)}`;
+  return editToml(
+    rawConfig,
+    (document) => {
+      if (isTomlTable(document.hooks) && isTomlTable(document.hooks.state))
+        delete document.hooks.state[key];
+    },
+    `${rawConfig.slice(0, start)}${rawConfig.slice(end)}`,
+  );
 }
 
 function appendHookStates(rawConfig: string, states: Map<string, HookState>): string {
@@ -192,5 +210,15 @@ function appendHookStates(rawConfig: string, states: Map<string, HookState>): st
     if (state.trusted_hash) content += `\ntrusted_hash = ${JSON.stringify(state.trusted_hash)}`;
   }
 
-  return `${content}\n`;
+  return editToml(
+    rawConfig,
+    (document) => {
+      if (!isTomlTable(document.hooks)) document.hooks = {};
+      const hooks = document.hooks as TomlTable;
+      if (!isTomlTable(hooks.state)) hooks.state = {};
+      const target = hooks.state as TomlTable;
+      for (const [key, state] of states) target[key] = { ...state };
+    },
+    `${content}\n`,
+  );
 }

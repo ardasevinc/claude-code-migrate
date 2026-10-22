@@ -187,6 +187,7 @@ export async function withPushPlan<T>(
       log.success(`Managed state observed (${seconds}s)`);
     }
     const planned = await planPush({
+      sourceHome: createRuntimeContext().home,
       files,
       host,
       providers,

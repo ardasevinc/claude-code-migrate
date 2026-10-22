@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile as writeFileFs } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile as writeFileFs,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -75,6 +83,113 @@ afterEach(async () => {
 });
 
 describe("collector multi-provider", () => {
+  it("collects explicitly selected config files linked elsewhere inside source HOME", async () => {
+    const store = join(rootDir, "dotfiles");
+    await mkdir(store);
+    const linked = [
+      ["claude", "settings.json", "{}"],
+      ["claude", "CLAUDE.md", "instructions"],
+      ["claude", "statusline.ts", "console.log('status')"],
+      ["codex", "AGENTS.md", "codex instructions"],
+    ];
+    for (const [provider, filename, content] of linked) {
+      const source = join(store, `${provider}-${filename}`);
+      const link = join(rootDir, `.${provider}`, filename as string);
+      await writeFixtureFile(source, content as string);
+      await rm(link, { force: true });
+      await symlink(source, link);
+    }
+    const files = await collectFiles({
+      providers: ["claude", "codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      quiet: true,
+      context: createRuntimeContext({ home: rootDir }),
+    });
+    for (const [provider, filename, content] of linked) {
+      const entry = files.find((file) => file.relativePath === `${provider}/${filename}`);
+      expect(entry?.sourcePath).toBe(await realpath(join(store, `${provider}-${filename}`)));
+      expect(entry?.isSymlink).toBe(true);
+      expect(await readFile(entry?.sourcePath as string, "utf8")).toBe(content);
+    }
+  });
+
+  it("does not extend config-file symlink allowance to directories, nested links, or secrets", async () => {
+    const external = join(rootDir, "dotfiles");
+    await mkdir(external);
+    await writeFixtureFile(join(external, "SKILL.md"), "outside skill");
+    await symlink(join(external, "SKILL.md"), join(rootDir, ".claude", "skills", "linked.md"));
+    await rm(join(rootDir, ".codex", "agents"), { recursive: true });
+    await symlink(external, join(rootDir, ".codex", "agents"));
+    await writeFixtureFile(join(rootDir, ".codex", "auth.json"), '{"token":"secret"}');
+    await rm(join(rootDir, ".claude", "settings.json"));
+    await symlink(join(rootDir, ".codex", "auth.json"), join(rootDir, ".claude", "settings.json"));
+    await writeFixtureFile(join(rootDir, ".claude", ".credentials.json"), "secret");
+    await symlink(
+      join(rootDir, ".claude", ".credentials.json"),
+      join(rootDir, ".claude", "statusline.ts"),
+    );
+    const files = await collectFiles({
+      providers: ["claude", "codex"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      quiet: true,
+      context: createRuntimeContext({ home: rootDir }),
+    });
+    const paths = files.map((file) => file.relativePath);
+    expect(paths).not.toContain("claude/skills/linked.md");
+    expect(paths).not.toContain("codex/agents/SKILL.md");
+    expect(paths).not.toContain("claude/settings.json");
+    expect(paths).not.toContain("claude/statusline.ts");
+  });
+
+  it("rejects a config link outside source HOME and secret aliases through another symlink", async () => {
+    const home = join(rootDir, "isolated-home");
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await mkdir(join(home, ".codex"));
+    await writeFixtureFile(join(rootDir, "outside-settings.json"), "{}");
+    await symlink(join(rootDir, "outside-settings.json"), join(home, ".claude", "settings.json"));
+    const secret = join(home, "secret-store.json");
+    await writeFixtureFile(secret, '{"token":"secret"}');
+    await symlink(secret, join(home, ".codex", "auth.json"));
+    await symlink(secret, join(home, ".claude", "CLAUDE.md"));
+    await symlink(join(home, ".codex"), join(home, ".claude", "statusline.ts"));
+    const files = await collectFiles({
+      providers: ["claude"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      quiet: true,
+      context: createRuntimeContext({ home }),
+    });
+    expect(files).toEqual([]);
+  });
+
+  it("collects optional authored Claude configuration directories", async () => {
+    const authored = [
+      "AGENTS.md",
+      "commands/review.md",
+      "rules/general.md",
+      "workflows/review.js",
+      "output-styles/concise.md",
+      "themes/custom.json",
+    ];
+    for (const relative of authored) {
+      const file = join(rootDir, ".claude", relative);
+      await mkdir(join(file, ".."), { recursive: true });
+      await writeFixtureFile(file, relative);
+    }
+    const files = await collectFiles({
+      providers: ["claude"],
+      includeClaudeSettingsLocal: false,
+      includeClaudeMcpConfig: false,
+      quiet: true,
+      context: createRuntimeContext({ home: rootDir }),
+    });
+    expect(files.map((file) => file.relativePath)).toEqual(
+      expect.arrayContaining(authored.map((relative) => `claude/${relative}`)),
+    );
+  });
+
   it("derives default paths from the provided runtime context per call", async () => {
     const firstHome = join(rootDir, "first-home");
     const secondHome = join(rootDir, "second-home");

@@ -526,6 +526,15 @@ def descend(root_fd, parts, create=False):
         raise
 
 
+def list_directory(fd):
+    # os.listdir(fd) starts at the descriptor's current directory position.
+    # In particular, a freshly populated Btrfs directory can yield an empty
+    # first listing until explicitly rewound, even when its offset reports 0.
+    # Keep the pinned descriptor and reset its cursor before every scan.
+    os.lseek(fd, 0, os.SEEK_SET)
+    return os.listdir(fd)
+
+
 def atomic_write(parent_fd, name, data, mode=0o600):
     if not safe_component(name):
         fail("unsafe filename")
@@ -847,7 +856,7 @@ def copy_typed_at(source_parent, source_name, target_parent, target_name, kind):
         try:
             if not same_object(source_stat, os.fstat(source)):
                 fail("snapshot changed while opening")
-            for name in sorted(os.listdir(source)):
+            for name in sorted(list_directory(source)):
                 check_cancelled()
                 if not safe_component(name):
                     fail("unsafe snapshot entry")
@@ -928,7 +937,7 @@ def prune_retained(home_fd, record):
     try:
         prefix = parts[-1] + ".backup-"
         candidates = []
-        for name in os.listdir(parent):
+        for name in list_directory(parent):
             if not name.startswith(prefix):
                 continue
             suffix = name[len(prefix):]
@@ -1071,7 +1080,7 @@ def expected_incremental_inventory(value):
 
 def inventory_incremental_tree(root_fd, prefix=""):
     result = []
-    for name in sorted(os.listdir(root_fd)):
+    for name in sorted(list_directory(root_fd)):
         check_cancelled()
         if not safe_component(name) or (not prefix and name == ".rsync-partial"):
             fail("unsafe incremental entry")
@@ -1116,6 +1125,28 @@ def open_private_staging_root(path):
     return root_fd
 
 
+def assert_incremental_inventory(actual, expected, message):
+    if actual == expected:
+        return
+    actual_by_path = {entry["path"]: entry for entry in actual}
+    expected_by_path = {entry["path"]: entry for entry in expected}
+    detail = "unknown difference"
+    for path in sorted(set(actual_by_path) | set(expected_by_path)):
+        observed = actual_by_path.get(path)
+        sealed = expected_by_path.get(path)
+        if observed == sealed:
+            continue
+        field = ("unexpected file" if sealed is None else "missing file" if observed is None
+                 else next((key for key in ("type", "mode", "size", "sha256")
+                            if observed.get(key) != sealed.get(key)), "metadata"))
+        # File bytes and digests are deliberately omitted. Limit and JSON-escape
+        # the path so one malformed entry cannot flood the protocol response.
+        detail = "%s at %s" % (field, json.dumps(path[:256], ensure_ascii=True))
+        break
+    fail("%s (expected %d files, observed %d; first difference: %s)" %
+         (message, len(expected), len(actual), detail))
+
+
 def import_incremental_tree(workspace_fd, home_fd, manifest):
     snapshot_id = manifest.get("snapshotId")
     incoming_path = manifest.get("incomingPath")
@@ -1135,15 +1166,15 @@ def import_incremental_tree(workspace_fd, home_fd, manifest):
     incoming_fd = descend(staging_fd, [source_kind, snapshot_id])
     published = False
     try:
-        if inventory_incremental_tree(incoming_fd) != expected:
-            fail("incremental snapshot does not match sealed inventory")
+        assert_incremental_inventory(inventory_incremental_tree(incoming_fd), expected,
+                                     "incremental snapshot does not match sealed inventory")
         os.mkdir("extract", 0o700, dir_fd=workspace_fd)
         extract_fd = descend(workspace_fd, ["extract"])
         try:
             snapshot_directory(incoming_fd, extract_fd)
             os.fsync(extract_fd)
-            if inventory_incremental_tree(extract_fd) != expected:
-                fail("imported incremental snapshot changed")
+            assert_incremental_inventory(inventory_incremental_tree(extract_fd), expected,
+                                         "imported incremental snapshot changed")
             if source_kind == "incoming":
                 publish_ready_snapshot(staging_fd, extract_fd, snapshot_id, expected)
                 published = True
@@ -1180,8 +1211,8 @@ def publish_ready_snapshot(staging_fd, extract_fd, snapshot_id, expected):
             try:
                 snapshot_directory(extract_fd, output)
                 os.fsync(output)
-                if inventory_incremental_tree(output) != expected:
-                    fail("ready incremental snapshot changed during publication")
+                assert_incremental_inventory(inventory_incremental_tree(output), expected,
+                                             "ready incremental snapshot changed during publication")
             finally:
                 os.close(output)
             os.rename(temporary, snapshot_id, src_dir_fd=ready, dst_dir_fd=ready)
@@ -1189,7 +1220,7 @@ def publish_ready_snapshot(staging_fd, extract_fd, snapshot_id, expected):
         elif not stat.S_ISDIR(existing.st_mode):
             fail("ready incremental snapshot has unsafe type")
         candidates = []
-        for name in os.listdir(ready):
+        for name in list_directory(ready):
             if len(name) != 64 or any(c not in "0123456789abcdef" for c in name):
                 continue
             info = os.stat(name, dir_fd=ready, follow_symlinks=False)
@@ -1262,7 +1293,7 @@ def snapshot(home_fd, parts, backups_fd, backup_name):
 
 
 def snapshot_directory(source_fd, destination_fd):
-    for name in sorted(os.listdir(source_fd)):
+    for name in sorted(list_directory(source_fd)):
         check_cancelled()
         if not safe_component(name): fail("unsafe live entry")
         st = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
@@ -1339,7 +1370,10 @@ def atomic_copy_sealed(source_parent, source_name, target_parent, target_name, e
             write_all(output, chunk)
         if size != expected["size"] or value.hexdigest() != expected["sha256"]:
             fail("sealed extracted file changed")
-        os.fchmod(output, expected["mode"])
+        # Inventory modes describe portable content (0644/0755), not an
+        # instruction to expose user configuration through an existing 0755
+        # provider directory. Keep installed credentials and scripts private.
+        os.fchmod(output, 0o700 if expected["mode"] & 0o111 else 0o600)
         os.fsync(output)
         os.close(output)
         output = None
@@ -1390,7 +1424,7 @@ def overlay_sealed_at(source_parent, source_name, logical, home_fd, target_parts
         try:
             if not same_object(source_stat, os.fstat(source)):
                 fail("sealed extracted directory changed")
-            names = sorted(os.listdir(source))
+            names = sorted(list_directory(source))
             prefix = logical + "/"
             expected_names = {path[len(prefix):].split("/", 1)[0]
                               for path in inventory if path.startswith(prefix)}
@@ -1430,7 +1464,7 @@ def remove_tree_at(parent, name, cancellable=True):
         try:
             if not same_object(st, os.fstat(child)):
                 fail("directory changed while removing")
-            for entry in os.listdir(child):
+            for entry in list_directory(child):
                 remove_tree_at(child, entry, cancellable=cancellable)
         finally:
             os.close(child)

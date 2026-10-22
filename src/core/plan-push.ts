@@ -69,6 +69,7 @@ import {
 import { type PushTransformInputs, transformPushInputs } from "./push-transforms.ts";
 
 export interface PlanPushInput {
+  readonly sourceHome?: string;
   readonly files: readonly FileEntry[];
   readonly host: string;
   readonly providers: readonly ProviderName[];
@@ -189,6 +190,7 @@ const warningCode = (warning: string) =>
 
 function transformInputs(bytes: ReadonlyMap<string, Uint8Array>): PushTransformInputs {
   return {
+    claudeSettings: bytes.get("claude/settings.json"),
     claudeMcp: bytes.get("claude/.mcp-config.json"),
     codexConfig: bytes.get("codex/config.toml"),
     codexHooks: bytes.get("codex/hooks.json"),
@@ -298,9 +300,12 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
   const decisionFiles: FileEntry[] = [];
   for (const file of files) {
     const isDecisionInput =
-      ["claude/.mcp-config.json", "codex/config.toml", "codex/hooks.json"].includes(
-        file.relativePath,
-      ) || marketplaceName(file.relativePath) !== undefined;
+      [
+        "claude/settings.json",
+        "claude/.mcp-config.json",
+        "codex/config.toml",
+        "codex/hooks.json",
+      ].includes(file.relativePath) || marketplaceName(file.relativePath) !== undefined;
     if (!isDecisionInput) continue;
     const limit = marketplaceName(file.relativePath) ? MAX_PLUGIN_CATALOG_BYTES : 4 * 1024 * 1024;
     if (file.mcpServersOnly === undefined && (await lstat(file.sourcePath)).size > limit)
@@ -372,9 +377,14 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     ...input.observation,
     facts: { ...input.observation.facts, marketplacePayloads: projectedMarkets },
   };
-  const automaticTransforms = await transformPushInputs(captures, transformObservation, {
-    ...(input.policyOverrides ?? {}),
-  });
+  const automaticTransforms = await transformPushInputs(
+    captures,
+    transformObservation,
+    {
+      ...(input.policyOverrides ?? {}),
+    },
+    input.sourceHome,
+  );
   const transformed = {
     ...automaticTransforms,
     codexConfig: applyResolvedCodexProfile(automaticTransforms.codexConfig, input.profile),
@@ -408,7 +418,11 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
       )
       .map((pluginId) => `plugin-unavailable:${pluginId}`),
   ];
-  let stagedIncoming = incoming;
+  let stagedIncoming = replaceTransformed(
+    incoming,
+    "claude/settings.json",
+    transformed.claudeSettings,
+  );
   stagedIncoming = replaceTransformed(
     stagedIncoming,
     "claude/.mcp-config.json",
@@ -763,6 +777,7 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     ],
     settings,
     adaptations: [
+      ...(transformed.adaptations ?? []),
       ...describeConfigChanges(captures.codexConfig ?? null, transformed.codexConfig).filter(
         (line) => !/^(Add|Update|Remove) plugin /.test(line),
       ),
@@ -850,6 +865,8 @@ export async function planPush(input: PlanPushInput): Promise<PlannedPush> {
     requestIdentity: pushObservationRequestIdentity(finalRequestBase),
   };
   const transformedBytes = new Map<string, Uint8Array>();
+  if (transformed.claudeSettings)
+    transformedBytes.set("claude/settings.json", transformed.claudeSettings);
   if (transformed.claudeMcp) transformedBytes.set("claude/.mcp-config.json", transformed.claudeMcp);
   if (transformed.codexConfig) transformedBytes.set("codex/config.toml", transformed.codexConfig);
   if (transformed.codexHooks) transformedBytes.set("codex/hooks.json", transformed.codexHooks);

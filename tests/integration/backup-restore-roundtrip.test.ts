@@ -3,6 +3,19 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createFakeMachine, runCcm } from "./harness/index.ts";
 
+const claudeAuthoredFiles = {
+  "CLAUDE.md": "Claude instructions\n",
+  "AGENTS.md": "Shared agent instructions\n",
+  "settings.json": "{}\n",
+  "agents/reviewer.md": "Review the code\n",
+  "skills/operator/SKILL.md": "Operate carefully\n",
+  "commands/review.md": "Review this change\n",
+  "rules/testing.md": "Verify your work\n",
+  "workflows/review.js": "export default async () => {};\n",
+  "output-styles/concise.md": "Keep it concise\n",
+  "themes/custom.json": "{}\n",
+};
+
 describe("real backup and restore product boundary", () => {
   it("round-trips managed state, excludes secrets, preserves unmanaged state, and is idempotent", async () => {
     const source = await createFakeMachine("ccm-roundtrip-source-");
@@ -12,7 +25,7 @@ describe("real backup and restore product boundary", () => {
       await seedTargetCanaries(target.home);
       const archive = join(source.root, "roundtrip.tar.gz");
 
-      const backedUp = await runCcm(["backup", "codex", archive], source);
+      const backedUp = await runCcm(["backup", archive], source);
       expect(backedUp.exitCode).toBe(0);
       expect(backedUp.stderr).toBe("");
 
@@ -34,6 +47,9 @@ describe("real backup and restore product boundary", () => {
           "shared/agents/skills/shared/SKILL.md",
         ]),
       );
+      expect(archivedPaths).toEqual(
+        expect.arrayContaining(Object.keys(claudeAuthoredFiles).map((file) => `claude/${file}`)),
+      );
       expect(archivedPaths).not.toEqual(
         expect.arrayContaining([
           "codex/auth.json",
@@ -46,9 +62,12 @@ describe("real backup and restore product boundary", () => {
       expect(verified).toMatchObject({ exitCode: 0, stderr: "" });
       expect(JSON.parse(verified.stdout)).toMatchObject({ valid: true, integrity: "verified" });
 
-      const restored = await runCcm(["restore", archive, "codex"], target);
+      const restored = await runCcm(["restore", archive], target);
       expect(restored).toMatchObject({ exitCode: 0, stderr: "" });
       expect(restored.stdout).toMatch(/Receipt: rcpt_[a-f0-9]{32}/);
+      for (const [file, contents] of Object.entries(claudeAuthoredFiles)) {
+        expect(await readFile(join(target.home, ".claude", file), "utf8")).toBe(contents);
+      }
       expect(await readFile(join(target.home, ".codex/config.toml"), "utf8")).toBe(
         'model = "gpt-5"\n',
       );
@@ -70,16 +89,21 @@ describe("real backup and restore product boundary", () => {
       await expect(access(join(target.home, ".codex/skills/.system/SECRET"))).rejects.toThrow();
 
       const backupsBefore = await backupNames(target.home);
-      const secondRestore = await runCcm(["restore", archive, "codex"], target);
+      const secondRestore = await runCcm(["restore", archive], target);
       expect(secondRestore).toMatchObject({ exitCode: 0, stdout: "", stderr: "" });
       expect(await backupNames(target.home)).toEqual(backupsBefore);
     } finally {
       await Promise.all([source.dispose(), target.dispose()]);
     }
-  });
+  }, 30_000);
 });
 
 async function seedSource(home: string): Promise<void> {
+  for (const [file, contents] of Object.entries(claudeAuthoredFiles)) {
+    const destination = join(home, ".claude", file);
+    await mkdir(join(destination, ".."), { recursive: true });
+    await writeFile(destination, contents);
+  }
   await Promise.all([
     mkdir(join(home, ".codex/rules"), { recursive: true }),
     mkdir(join(home, ".codex/agents"), { recursive: true }),

@@ -91,7 +91,16 @@ export function isAllowedManagedPath(path: string, directory: boolean): boolean 
         "settings.local.json",
         ".mcp-config.json",
       ],
-      new Set(["agents", "skills", "hooks"]),
+      new Set([
+        "agents",
+        "skills",
+        "hooks",
+        "commands",
+        "rules",
+        "workflows",
+        "output-styles",
+        "themes",
+      ]),
       directory,
     );
   }

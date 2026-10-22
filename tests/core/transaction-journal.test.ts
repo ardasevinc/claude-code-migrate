@@ -67,6 +67,22 @@ describe("transaction journals", () => {
     ).toMatchObject({ schemaVersion: 1, planId: "plan_legacy" });
   });
 
+  it.each([
+    "constructor",
+    "toString",
+    "__proto__",
+  ])("rejects inherited journal state %s", (state) => {
+    const journal = createTransactionJournal({
+      kind: "restore",
+      planId: "plan_state",
+      now: new Date("2026-07-12T12:00:00.000Z"),
+      members: [],
+    });
+    expect(() => parseTransactionJournal(JSON.stringify({ ...journal, state }))).toThrow(
+      "journal state is invalid",
+    );
+  });
+
   it("publishes private journals with revision CAS and strict round trips", async () => {
     const { context } = await fixture();
     const journal = createTransactionJournal({

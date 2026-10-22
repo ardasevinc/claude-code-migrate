@@ -26,7 +26,7 @@ Fetch `main` and tags, then pack exactly once:
 
 ```bash
 mkdir -p .release
-tarball=$(npm pack --pack-destination .release --silent)
+tarball=$(npm pack --ignore-scripts --pack-destination .release --silent)
 bun scripts/verify-release.ts --tag "v$(bun -p 'import p from "./package.json"; p.version')" \
   --main-ref origin/main --tarball ".release/$tarball"
 bun scripts/smoke-package.ts ".release/$tarball"

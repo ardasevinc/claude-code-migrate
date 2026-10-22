@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -212,6 +212,21 @@ describe("streaming archive reader", () => {
   ])("rejects %s paths", async (_label, names) => {
     const input = await archive(names.map((name) => ({ name, body: "x" })));
     await expect(verifyArchive(input.path)).rejects.toThrow(/Duplicate|collision/);
+  });
+
+  it.each([
+    ["codex/skills/demo", "codex/skills/demo/SKILL.md"],
+    ["codex/skills/demo/SKILL.md", "codex/skills/demo"],
+  ])("rejects a file that is also an ancestor directory (%s first)", async (first, second) => {
+    const input = await archive([
+      { name: first, body: "x" },
+      { name: second, body: "x" },
+    ]);
+    await expect(verifyArchive(input.path)).rejects.toThrow("file/directory path collision");
+    await expect(
+      verifyArchive(input.path, { extractTo: join(input.root, "extracted") }),
+    ).rejects.toThrow();
+    await expect(stat(join(input.root, "extracted"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each([

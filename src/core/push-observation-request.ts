@@ -23,6 +23,10 @@ function canonicalQueries(queries: PushObservationQueries): PushObservationQueri
     marketplaceNames: names(queries.marketplaceNames),
     sharedSkillNames: queries.sharedSkillNames === true,
     codexPluginList: queries.codexPluginList === true,
+    codexPluginScope: queries.codexPluginScope && {
+      marketplaceNames: names(queries.codexPluginScope.marketplaceNames) ?? [],
+      pluginIds: names(queries.codexPluginScope.pluginIds) ?? [],
+    },
   };
 }
 
@@ -43,6 +47,12 @@ export function pushObservationRequestIdentity(input: {
       marketplaceNames: queries.marketplaceNames ?? [],
       sharedSkillNames: queries.sharedSkillNames ?? false,
       codexPluginList: queries.codexPluginList ?? false,
+      codexPluginScope: queries.codexPluginScope
+        ? {
+            marketplaceNames: queries.codexPluginScope.marketplaceNames,
+            pluginIds: queries.codexPluginScope.pluginIds,
+          }
+        : null,
     },
   });
 }

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { parse } from "smol-toml";
+import { editToml, isTomlTable } from "./toml-edit.ts";
 
 export interface McpServer {
   command?: string;
@@ -172,7 +173,7 @@ function replaceCodexMcpCommand(
   const sectionMatch = rawConfig.match(sectionPattern);
 
   if (!sectionMatch) {
-    return rawConfig;
+    return rewriteMcpCommand(rawConfig, serverName, newCommand, rawConfig);
   }
 
   const [section, header = "", body = ""] = sectionMatch;
@@ -182,11 +183,30 @@ function replaceCodexMcpCommand(
   );
   const nextBody = body.replace(commandPattern, `$1${JSON.stringify(newCommand)}$2`);
 
-  if (nextBody === body) {
-    return rawConfig;
-  }
+  return rewriteMcpCommand(
+    rawConfig,
+    serverName,
+    newCommand,
+    rawConfig.replace(section, `${header}${nextBody}`),
+  );
+}
 
-  return rawConfig.replace(section, `${header}${nextBody}`);
+function rewriteMcpCommand(
+  rawConfig: string,
+  serverName: string,
+  newCommand: string,
+  candidate: string,
+): string {
+  return editToml(
+    rawConfig,
+    (document) => {
+      const servers = document.mcp_servers ?? document.mcpServers;
+      if (!isTomlTable(servers)) return;
+      const server = servers[serverName];
+      if (isTomlTable(server)) server.command = newCommand;
+    },
+    candidate,
+  );
 }
 
 function escapeRegExp(value: string): string {

@@ -45,6 +45,54 @@ async function expectSessionResidueRemoved(commands: readonly CommandLogEntry[])
 
 describe("planned remote push", () => {
   it.each([
+    "archive",
+    "rsync",
+  ] as const)("adapts Claude hook paths in the %s payload", async (transport) => {
+    const machine = await createFakeMachine("ccm-claude-home-path-");
+    try {
+      await mkdir(join(machine.home, ".claude/hooks"), { recursive: true });
+      await writeFile(join(machine.home, ".claude/hooks/session.sh"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o700,
+      });
+      await writeFile(
+        join(machine.home, ".claude/settings.json"),
+        JSON.stringify({
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command: `bash '${machine.home}/.claude/hooks/session.sh' session`,
+                  },
+                ],
+              },
+            ],
+          },
+          statusLine: { type: "command", command: "bun ~/.claude/statusline.ts" },
+        }),
+      );
+      const result = await runCcm(
+        ["push", "claude", "operator@example.test", "--transport", transport],
+        machine,
+      );
+      expect(result.exitCode, result.stderr).toBe(0);
+      const settings = JSON.parse(
+        await readFile(join(machine.remoteHome, ".claude/settings.json"), "utf8"),
+      );
+      expect(settings.hooks.SessionStart[0].hooks[0].command).toBe(
+        `bash '${machine.remoteHome}/.claude/hooks/session.sh' session`,
+      );
+      expect(settings.statusLine.command).toBe("bun ~/.claude/statusline.ts");
+      expect(
+        await readFile(join(machine.remoteHome, ".claude/hooks/session.sh"), "utf8"),
+      ).toContain("exit 0");
+    } finally {
+      await machine.dispose();
+    }
+  }, 30_000);
+
+  it.each([
     ["auto", false],
     ["auto", true],
     ["archive", false],

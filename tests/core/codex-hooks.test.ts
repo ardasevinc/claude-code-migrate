@@ -1,7 +1,37 @@
+import { parse } from "smol-toml";
 import { describe, expect, it } from "vitest";
 import { adaptCodexHooksForHost } from "../../src/core/codex-hooks.ts";
 
 describe("codex hooks", () => {
+  it.each([
+    ["SessionEnd", "session_end"],
+    ["Interrupt", "interrupt"],
+  ])("adapts %s commands and inline states using current Codex event names", async (event, label) => {
+    const key = `/source/hooks.json:${label}:0:0`;
+    const hooks = JSON.stringify({
+      hooks: {
+        [event as string]: [{ hooks: [{ type: "command", command: "/source/bin/guard" }] }],
+      },
+    });
+    const config = `hooks = { state = { ${JSON.stringify(key)} = { enabled = false, trusted_hash = "old" } } }`;
+    const result = await adaptCodexHooksForHost(
+      hooks,
+      config,
+      "/target/hooks.json",
+      async () => "/target/bin/guard",
+      { preserveVerifiedTrust: false },
+    );
+    expect(parse(result.configContent)).toEqual({
+      hooks: {
+        state: {
+          [`/target/hooks.json:${label}:0:0`]: { enabled: false },
+        },
+      },
+    });
+    expect(JSON.parse(result.hooksContent).hooks[event as string][0].hooks[0].command).toBe(
+      "/target/bin/guard",
+    );
+  });
   it("rewrites hook commands and preserves verified trust under the target key", async () => {
     const hooks = JSON.stringify({
       hooks: {

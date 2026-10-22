@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   detectCodexMcpPathWarnings,
@@ -22,6 +23,19 @@ afterEach(async () => {
 });
 
 describe("mcp helpers", () => {
+  it.each([
+    `[mcp_servers."demo.server"]\ncommand = '/Users/source/bin/server'\n`,
+    `mcp_servers."demo.server" = { command = '/Users/source/bin/server' }\n`,
+  ])("normalizes quoted and inline MCP commands", async (source) => {
+    const result = await normalizeCodexMcpCommandPaths(
+      source,
+      async () => "/home/target/bin/server",
+    );
+    expect(parse(result.content)).toEqual({
+      mcp_servers: { "demo.server": { command: "/home/target/bin/server" } },
+    });
+    expect(result.warnings).toEqual([]);
+  });
   it("merges mcp servers with incoming values winning", () => {
     const existing = JSON.stringify({
       theme: "dark",

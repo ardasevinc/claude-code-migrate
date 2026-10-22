@@ -1,3 +1,4 @@
+import { parse } from "smol-toml";
 import { describe, expect, it } from "vitest";
 import { collectionPathsForHome } from "../../src/config/providers.ts";
 import { fingerprint } from "../../src/core/migration-plan.ts";
@@ -14,6 +15,20 @@ const missingMcp = {
 } as const;
 
 describe("restore transforms", () => {
+  it.each([
+    'hooks.state.guard = { trusted_hash = "sha256:grant", enabled = true }',
+    '["hooks"."state"."guard"]\n"trusted_hash" = "sha256:grant"\nenabled = true',
+    "[hooks.state.guard]\n 'trusted_hash' = 'sha256:grant'\nenabled = true",
+  ])("removes trust structurally from valid TOML forms: %s", (source) => {
+    expect(parse(stripAllCodexHookTrust(source))).toEqual({
+      hooks: { state: { guard: { enabled: true } } },
+    });
+  });
+
+  it("does not edit hook-looking text inside a multiline string", () => {
+    const source = 'description = """\n[hooks.state.fake]\ntrusted_hash = "example"\n"""\n';
+    expect(stripAllCodexHookTrust(source)).toBe(source);
+  });
   it("strips every hook trust grant while preserving enabled state", () => {
     const config = `[hooks.state."/one:stop:0:0"]
 enabled = true

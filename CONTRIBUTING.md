@@ -14,6 +14,12 @@ bun install --frozen-lockfile
 bun run check
 ```
 
+Use `bun run <script>` for the repository checks (`lint`, `format`, `typecheck`, and `test`).
+For a focused check, use the installed executable, for example `bun run biome check src/core`
+or `bun run test -- tests/core/mcp.test.ts`; no package runner or download is needed.
+Dependency lifecycle scripts are disabled by the explicit empty `trustedDependencies` list.
+CI additionally uses `--ignore-scripts` to disable project lifecycle scripts too.
+
 Use `bun src/index.ts ...` to exercise the CLI from the checkout. Keep changes focused, follow the
 existing TypeScript patterns, and add regression coverage for behavior changes.
 

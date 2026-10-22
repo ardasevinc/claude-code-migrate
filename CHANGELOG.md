@@ -5,6 +5,32 @@ the `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [1.14.3] - 2026-10-22
+
+- Scope Codex plugin observations to relevant and registered local catalogs, avoiding unrelated
+  remote catalog stalls while preserving required remote lookups and legacy plugin aliases.
+
+- Rewind descriptor-based directory scans before reading, fixing false incremental snapshot
+  mismatches on Btrfs without weakening publication integrity checks.
+- Follow explicitly selected configuration-file symlinks into dotfiles checkouts within source
+  HOME without allowing nested skill links or known runtime/credential targets through.
+- Adapt Claude command-hook/status-line home paths during push. Probe Claude MCP executables,
+  use target binary paths, and skip unavailable incoming servers with a visible warning.
+
+- Include supported Claude user instructions, commands, rules, workflows, output styles, and
+  themes in backup, restore, and transfer instead of silently omitting them.
+- Validate Codex TOML rewrites against the parsed document, handling quoted/inline keys and
+  multiline values without leaving hook trust behind or corrupting configuration. Adapt
+  `SessionEnd` and `Interrupt` hooks alongside the existing events.
+- Keep installed configuration owner-private (`0600`, or `0700` for executables) in both
+  local restore and remote push, while retaining canonical archive modes.
+- Seal archive source identity before staging, reject replacement files and symlinks, bound
+  streaming reads, reject file/directory collisions, and validate manifest membership linearly.
+- Reject inherited object-property names as transaction states and disambiguate local upload
+  paths from SSH options and remote endpoints.
+- Patch vulnerable TOML parser and test-tool dependencies. Disable dependency lifecycle scripts
+  by default and keep CI/release installs and publication free of implicit lifecycle execution.
+
 ## [1.14.2] - 2026-09-10
 
 - Drain captured stdout and stderr concurrently through EOF, fixing remaining intermittent

@@ -28,9 +28,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - name: Refresh dependencies
-        run: bun update
+        run: bun update --ignore-scripts
       - name: Verify the refreshed lockfile
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Audit dependencies
         run: bun audit
       - name: Open update pull request when changed
