@@ -92,6 +92,7 @@ export async function scanArchive(
   let manifestBytes: Buffer | undefined;
   const files: ObservedFile[] = [];
   const paths = new Set<string>();
+  const pathTypes = new Map<string, "file" | "directory">();
   const portablePaths = new Map<string, string>();
   const parser = extract();
 
@@ -126,6 +127,12 @@ export async function scanArchive(
     const segments = path.split("/");
     for (let index = 1; index <= segments.length; index += 1) {
       const prefix = segments.slice(0, index).join("/");
+      const type = index === segments.length && !directory ? "file" : "directory";
+      const existingType = pathTypes.get(prefix);
+      if (existingType !== undefined && existingType !== type) {
+        throw new Error(`Archive file/directory path collision: ${path}`);
+      }
+      pathTypes.set(prefix, type);
       const portable = prefix.normalize("NFC").toLocaleLowerCase("en-US");
       const existing = portablePaths.get(portable);
       if (existing !== undefined && existing !== prefix) {
@@ -279,7 +286,8 @@ function verifyMembership(manifest: ArchiveManifest, files: ObservedFile[]): voi
       ? manifest.files.map((file) => file.path)
       : manifest.files.map((file) => file.relativePath);
   const actual = files.map((file) => file.path);
-  if (expected.length !== actual.length || expected.some((path) => !actual.includes(path))) {
+  const actualPaths = new Set(actual);
+  if (expected.length !== actual.length || expected.some((path) => !actualPaths.has(path))) {
     throw new Error("Archive members do not match the manifest");
   }
   const declaredProviders = new Set(manifest.providers);

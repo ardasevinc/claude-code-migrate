@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PROVIDERS, SHARED_MANAGED_ENTRIES } from "../config/providers.ts";
 import { CliError, ConnectivityError, ExecutionError } from "../errors.ts";
 import type { CodexPluginPolicy, FileEntry } from "../types/index.ts";
@@ -544,11 +544,14 @@ export function buildArchiveUploadArgs(
   useRsync: boolean,
   verbose = false,
 ): string[] {
+  // A local filename may start with '-' or contain ':'. Absolute paths keep
+  // scp/rsync from interpreting it as an option or another remote endpoint.
+  const localPath = resolve(archivePath);
   if (useRsync) {
-    return ["--partial", ...(verbose ? ["--progress"] : []), archivePath, remoteSpec];
+    return ["--partial", ...(verbose ? ["--progress"] : []), "--", localPath, remoteSpec];
   }
 
-  return [archivePath, remoteSpec];
+  return ["--", localPath, remoteSpec];
 }
 
 export function formatBytes(bytes: number): string {

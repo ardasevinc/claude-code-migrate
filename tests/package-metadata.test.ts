@@ -3,8 +3,8 @@ import packageMetadata from "../package.json";
 
 describe("package runtime contract", () => {
   test("pins the contributor runtime and declares the consumer floor", () => {
-    expect(packageMetadata.packageManager).toBe("bun@1.3.14");
-    expect(packageMetadata.engines).toEqual({ bun: ">=1.3.14" });
+    expect(packageMetadata.packageManager).toBe("bun@1.4.4");
+    expect(packageMetadata.engines).toEqual({ bun: ">=1.4.4" });
     expect(packageMetadata.os).toEqual(["darwin", "linux"]);
   });
 

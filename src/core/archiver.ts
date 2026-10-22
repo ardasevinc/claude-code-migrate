@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
+import { type BigIntStats, constants, createReadStream, createWriteStream } from "node:fs";
+import { chmod, link, lstat, mkdir, mkdtemp, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -29,38 +29,73 @@ const MANIFEST_FILENAME = ".ccm-manifest.json";
 async function stagePayloadFile(
   sourcePath: string,
   destPath: string,
+  expected: BigIntStats,
 ): Promise<{ size: number; mode: number; sha256: string }> {
-  const before = await stat(sourcePath, { bigint: true });
-  if (before.size > BigInt(MAX_ARCHIVE_FILE_BYTES)) {
-    throw new BlockedError(`Archive file size limit exceeded: ${JSON.stringify(sourcePath)}`);
-  }
-  const hash = createHash("sha256");
-  let size = 0;
-  const hasher = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      size += chunk.byteLength;
-      hash.update(chunk);
-      callback(null, chunk);
-    },
-  });
-  await pipeline(
-    createReadStream(sourcePath),
-    hasher,
-    createWriteStream(destPath, { mode: 0o600 }),
+  // Open once, without following a replacement symlink or blocking on a FIFO.
+  const handle = await open(
+    sourcePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
-  const after = await stat(sourcePath, { bigint: true });
-  if (
-    before.dev !== after.dev ||
-    before.ino !== after.ino ||
-    before.size !== after.size ||
-    before.mtimeNs !== after.mtimeNs ||
-    BigInt(size) !== after.size
-  ) {
-    throw new BlockedError(`Archive source changed while staging: ${JSON.stringify(sourcePath)}`);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) {
+      throw new BlockedError(`Archive source is not a regular file: ${JSON.stringify(sourcePath)}`);
+    }
+    if (
+      before.dev !== expected.dev ||
+      before.ino !== expected.ino ||
+      before.size !== expected.size ||
+      before.mode !== expected.mode ||
+      before.mtimeNs !== expected.mtimeNs ||
+      before.ctimeNs !== expected.ctimeNs
+    ) {
+      throw new BlockedError(
+        `Archive source changed before staging: ${JSON.stringify(sourcePath)}`,
+      );
+    }
+    if (before.size > BigInt(MAX_ARCHIVE_FILE_BYTES)) {
+      throw new BlockedError(`Archive file size limit exceeded: ${JSON.stringify(sourcePath)}`);
+    }
+    const hash = createHash("sha256");
+    let size = 0;
+    const hasher = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        size += chunk.byteLength;
+        if (size > MAX_ARCHIVE_FILE_BYTES || BigInt(size) > before.size) {
+          callback(
+            new BlockedError(`Archive source grew while staging: ${JSON.stringify(sourcePath)}`),
+          );
+          return;
+        }
+        hash.update(chunk);
+        callback(null, chunk);
+      },
+    });
+    await pipeline(
+      createReadStream(sourcePath, { fd: handle.fd, autoClose: false }),
+      hasher,
+      createWriteStream(destPath, { flags: "wx", mode: 0o600 }),
+    );
+    const after = await handle.stat({ bigint: true });
+    const lexical = await lstat(sourcePath, { bigint: true });
+    if (
+      !lexical.isFile() ||
+      lexical.dev !== before.dev ||
+      lexical.ino !== before.ino ||
+      before.size !== after.size ||
+      before.mode !== after.mode ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      BigInt(size) !== after.size
+    ) {
+      throw new BlockedError(`Archive source changed while staging: ${JSON.stringify(sourcePath)}`);
+    }
+    const mode = Number(after.mode & 0o111n) === 0 ? 0o644 : 0o755;
+    await chmod(destPath, mode);
+    return { size, mode, sha256: hash.digest("hex") };
+  } finally {
+    await handle.close();
   }
-  const mode = Number(after.mode & 0o111n) === 0 ? 0o644 : 0o755;
-  await chmod(destPath, mode);
-  return { size, mode, sha256: hash.digest("hex") };
 }
 
 export interface CreateArchiveOptions {
@@ -75,14 +110,16 @@ export async function createArchive(
   options: CreateArchiveOptions,
 ): Promise<string> {
   validateArchiveFileEntries(files);
+  const sourceStats = new Map<string, BigIntStats>();
   for (const file of files) {
     if (file.mcpServersOnly !== undefined) continue;
-    const sourceStat = await lstat(file.sourcePath).catch(() => null);
+    const sourceStat = await lstat(file.sourcePath, { bigint: true }).catch(() => null);
     if (!sourceStat?.isFile()) {
       throw new BlockedError(
         `Archive source is not a regular file: ${JSON.stringify(file.relativePath)}`,
       );
     }
+    sourceStats.set(file.sourcePath, sourceStat);
   }
   const archiveDir = dirname(outputPath);
   await mkdir(archiveDir, { recursive: true });
@@ -120,7 +157,11 @@ export async function createArchive(
           sha256: createHash("sha256").update(bytes).digest("hex"),
         });
       } else {
-        const staged = await stagePayloadFile(file.sourcePath, destPath);
+        const staged = await stagePayloadFile(
+          file.sourcePath,
+          destPath,
+          sourceStats.get(file.sourcePath) as BigIntStats,
+        );
         manifestFiles.push({ path: file.relativePath, type: "file", ...staged });
       }
     }

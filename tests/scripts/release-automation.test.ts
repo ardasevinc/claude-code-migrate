@@ -359,7 +359,7 @@ describe("release contract", () => {
 
   test("pins the pack-once trusted-publishing and release reconciliation workflow", async () => {
     const workflow = await readFile(join(process.cwd(), ".github/workflows/release.yml"), "utf8");
-    expect(workflow.match(/npm pack --pack-destination/g)).toHaveLength(1);
+    expect(workflow.match(/npm pack --ignore-scripts --pack-destination/g)).toHaveLength(1);
     expect(workflow).toContain("prepare:\n    name: Verify exact release artifact");
     expect(workflow).toContain("publish:\n    name: Publish exact release artifact");
     expect(workflow).toContain("environment: npm");

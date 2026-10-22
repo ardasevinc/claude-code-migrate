@@ -14,6 +14,7 @@ import type {
   RestoreObservationQueries,
 } from "./restore-observation.ts";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.ts";
+import { editToml, isTomlTable } from "./toml-edit.ts";
 
 interface ConfigPaths {
   notify?: string[];
@@ -43,7 +44,7 @@ export interface RestoreTransformResult {
 /** Removes only trust grants from Codex hook state tables, preserving all other state. */
 export function stripAllCodexHookTrust(rawConfig: string): string {
   let inHookState = false;
-  return rawConfig
+  const candidate = rawConfig
     .split(/(?<=\n)/)
     .filter((line) => {
       const header = line.match(/^\s*\[([^\]]+)]/);
@@ -51,6 +52,16 @@ export function stripAllCodexHookTrust(rawConfig: string): string {
       return !(inHookState && /^\s*trusted_hash\s*=/.test(line));
     })
     .join("");
+  return editToml(
+    rawConfig,
+    (document) => {
+      if (!isTomlTable(document.hooks) || !isTomlTable(document.hooks.state)) return;
+      for (const state of Object.values(document.hooks.state)) {
+        if (isTomlTable(state)) delete state.trusted_hash;
+      }
+    },
+    candidate,
+  );
 }
 
 function text(bytes: Uint8Array): string {

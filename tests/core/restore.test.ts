@@ -107,6 +107,10 @@ describe("restore helpers", () => {
       expect(await readFile(join(home, ".agents", "skills", "example", "SKILL.md"), "utf8")).toBe(
         "shared\n",
       );
+      expect(
+        (await lstat(join(home, ".agents", "skills", "example", "SKILL.md"))).mode & 0o777,
+      ).toBe(0o600);
+      expect((await lstat(join(home, ".agents"))).mode & 0o777).toBe(0o700);
       await expect(lstat(join(home, `.${provider}`))).rejects.toThrow();
     } finally {
       Object.assign(DEFAULT_COLLECTION_PATHS, originalPaths);

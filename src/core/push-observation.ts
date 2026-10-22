@@ -15,6 +15,7 @@ import {
   buildPluginObservationProgram,
   MAX_PLUGIN_CATALOG_BYTES,
   PLUGIN_CATALOG_TIMEOUT_SECONDS,
+  type PluginObservationScope,
 } from "./push-plugin-observation.ts";
 import { parseSshTarget } from "./ssh-target.ts";
 
@@ -36,6 +37,7 @@ export interface PushObservationQueries {
   readonly marketplaceNames?: readonly string[];
   readonly sharedSkillNames?: boolean;
   readonly codexPluginList?: boolean;
+  readonly codexPluginScope?: PluginObservationScope;
 }
 
 export type PushCaptureId = "claude-mcp" | "codex-config";
@@ -274,7 +276,7 @@ for x in ${encoded([...new Set(queries.captureIds ?? [])].sort())}; do i=$(dec "
 "$python_path" -I -c ${inventoryProgram} "$home" ${encoded(roots)}
 for x in ${encoded([...new Set(queries.marketplaceNames ?? [])].sort())}; do n=$(dec "$x"); v=false; [ -e "$home/.codex/.ccm/marketplaces/$n" ] || [ -L "$home/.codex/.ccm/marketplaces/$n" ] && v=true; emit MARKET "$x" "$v"; done
 ${queries.sharedSkillNames ? `if [ -d "$home/.agents/skills" ] && [ ! -L "$home/.agents/skills" ]; then for p in "$home/.agents/skills"/*; do [ -d "$p" ] && [ ! -L "$p" ] || continue; emit SKILL "$(printf '%s' "\${p##*/}"|enc)"; done; fi` : ":"}
-${queries.codexPluginList ? `if [ -z "$codex_path" ]; then emit PLUGINS missing; else "$python_path" -I -c ${q(buildPluginObservationProgram(MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES))} "$codex_path"; fi` : ":"}
+${queries.codexPluginList ? `if [ -z "$codex_path" ]; then emit PLUGINS missing; else "$python_path" -I -c ${q(buildPluginObservationProgram(MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES, PLUGIN_CATALOG_TIMEOUT_SECONDS, queries.codexPluginScope))} "$codex_path"; fi` : ":"}
 printf 'END\\n'`;
 }
 
@@ -541,6 +543,11 @@ export async function observeRemotePushTarget(input: {
   for (const n of [...(queries.commandNames ?? []), ...(queries.marketplaceNames ?? [])])
     if (n !== basename(n) || !/^[A-Za-z0-9._@+-]+$/.test(n))
       throw new Error(`Invalid observation name: ${JSON.stringify(n)}`);
+  for (const name of queries.codexPluginScope?.marketplaceNames ?? [])
+    if (!/^[A-Za-z0-9._+-]+$/.test(name)) throw new Error("Invalid plugin marketplace scope");
+  for (const id of queries.codexPluginScope?.pluginIds ?? [])
+    if (!/^[A-Za-z0-9._+-]+@[A-Za-z0-9._+-]+$/.test(id))
+      throw new Error("Invalid plugin identity scope");
   const probe = buildRemotePushObservationProbe(input.incoming, queries, input.inventoryRoots);
   const result = await (input.transport ?? defaultTransport).run(
     input.host,

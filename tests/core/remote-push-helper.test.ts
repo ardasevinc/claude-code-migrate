@@ -48,10 +48,15 @@ function sha(bytes: string | Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function archive(path: string, entries: Record<string, string>): Promise<string> {
+type ArchiveEntry = string | { body: string; mode: number };
+
+async function archive(path: string, entries: Record<string, ArchiveEntry>): Promise<string> {
   const tar = pack();
   const writing = pipeline(tar, createGzip(), createWriteStream(path));
-  for (const [name, body] of Object.entries(entries)) tar.entry({ name, mode: 0o644 }, body);
+  for (const [name, value] of Object.entries(entries)) {
+    const { body, mode } = typeof value === "string" ? { body: value, mode: 0o644 } : value;
+    tar.entry({ name, mode }, body);
+  }
   tar.finalize();
   await writing;
   return sha(await readFile(path));
@@ -82,7 +87,7 @@ async function replaceWithPaxArchive(
 
 type Action = Record<string, unknown> & { id: string; kind: string };
 
-async function fixture(actions: Action[], entries: Record<string, string> = {}) {
+async function fixture(actions: Action[], entries: Record<string, ArchiveEntry> = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ccm-remote-helper-test-")));
   roots.push(root);
   const home = join(root, "home");
@@ -230,6 +235,80 @@ afterEach(async () => {
 });
 
 describe("remote push helper", () => {
+  it("rewinds stale directory cursors before publishing and checking an incremental snapshot", async () => {
+    const f = await fixture([]);
+    const program = `
+import os,runpy,json
+m=runpy.run_path(${JSON.stringify(helper)})
+root=${JSON.stringify(f.root)}
+os.mkdir(root+'/staging');os.mkdir(root+'/extract')
+with open(root+'/extract/config','w') as out: out.write('payload')
+os.chmod(root+'/extract/config',0o644)
+staging=os.open(root+'/staging',os.O_RDONLY|os.O_DIRECTORY)
+extract=os.open(root+'/extract',os.O_RDONLY|os.O_DIRECTORY)
+expected=m['inventory_incremental_tree'](extract)
+original_listdir=os.listdir
+original_seek=os.lseek
+rewound=set()
+def seek(fd,offset,whence):
+    value=original_seek(fd,offset,whence)
+    if offset==0 and whence==os.SEEK_SET: rewound.add(fd)
+    return value
+def stale_listdir(fd):
+    # Reproduce Btrfs' empty first listing until the pinned fd is rewound.
+    if isinstance(fd,int):
+        if fd not in rewound: return []
+        rewound.remove(fd)
+    return original_listdir(fd)
+os.lseek=seek
+os.listdir=stale_listdir
+try:
+    m['publish_ready_snapshot'](staging,extract,'a'*64,expected)
+    ready=os.open(root+'/staging/ready/'+'a'*64,os.O_RDONLY|os.O_DIRECTORY)
+    actual=m['inventory_incremental_tree'](ready)
+    os.close(ready)
+    os.mkdir(root+'/backup')
+    backup=os.open(root+'/backup',os.O_RDONLY|os.O_DIRECTORY)
+    m['snapshot_directory'](extract,backup)
+    backup_actual=m['inventory_incremental_tree'](backup)
+    os.close(backup)
+    m['remove_tree_at'](staging,'ready')
+    print(json.dumps({'expected':len(expected),'actual':len(actual),'equal':expected==actual,
+                      'backupEqual':expected==backup_actual,'removed':not os.path.exists(root+'/staging/ready')}))
+finally:
+    os.listdir=original_listdir;os.lseek=original_seek
+    os.close(staging);os.close(extract)
+`;
+    const result = JSON.parse(execFileSync(python, ["-B", "-c", program], { encoding: "utf8" }));
+    expect(result).toEqual({
+      expected: 1,
+      actual: 1,
+      equal: true,
+      backupEqual: true,
+      removed: true,
+    });
+  });
+
+  it("reports bounded inventory mismatch metadata without file content or digests", () => {
+    const program = `
+import runpy,json
+m=runpy.run_path(${JSON.stringify(helper)})
+path='config\\n'+('x'*1000)
+sealed={'path':path,'type':'file','mode':420,'size':4,'sha256':'private-digest'}
+actual=dict(sealed,mode=384)
+try:
+    m['assert_incremental_inventory']([actual],[sealed],'publication changed')
+except m['Blocked'] as error:
+    print(json.dumps(str(error)))
+`;
+    const message = JSON.parse(execFileSync(python, ["-B", "-c", program], { encoding: "utf8" }));
+    expect(message).toContain("expected 1 files, observed 1");
+    expect(message).toContain('mode at "config\\n');
+    expect(message).not.toContain("private-digest");
+    expect(message).not.toContain("\n");
+    expect(message.length).toBeLessThan(400);
+  });
+
   it("requires canonical payloads and matching sealed checksums", async () => {
     const f = await fixture([], {});
     const noncanonical = Buffer.from(
@@ -458,6 +537,23 @@ describe("remote push helper", () => {
     expect(await lstat(join(dirname(target), sibling as string)).catch(() => null)).toBeNull();
     expect(invoke(session(f, "abort"))).toMatchObject({ code: 0, body: { status: "aborted" } });
     expect(invoke(session(f, "cleanup"))).toMatchObject({ code: 0, body: { status: "cleaned" } });
+  });
+
+  it.each([
+    0o644, 0o755,
+  ])("installs mode %o files privately in existing provider directories", async (mode) => {
+    const action = { id: "write-config", kind: "overlay-group", logicalGroup: "codex/auth.json" };
+    const f = await fixture([action], { "codex/auth.json": { body: "secret\n", mode } });
+    await mkdir(join(f.home, ".codex"), { mode: 0o755 });
+    await chmod(f.home, 0o755);
+    const target = join(f.home, ".codex", "auth.json");
+    await writeFile(target, "old secret\n", { mode: 0o600 });
+
+    expect(invoke(f.prepare)).toMatchObject({ code: 0 });
+    expect(invoke(session(f, "apply", { actionId: action.id }))).toMatchObject({ code: 0 });
+    expect(await readFile(target, "utf8")).toBe("secret\n");
+    expect((await lstat(target)).mode & 0o777).toBe(mode & 0o700);
+    expect((await lstat(join(f.home, ".codex"))).mode & 0o777).toBe(0o755);
   });
 
   it("never follows hostile parent or leaf symlinks outside HOME", async () => {

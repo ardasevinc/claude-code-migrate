@@ -25,8 +25,9 @@ local databases.
 
 Portable surfaces today:
 
-- Claude: `CLAUDE.md`, `settings.json`, `agents/`, native `skills/`, hooks/statusline/keybindings
-  when present, and selected MCP config from `~/.claude.json`
+- Claude: `CLAUDE.md`, `settings.json`, `agents/`, native `skills/`, and optional `AGENTS.md`,
+  `commands/`, `rules/`, `workflows/`, `output-styles/`, `themes/`, hooks/statusline/keybindings,
+  and selected MCP config from `~/.claude.json`
 - Codex: `config.toml`, `AGENTS.md`, `agents/`, `rules/`, `skills/` except `skills/.system`, and
   local Codex marketplace sources referenced from `config.toml`
 - Shared agents: `~/.agents/skills/`, `~/.agents/lazy-skills/`, and
@@ -35,8 +36,27 @@ Portable surfaces today:
 Runtime/local state is not migrated broadly. For example, `auth.json`, sessions, logs, SQLite state,
 plugin data, and local caches are preserved on the target.
 
+Claude's authored paths follow its [directory reference](https://code.claude.com/docs/en/claude-directory)
+and [skills compatibility documentation](https://code.claude.com/docs/en/skills). Project-local
+configuration stays with its project; installed Claude plugins and their caches are not copied.
+
 After pushing Codex, ccm normalizes path-based Codex MCP `command` values when the same binary is
 available on the remote `PATH`.
+
+Claude pushes adapt literal source-HOME prefixes in command hooks and status-line commands to
+HOME on the target. This is limited to known executable settings: arbitrary shell syntax,
+instruction prose, service sockets, and credentials are not guessed. Homes requiring unsupported
+shell escaping and remaining foreign home paths are reported for review.
+
+Claude MCP commands are checked against the target PATH. An unavailable incoming server is
+skipped with a warning, preserving a same-named target server; HTTP MCP servers remain portable.
+Path-based commands use the observed target executable. This does not install companion CLIs.
+
+Explicit configuration files (such as `CLAUDE.md`, `settings.json`, `statusline.ts`, and Codex
+`AGENTS.md`) may be symlinked into a dotfiles checkout inside the source HOME: ccm copies their
+resolved contents. Nested skill symlinks, directory links outside their roots, links outside HOME,
+and links to known runtime/credential files retain the stricter exclusions. Imported instruction
+files still need to exist on the target or be made self-contained with a host profile.
 
 ## Host-Aware Codex Plugins
 
@@ -75,7 +95,7 @@ bun add -g claude-code-migrate
 npm install -g claude-code-migrate
 ```
 
-ccm runs on Bun 1.3.14 or newer on macOS and Linux. npm is a supported installation channel;
+ccm runs on Bun 1.4.4 or newer on macOS and Linux. npm is a supported installation channel;
 using `npm install` does not make the CLI compatible with the Node.js runtime.
 
 For local development from a checkout:

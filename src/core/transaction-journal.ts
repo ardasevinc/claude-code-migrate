@@ -359,7 +359,7 @@ export function parseTransactionJournal(source: string): TransactionJournal {
     throw new Error("v2 journal receiptId is required and invalid");
   const receiptId =
     root.schemaVersion === 2 && typeof root.receiptId === "string" ? root.receiptId : undefined;
-  if (typeof root.state !== "string" || !(root.state in TRANSITIONS))
+  if (typeof root.state !== "string" || !Object.hasOwn(TRANSITIONS, root.state))
     throw new Error("journal state is invalid");
   if (!Array.isArray(root.members) || root.members.length > MAX_MEMBERS)
     throw new Error("journal members are invalid");

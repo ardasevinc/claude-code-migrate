@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import {
+  chmod,
   cp,
   lstat,
   mkdir,
@@ -48,9 +49,20 @@ async function exists(path: string): Promise<boolean> {
 }
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
-  await mkdir(targetDir, { recursive: true });
+  await mkdir(targetDir, { recursive: true, mode: 0o700 });
+  await makeExtractedTreePrivate(sourceDir);
   for (const entry of await readdir(sourceDir)) {
     await cp(join(sourceDir, entry), join(targetDir, entry), { recursive: true });
+  }
+}
+
+async function makeExtractedTreePrivate(path: string): Promise<void> {
+  const info = await lstat(path);
+  if (info.isDirectory()) {
+    await chmod(path, 0o700);
+    for (const entry of await readdir(path)) await makeExtractedTreePrivate(join(path, entry));
+  } else if (info.isFile()) {
+    await chmod(path, (info.mode & 0o111) === 0 ? 0o600 : 0o700);
   }
 }
 

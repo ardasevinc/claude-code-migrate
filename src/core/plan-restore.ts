@@ -753,7 +753,7 @@ async function buildRestoreTransactionMembers(
           const needsDirectory =
             spec.targetRef === "." ||
             [...spec.overlays, ...spec.symlinks].some((entry) => entry.path !== spec.logicalBase);
-          if (needsDirectory) await mkdir(stagePath, { recursive: true });
+          if (needsDirectory) await mkdir(stagePath, { recursive: true, mode: 0o700 });
         }
         await afterStageClone?.(stagePath, spec.logicalBase);
         for (const entry of spec.overlays) {
@@ -762,7 +762,7 @@ async function buildRestoreTransactionMembers(
           await ensureSafeStageParent(stagePath, target);
           await rm(target, { recursive: true, force: true });
           await cp(join(extraction, entry.path), target, { recursive: true, force: true });
-          await chmod(target, entry.mode);
+          await chmod(target, (entry.mode & 0o111) === 0 ? 0o600 : 0o700);
         }
         for (const entry of spec.symlinks) {
           const suffix = relative(spec.logicalBase, entry.path);

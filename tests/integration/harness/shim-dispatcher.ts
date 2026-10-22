@@ -20,9 +20,22 @@ switch (command) {
   case "codex":
     if (args.includes("--version") || args.includes("-v"))
       console.log(process.env.CCM_TEST_CODEX_VERSION ?? "codex-cli 0.0.0-fake");
-    else if (args[0] === "plugin" && args[1] === "list" && args.includes("--json"))
-      console.log(JSON.stringify({ installed: installedPlugins(), available: [] }));
-    else if (args[0] === "plugin" && args[1] === "add" && args[2]) {
+    else if (
+      args[0] === "plugin" &&
+      args[1] === "marketplace" &&
+      args[2] === "list" &&
+      args.includes("--json")
+    ) {
+      const names = new Set(installedPlugins().map((id) => id.slice(id.lastIndexOf("@") + 1)));
+      console.log(JSON.stringify({ marketplaces: [...names].sort().map((name) => ({ name })) }));
+    } else if (args[0] === "plugin" && args[1] === "list" && args.includes("--json")) {
+      const index = args.indexOf("--marketplace");
+      const marketplace = index === -1 ? undefined : args[index + 1];
+      const installed = installedPlugins()
+        .filter((id) => marketplace === undefined || id.endsWith(`@${marketplace}`))
+        .map((pluginId) => ({ pluginId }));
+      console.log(JSON.stringify({ installed, available: [] }));
+    } else if (args[0] === "plugin" && args[1] === "add" && args[2]) {
       const installed = new Set(installedPlugins());
       installed.add(args[2]);
       const path = installedPluginPath();

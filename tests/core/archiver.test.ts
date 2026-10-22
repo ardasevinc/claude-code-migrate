@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
   mkdir,
@@ -13,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import packageMetadata from "../../package.json" with { type: "json" };
 import {
   createArchive,
@@ -23,6 +24,11 @@ import {
 } from "../../src/core/archiver.ts";
 import type { FileEntry } from "../../src/types/index.ts";
 import { runCommand, shellQuote } from "../../src/utils/shell.ts";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
 
 describe("archiver", () => {
   async function fixture(rootDir: string, contents = "new\n"): Promise<FileEntry[]> {
@@ -189,7 +195,9 @@ describe("archiver", () => {
         join(import.meta.dirname, "../../src/core/archiver.ts"),
         "utf8",
       );
-      expect(implementation).toContain("createReadStream(sourcePath)");
+      expect(implementation).toContain(
+        "createReadStream(sourcePath, { fd: handle.fd, autoClose: false })",
+      );
       expect(implementation).not.toMatch(/readFile\((?:stagedPath|sourcePath)/);
     } finally {
       await rm(rootDir, { recursive: true, force: true });
@@ -271,6 +279,45 @@ describe("archiver", () => {
       ).rejects.toThrow("Archive source is not a regular file");
       expect((await readdir(rootDir)).some((name) => name.startsWith(".ccm-archive-"))).toBe(false);
     } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "symlink",
+    "regular file",
+  ])("rejects a source replaced with a %s after initial validation", async (replacement) => {
+    const rootDir = await mkdtemp(join(tmpdir(), "ccm-archive-source-race-"));
+    const sourcePath = join(rootDir, "source");
+    const secretPath = join(rootDir, "secret");
+    const outputPath = join(rootDir, "backup.tar.gz");
+    await writeFile(sourcePath, "original");
+    await writeFile(secretPath, "must not be archived");
+    const { lstat: originalLstat } =
+      await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    let replaced = false;
+    const spy = vi.mocked(fsPromises.lstat).mockImplementation(async (...args) => {
+      const result = await originalLstat(...args);
+      if (args[0] === sourcePath && !replaced) {
+        replaced = true;
+        await rm(sourcePath);
+        if (replacement === "symlink") await symlink(secretPath, sourcePath);
+        else await writeFile(sourcePath, "replacement bytes");
+      }
+      return result;
+    });
+    try {
+      await expect(
+        createArchive(
+          [{ sourcePath, relativePath: "codex/config.toml", isSymlink: false }],
+          outputPath,
+          { providers: ["codex"] },
+        ),
+      ).rejects.toThrow();
+      await expect(stat(outputPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(secretPath, "utf8")).toBe("must not be archived");
+    } finally {
+      spy.mockRestore();
       await rm(rootDir, { recursive: true, force: true });
     }
   });

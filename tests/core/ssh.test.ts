@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertUploadedArchiveDigest,
@@ -53,13 +54,22 @@ describe("ssh helpers", () => {
   it("gates archive upload progress behind verbose and falls back to scp", () => {
     expect(
       buildArchiveUploadArgs("/tmp/archive;touch nope", "host:/tmp/archive.tar.gz", true),
-    ).toEqual(["--partial", "/tmp/archive;touch nope", "host:/tmp/archive.tar.gz"]);
+    ).toEqual(["--partial", "--", "/tmp/archive;touch nope", "host:/tmp/archive.tar.gz"]);
     expect(
       buildArchiveUploadArgs("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", true, true),
     ).toContain("--progress");
     expect(
       buildArchiveUploadArgs("/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz", false),
-    ).toEqual(["/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz"]);
+    ).toEqual(["--", "/tmp/archive.tar.gz", "host:/tmp/archive.tar.gz"]);
+  });
+
+  it("keeps option-like and colon-containing archive names local", () => {
+    for (const name of ["-Smy-ssh", "otherhost:archive.tar.gz"]) {
+      for (const rsync of [true, false]) {
+        const args = buildArchiveUploadArgs(name, "host:/tmp/archive.tar.gz", rsync);
+        expect(args.slice(-3)).toEqual(["--", resolve(name), "host:/tmp/archive.tar.gz"]);
+      }
+    }
   });
 
   it("parses remote home when absolute", () => {

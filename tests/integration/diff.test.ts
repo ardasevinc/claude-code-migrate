@@ -62,6 +62,18 @@ describe("migration diff commands", () => {
       expect(diff.stdout.trim().split("\n")).toHaveLength(1);
       expectExactProjection(JSON.parse(dryRun.stdout) as PlanJson, JSON.parse(diff.stdout));
       expectExactProjection(JSON.parse(dryRun.stdout) as PlanJson, JSON.parse(bare.stdout));
+      const catalogCalls = (await readCommandLog(machine)).filter(
+        ({ command }) => command === "codex",
+      );
+      expect(
+        catalogCalls.some(({ args }) => args.join(" ") === "plugin marketplace list --json"),
+      ).toBe(true);
+      expect(
+        catalogCalls.some(
+          ({ args }) =>
+            args[0] === "plugin" && args[1] === "list" && !args.includes("--marketplace"),
+        ),
+      ).toBe(false);
       expect(await readFile(join(machine.remoteHome, ".codex/canary"), "utf8")).toBe(
         "REMOTE-CANARY\n",
       );

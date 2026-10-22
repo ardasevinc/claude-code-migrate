@@ -2,6 +2,7 @@ import { lstat, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse } from "smol-toml";
+import { editToml, isTomlTable } from "./toml-edit.ts";
 
 const LOCAL_PATH_PATTERN = /^(\/|\.\/|\.\.\/|~\/)/;
 const SAFE_MARKETPLACE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -199,7 +200,11 @@ export async function adaptCodexConfigForHost(
         (options.removeUnresolvedRelativePaths && isRelativeCodexPath(command))) &&
       !(await pathExists(command))
     ) {
-      const nextContent = removeTomlSectionTree(content, "mcp_servers", name);
+      const nextContent = removeTomlSectionTree(
+        content,
+        parsed.mcp_servers ? "mcp_servers" : "mcpServers",
+        name,
+      );
       if (nextContent === content) {
         warnings.push(`${name}: could not remove missing MCP command "${command}"`);
       } else {
@@ -251,7 +256,15 @@ function replaceCodexMarketplaceSource(
   const sectionMatch = rawConfig.match(sectionPattern);
 
   if (!sectionMatch) {
-    return rawConfig;
+    return editToml(
+      rawConfig,
+      (document) => {
+        if (!isTomlTable(document.marketplaces)) return;
+        const marketplace = document.marketplaces[marketplaceName];
+        if (isTomlTable(marketplace)) marketplace.source = newSource;
+      },
+      rawConfig,
+    );
   }
 
   const [section, header = "", body = ""] = sectionMatch;
@@ -261,16 +274,26 @@ function replaceCodexMarketplaceSource(
   );
   const nextBody = body.replace(sourcePattern, `$1${JSON.stringify(newSource)}$2`);
 
-  if (nextBody === body) {
-    return rawConfig;
-  }
-
-  return rawConfig.replace(section, `${header}${nextBody}`);
+  return editToml(
+    rawConfig,
+    (document) => {
+      if (!isTomlTable(document.marketplaces)) return;
+      const marketplace = document.marketplaces[marketplaceName];
+      if (isTomlTable(marketplace)) marketplace.source = newSource;
+    },
+    rawConfig.replace(section, `${header}${nextBody}`),
+  );
 }
 
 function removeTopLevelTomlAssignment(rawConfig: string, key: string): string {
   const assignmentPattern = new RegExp(`^${escapeRegExp(key)}\\s*=\\s*.*(?:\\n|$)`, "m");
-  return rawConfig.replace(assignmentPattern, "");
+  return editToml(
+    rawConfig,
+    (document) => {
+      delete document[key];
+    },
+    rawConfig.replace(assignmentPattern, ""),
+  );
 }
 
 function removeTomlSectionTree(rawConfig: string, tableName: string, sectionName: string): string {
@@ -278,7 +301,14 @@ function removeTomlSectionTree(rawConfig: string, tableName: string, sectionName
     `^\\[${escapeRegExp(tableName)}\\.(?:${tomlSectionNamePattern(sectionName)})(?:\\.[^\\]]+)?\\]\\n[\\s\\S]*?(?=^\\[[^\\n]+\\]|(?![\\s\\S]))`,
     "gm",
   );
-  return rawConfig.replace(sectionPattern, "");
+  return editToml(
+    rawConfig,
+    (document) => {
+      const table = document[tableName];
+      if (isTomlTable(table)) delete table[sectionName];
+    },
+    rawConfig.replace(sectionPattern, ""),
+  );
 }
 
 function tomlSectionNamePattern(value: string): string {

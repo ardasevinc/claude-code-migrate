@@ -1,4 +1,5 @@
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -130,6 +131,45 @@ describe("executePlannedRestore", () => {
       ]);
       const backup = (await readdir(state.home)).find((name) => name.startsWith(".codex.backup-"));
       expect(backup).toBeUndefined();
+    } finally {
+      await rm(state.root, { recursive: true, force: true });
+    }
+  });
+
+  it("installs private files and directories while preserving executable capability", async () => {
+    const state = await setup([
+      ["codex/AGENTS.md", "private configuration"],
+      ["codex/skills/tool/run.sh", "#!/bin/sh\nexit 0\n"],
+    ]);
+    try {
+      await rm(state.archivePath);
+      await chmod(join(state.root, "source-1"), 0o755);
+      await createArchive(
+        [
+          {
+            sourcePath: join(state.root, "source-0"),
+            relativePath: "codex/AGENTS.md",
+            isSymlink: false,
+          },
+          {
+            sourcePath: join(state.root, "source-1"),
+            relativePath: "codex/skills/tool/run.sh",
+            isSymlink: false,
+          },
+        ],
+        state.archivePath,
+        { providers: ["codex"] },
+      );
+      const planned = await planRestore({
+        archivePath: state.archivePath,
+        provider: "codex",
+        context: state.context,
+        paths: collectionPathsForHome(state.home),
+      });
+      await executePlannedRestore(planned);
+      expect((await lstat(join(state.home, ".codex/AGENTS.md"))).mode & 0o777).toBe(0o600);
+      expect((await lstat(join(state.home, ".codex/skills/tool/run.sh"))).mode & 0o777).toBe(0o700);
+      expect((await lstat(join(state.home, ".codex"))).mode & 0o777).toBe(0o700);
     } finally {
       await rm(state.root, { recursive: true, force: true });
     }

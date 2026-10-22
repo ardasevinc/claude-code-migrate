@@ -9,6 +9,16 @@ import {
 import type { FileEntry } from "../../src/types/index.ts";
 
 describe("prepared push observation request", () => {
+  it("binds canonical plugin scopes into the observation request identity", () => {
+    const identity = (pluginIds: string[]) =>
+      pushObservationRequestIdentity({
+        host: "host",
+        inventoryRoots: [],
+        queries: { codexPluginList: true, codexPluginScope: { marketplaceNames: [], pluginIds } },
+      });
+    expect(identity(["a@market", "b@market"])).toBe(identity(["b@market", "a@market", "a@market"]));
+    expect(identity(["a@market"])).not.toBe(identity(["b@market"]));
+  });
   it("derives canonical roots and queries before observing", async () => {
     const root = await mkdtemp(join(tmpdir(), "ccm-push-request-"));
     const file = async (relativePath: string, content = "x"): Promise<FileEntry> => {
@@ -35,6 +45,7 @@ describe("prepared push observation request", () => {
     ]);
     expect(request.queries.sharedSkillNames).toBe(true);
     expect(request.queries.codexPluginList).toBe(true);
+    expect(request.queries.codexPluginScope).toEqual({ marketplaceNames: [], pluginIds: [] });
     expect(request.queries.commandNames).toContain("codex");
     expect(request.queries.commandNames).toContain("python3");
     expect(request.requestIdentity).toBe(

@@ -6,6 +6,7 @@ import { MAX_PUSH_OBSERVATION_PLUGIN_LIST_BYTES } from "../../src/core/push-obse
 import {
   buildPluginObservationProgram,
   MAX_PLUGIN_CATALOG_BYTES,
+  type PluginObservationScope,
 } from "../../src/core/push-plugin-observation.ts";
 import { runProcess } from "../../src/utils/process.ts";
 
@@ -27,7 +28,88 @@ async function observe(raw: string, compactLimit = MAX_PUSH_OBSERVATION_PLUGIN_L
   });
 }
 
+async function observeScoped(
+  scope: PluginObservationScope,
+  catalogs: Record<string, string[]>,
+  registered: string[] = [],
+) {
+  const root = await mkdtemp(join(tmpdir(), "ccm-plugin-scopes-"));
+  roots.push(root);
+  const command = join(root, "codex");
+  const calls = join(root, "calls");
+  await writeFile(
+    command,
+    `#!/usr/bin/env python3
+import json,sys
+with open(${JSON.stringify(calls)},'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+catalogs=json.loads(${JSON.stringify(JSON.stringify(catalogs))})
+if sys.argv[1:3]==['plugin','marketplace']:
+ print(json.dumps({'marketplaces':[{'name':name} for name in ${JSON.stringify(registered)}]}))
+elif '--marketplace' in sys.argv:
+ name=sys.argv[sys.argv.index('--marketplace')+1]
+ if name not in catalogs: sys.exit(1)
+ print(json.dumps({'installed':[],'available':[{'pluginId':value} for value in catalogs[name]]}))
+else: sys.exit(1)
+`,
+    { mode: 0o755 },
+  );
+  const result = await runProcess(
+    "python3",
+    ["-I", "-c", buildPluginObservationProgram(4096, 2, scope), command],
+    { nothrow: true },
+  );
+  return {
+    result,
+    calls: (await readFile(calls, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line)),
+  };
+}
+
 describe("bounded plugin catalog normalization", () => {
+  it("observes config-only target runtime registrations without requesting the remote catalog", async () => {
+    const { result, calls } = await observeScoped(
+      { marketplaceNames: [], pluginIds: [] },
+      { "openai-bundled": ["browser@openai-bundled"] },
+      ["openai-bundled"],
+    );
+    expect(result.exitCode).toBe(0);
+    expect(calls).toEqual([
+      ["plugin", "marketplace", "list", "--json"],
+      ["plugin", "list", "--available", "--json", "--marketplace", "openai-bundled"],
+    ]);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("fetches the remote alias only when the requested local plugin is missing (%s)", async (missing) => {
+    const { result, calls } = await observeScoped(
+      { marketplaceNames: [], pluginIds: ["demo@openai-curated"] },
+      {
+        "openai-curated": missing ? [] : ["demo@openai-curated"],
+        "openai-curated-remote": ["demo@openai-curated-remote"],
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(calls.some((args: string[]) => args.includes("openai-curated-remote"))).toBe(missing);
+    const compact = JSON.parse(
+      Buffer.from(result.stdout.trim().split("\t")[2] as string, "base64").toString(),
+    );
+    expect(compact.available).toEqual([
+      { pluginId: missing ? "demo@openai-curated-remote" : "demo@openai-curated" },
+    ]);
+  });
+
+  it("does not substitute local state when an explicit remote catalog request fails", async () => {
+    const { result, calls } = await observeScoped(
+      { marketplaceNames: [], pluginIds: ["demo@openai-curated-remote"] },
+      {},
+    );
+    expect(result).toMatchObject({ exitCode: 0, stdout: "PLUGINS\tfailed\n" });
+    expect(calls.at(-1)).toContain("openai-curated-remote");
+  });
   it("handles 20,000 plugins and multi-megabyte metadata, deduplicating identities and ignoring new metadata fields", async () => {
     const available = Array.from({ length: 20_000 }, (_, i) => ({
       pluginId: `plugin-${i}@market`,

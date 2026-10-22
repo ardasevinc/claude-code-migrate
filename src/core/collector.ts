@@ -18,8 +18,24 @@ interface CollectContext {
   neverMigrate?: Set<string>;
   neverMigratePaths?: Set<string>;
   paths: CollectionPaths;
+  sourceHome?: string;
   visitedDirectories: Set<string>;
 }
+
+// Only directly enumerated configuration files may resolve outside a provider
+// directory. Directory roots and their descendants retain the stricter rule.
+const EXTERNAL_CONFIG_FILES: Record<ProviderName, ReadonlySet<string>> = {
+  claude: new Set([
+    "CLAUDE.md",
+    "AGENTS.md",
+    "settings.json",
+    "settings.local.json",
+    "statusline.ts",
+    "statusline.sh",
+    "keybindings.json",
+  ]),
+  codex: new Set(["config.toml", "AGENTS.md", "AGENTS.override.md", "hooks.json"]),
+};
 
 function validateRelativePath(path: string): void {
   const segments = path.split("/");
@@ -159,6 +175,33 @@ function shouldSkipResolvedSymlink(
   return shouldSkipCollectionPath(context, resolvedRelativePath);
 }
 
+async function allowedExternalConfigFile(
+  context: CollectContext,
+  resolvedPath: string,
+): Promise<boolean> {
+  if (!context.sourceHome || !(await lstat(resolvedPath)).isFile()) return false;
+  const home = await realpath(context.sourceHome);
+  if (!isInsidePath(resolvedPath, home)) return false;
+
+  // A symlink must not bypass exclusions by giving a runtime/credential file
+  // an allowlisted configuration filename in this or the other provider.
+  for (const providerName of ["claude", "codex"] as const) {
+    const base = getProviderBasePath(providerName, context.paths);
+    const provider = PROVIDERS[providerName];
+    const excludedPaths = [
+      ...provider.neverMigrate,
+      ...(provider.neverMigratePaths ?? []),
+      ...(providerName === "claude" ? [".credentials.json"] : []),
+    ];
+    for (const excluded of excludedPaths) {
+      const target = await realpath(join(base, excluded)).catch(() => null);
+      if (target && isInsidePath(resolvedPath, target)) return false;
+    }
+  }
+  const mcpState = await realpath(context.paths.claudeMcpConfigPath).catch(() => null);
+  return resolvedPath !== mcpState;
+}
+
 function pushEntry(
   entries: FileEntry[],
   context: CollectContext,
@@ -251,6 +294,7 @@ async function collectPath(
   fullPath: string,
   entries: FileEntry[],
   context: CollectContext,
+  allowExternalFile = false,
 ): Promise<void> {
   if (!(await exists(fullPath))) {
     return;
@@ -271,7 +315,11 @@ async function collectPath(
       return;
     }
 
-    if (shouldSkipResolvedSymlink(context, relativePath, resolvedPath)) {
+    if (
+      allowExternalFile
+        ? !(await allowedExternalConfigFile(context, resolvedPath))
+        : shouldSkipResolvedSymlink(context, relativePath, resolvedPath)
+    ) {
       return;
     }
 
@@ -342,6 +390,7 @@ async function collectProviderFiles(
   providerName: ProviderName,
   options: CollectorOptions,
   paths: CollectionPaths,
+  sourceHome: string,
 ): Promise<FileEntry[]> {
   const provider = PROVIDERS[providerName];
   const basePath = getProviderBasePath(providerName, paths);
@@ -359,6 +408,7 @@ async function collectProviderFiles(
     neverMigrate: new Set(provider.neverMigrate),
     neverMigratePaths: new Set(provider.neverMigratePaths ?? []),
     paths,
+    sourceHome,
     visitedDirectories: new Set(),
   };
 
@@ -372,20 +422,20 @@ async function collectProviderFiles(
       continue;
     }
 
-    await collectPath(fullPath, entries, context);
+    await collectPath(fullPath, entries, context, EXTERNAL_CONFIG_FILES[providerName].has(item));
   }
 
   for (const item of provider.includeIfExists) {
     const fullPath = join(basePath, item);
     if (await exists(fullPath)) {
-      await collectPath(fullPath, entries, context);
+      await collectPath(fullPath, entries, context, EXTERNAL_CONFIG_FILES[providerName].has(item));
     }
   }
 
   if (providerName === "claude") {
     if (options.includeClaudeSettingsLocal) {
       const settingsLocalPath = join(basePath, "settings.local.json");
-      await collectPath(settingsLocalPath, entries, context);
+      await collectPath(settingsLocalPath, entries, context, true);
     }
 
     if (options.includeClaudeMcpConfig && (await exists(paths.claudeMcpConfigPath))) {
@@ -522,7 +572,7 @@ export async function collectFiles(options: CollectorOptions): Promise<FileEntry
   const entries: FileEntry[] = [];
 
   for (const providerName of options.providers) {
-    const providerEntries = await collectProviderFiles(providerName, options, paths);
+    const providerEntries = await collectProviderFiles(providerName, options, paths, context.home);
     entries.push(...providerEntries);
   }
 

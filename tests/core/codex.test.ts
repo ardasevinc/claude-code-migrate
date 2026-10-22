@@ -1,12 +1,40 @@
+import { parse } from "smol-toml";
 import { describe, expect, it } from "vitest";
 import {
   adaptCodexConfigForHost,
-  getConfiguredCodexPluginNames,
   getCodexLocalMarketplaceSources,
+  getConfiguredCodexPluginNames,
   rewriteCodexMarketplaceSources,
 } from "../../src/core/codex.ts";
 
 describe("codex helpers", () => {
+  it("removes a multiline notify assignment without corrupting TOML", async () => {
+    const source = 'notify = [\n "/Users/source/bin/notify",\n "turn-ended",\n]\nmodel = "keep"\n';
+    const result = await adaptCodexConfigForHost(source, async () => false);
+    expect(parse(result.content)).toEqual({ model: "keep" });
+  });
+
+  it("removes a quoted inline MCP table while preserving unrelated state", async () => {
+    const source = `mcp_servers = { "local.server" = { command = '/Users/source/bin/server' } }
+model = "keep"
+`;
+    const result = await adaptCodexConfigForHost(source, async () => false);
+    expect(parse(result.content, { integersAsBigInt: "asNeeded" })).toEqual({
+      mcp_servers: {},
+      model: "keep",
+    });
+  });
+
+  it("rewrites a literal-string inline marketplace source", async () => {
+    const result = await rewriteCodexMarketplaceSources(
+      "marketplaces.local = { source_type = 'local', source = '/Users/source/market' }\n",
+      async () => "/home/target/market",
+    );
+    expect(parse(result.content)).toEqual({
+      marketplaces: { local: { source_type: "local", source: "/home/target/market" } },
+    });
+    expect(result.warnings).toEqual([]);
+  });
   it("lists enabled configured plugins for one marketplace", () => {
     expect(
       getConfiguredCodexPluginNames(
