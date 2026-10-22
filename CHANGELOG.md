@@ -7,6 +7,9 @@ the `vX.Y.Z` form.
 
 ## [1.14.3] - 2026-10-22
 
+- Require Bun 1.4.4 or newer and update CI/release runtimes to include the eMudhra
+  compromised-certificate key blocklist.
+
 - Scope Codex plugin observations to relevant and registered local catalogs, avoiding unrelated
   remote catalog stalls while preserving required remote lookups and legacy plugin aliases.
 

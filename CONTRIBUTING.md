@@ -5,7 +5,7 @@ runtime.
 
 ## Development setup
 
-Install Bun 1.3.14, then:
+Install Bun 1.4.4, then:
 
 ```bash
 git clone https://github.com/ardasevinc/claude-code-migrate.git

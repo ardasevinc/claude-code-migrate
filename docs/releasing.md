@@ -6,14 +6,14 @@ both `dist.integrity` and `dist.shasum`, and attaches the same artifact to the G
 
 ## Runtime and version contract
 
-- Use Bun 1.3.14, the version pinned in `packageManager` and CI.
+- Use Bun 1.4.4, the version pinned in `packageManager` and CI.
 - Release tags are `vX.Y.Z`; `package.json`, CLI `--version`, and the changelog section use `X.Y.Z`.
 - The release commit must be on `main`.
 - npm is the installation channel. The installed CLI still runs with Bun.
 
 ## Prepare
 
-1. Update `package.json` to the release version and refresh `bun.lock` with Bun 1.3.14.
+1. Update `package.json` to the release version and refresh `bun.lock` with Bun 1.4.4.
 2. Replace the changelog's Unreleased content with a dated `## [X.Y.Z] - YYYY-MM-DD` section and
    restore an empty Unreleased section above it.
 3. Run `bun install --frozen-lockfile`, `bun audit`, and `bun run check`.
